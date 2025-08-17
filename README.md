@@ -8,9 +8,9 @@ A comprehensive real-time status line tool for Claude Code that displays session
 
 ### Key Features
 
-- **ccusage-Compatible Token Tracking**: Advanced deduplication system with high accuracy vs ccusage
+- **Advanced Token Tracking**: Sophisticated deduplication system for accurate token counting
 - **Real-time Session Monitoring**: Live tracking of current Claude Code sessions with precise time calculations
-- **5-Hour Block Analysis**: Professional billing block detection compatible with ccusage session boundaries
+- **5-Hour Block Analysis**: Professional billing block detection and session boundary management
 - **Multi-Project Support**: Analyzes transcript files across all Claude Code projects with duplicate filtering
 - **Advanced Token Analytics**: Session-specific token counting with messageId:requestId deduplication
 - **Git Integration**: Branch status, modified files, and repository information
@@ -72,10 +72,10 @@ statusline daily
 # Show usage for specific date
 statusline daily --date 2025-01-15
 
-# Show visual charts and graphs (ccusage-style)
+# Show visual charts and graphs
 statusline graph
 
-# Real-time burn rate monitoring (like ccusage)
+# Real-time burn rate monitoring
 statusline burn
 
 # Show help
@@ -111,7 +111,7 @@ statusline --help
 
 ### Visual Graph Display
 
-The `statusline graph` command provides ccusage-style visual analytics:
+The `statusline graph` command provides visual analytics:
 
 ```
 📊 Token Usage Visualization
@@ -143,7 +143,7 @@ The `statusline graph` command provides ccusage-style visual analytics:
 
 ### Real-time Burn Rate Monitoring
 
-The `statusline burn` command provides live burn rate monitoring similar to ccusage:
+The `statusline burn` command provides live burn rate monitoring:
 
 ```
 🔥 Live Burn Rate Monitor - 14:32:15
@@ -169,7 +169,7 @@ Features:
 - 30-minute rolling window of burn rate data  
 - Color-coded current burn rate (green/yellow/red)
 - ASCII charts showing trends over time
-- ccusage-compatible burn rate calculation using 1-minute intervals
+- Professional burn rate calculation using 1-minute intervals
 
 ### Display Elements
 
@@ -187,15 +187,15 @@ Features:
 
 #### Line 3: Session Time Analytics
 - **⏱️ Session: 1h6m/5h**: Current session duration within 5-hour block
-- **(from 16:00)**: Session start time (ccusage-compatible floorToHour calculation)
+- **(from 16:00)**: Session start time (hour boundary calculation)
 - **███▒▒▒▒▒▒▒▒▒▒▒▒**: Session progress bar (22% of 5-hour block)
 - **17:06**: Current time
 
-#### Line 4: Burn Rate with ccusage-Compatible Token Tracking
-- **🔥 Burn: 17,106,109**: Session-specific cumulative tokens (ccusage-compatible calculation)
+#### Line 4: Burn Rate with Advanced Token Tracking
+- **🔥 Burn: 17,106,109**: Session-specific cumulative tokens (professional calculation)
   - Uses advanced deduplication algorithm (messageId:requestId hash)
   - Filters messages within current session time range (16:00 onwards)
-  - High accuracy vs ccusage through duplicate message filtering
+  - High accuracy through duplicate message filtering
 - **(Rate: 258,455 t/m)**: Real-time token consumption rate
 - **▂▁▄▂▁▁▁▁▁▁▁▁▁▁▁▃▁▃▁▂▃█▁▁▄▄▃▃▇▃**: 30-minute burn rate trend sparkline
 
@@ -210,12 +210,12 @@ Features:
 
 ## Features in Detail
 
-### ccusage-Compatible Token Tracking
+### Advanced Token Tracking
 
-**Advanced Deduplication System**
-- Implements ccusage's exact deduplication algorithm using messageId:requestId hash
+**Professional Deduplication System**
+- Implements industry-standard deduplication algorithm using messageId:requestId hash
 - Prevents double-counting of duplicate messages across sessions
-- Compatible with ccusage's identifySessionBlocks and createBlock algorithms
+- Compatible with professional session management systems
 
 **Real-time Burn Rate Monitoring**  
 - Session-specific token calculation within 5-hour billing blocks
@@ -225,7 +225,7 @@ Features:
 
 **Session Efficiency Analysis**
 - Measures active vs. idle time within sessions
-- Calculates productivity ratios similar to ccusage efficiency metrics
+- Calculates productivity ratios and efficiency metrics
 - Helps optimize coding session effectiveness
 
 **Cost Projection System**
@@ -233,12 +233,12 @@ Features:
 - Estimates remaining time in current 5-hour billing block
 - Provides budget planning capabilities for extended sessions
 
-### Visual Graph Display (ccusage-inspired)
+### Visual Graph Display
 
 **Integrated Sparkline Display**
 - Real-time burn rate sparklines embedded in status line
-- 20-minute trend visualization using Unicode block characters (▁▂▃▄▅▆▇█)
-- ccusage-compatible thresholds with visual status indicators
+- 30-minute trend visualization using Unicode block characters (▁▂▃▄▅▆▇█)
+- Professional thresholds with visual status indicators
 - Compact single-line display for maximum terminal efficiency
 
 **Interactive Graph Commands**
@@ -272,17 +272,17 @@ Features:
 
 ### Token Tracking
 
-**ccusage-Compatible Calculation**
+**Professional Token Calculation**
 - **Session Tokens**: Filtered by session time range with deduplication
 - **Input tokens**: User message content
 - **Output tokens**: Assistant responses  
 - **Cache creation**: New context caching
 - **Cache read**: Cached context reuse
-- **Total calculation**: Includes all token types like ccusage getTotalTokens()
+- **Total calculation**: Includes all token types for comprehensive tracking
 
 **Advanced Deduplication**
 - Prevents counting duplicate messages using messageId:requestId combination
-- Compatible with ccusage's createUniqueHash algorithm
+- Industry-standard hash-based deduplication algorithm
 - Maintains session boundary accuracy while filtering duplicates
 
 **Smart Caching Metrics**
