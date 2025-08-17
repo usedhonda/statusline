@@ -19,31 +19,31 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 
 # This application uses TWO completely separate token calculation systems:
 
-# 🏢 COMPACT LINE SYSTEM (5-Hour Billing Blocks)
-# ============================================
-# Purpose: Tracks cumulative tokens across ENTIRE 5-hour billing periods
-# Data Source: ALL messages from block start time (e.g., 11:00) to current time
-# Scope: Multiple sessions, multiple conversations within the billing block  
+# 🗜️ COMPACT LINE SYSTEM (Conversation Compaction)
+# ==============================================
+# Purpose: Tracks current conversation progress toward compaction threshold
+# Data Source: Current conversation tokens (until 160K compaction limit)
+# Scope: Single conversation, monitors compression timing
 # Calculation: block_stats['total_tokens'] from detect_five_hour_blocks()
 # Display: 🪙 Compact line (Line 2) - "118.1K/160.0K ████████▒▒▒▒ 74%"
-# Range: Can be millions of tokens (accumulates across entire 5h period)
-# Reset Point: Every 5 hours (11:00, 16:00, 21:00, etc.)
+# Range: 0-200K tokens (until conversation gets compressed)
+# Reset Point: When conversation gets compacted/compressed
 
-# 📊 SESSION LINE SYSTEM (Individual Session Tracking)  
-# =================================================
-# Purpose: Tracks tokens within the CURRENT session/conversation only
-# Data Source: Messages from session start (same time as Session line) to now
-# Scope: Single session, single conversation thread
-# Calculation: calculate_tokens_since_time() with session start time
-# Display: 🔥 Burn line (Line 4) - "17,106,109 (Rate: 258,455 t/m)"
-# Range: Typically 50K-200K tokens (single session scope)
-# Reset Point: Each new session/conversation
+# 🕐 5-HOUR BILLING WINDOW SYSTEM (Claude Code Official)
+# ===================================================
+# Purpose: Tracks Claude Code's official 5-hour billing periods (Pro/Max plans)
+# Data Source: Messages within 5-hour billing windows
+# Scope: Official Claude Code billing period tracking
+# Calculation: calculate_tokens_since_time() with 5-hour window start
+# Display: ⏱️ Session line (Line 3) + 🔥 Burn line (Line 4)
+# Range: 5-hour billing window scope with real-time burn rate
+# Reset Point: Every 5 hours per Claude Code's official usage limits
 
 # ⚠️  CRITICAL RULES:
-# 1. NEVER use session tokens for compact line calculations
-# 2. NEVER use block tokens for burn rate calculations  
-# 3. These systems track DIFFERENT time periods and DIFFERENT scopes
-# 4. Block = billing period (5h), Session = conversation period (~1-2h)
+# 1. COMPACT = conversation compaction monitoring (160K threshold)
+# 2. SESSION/BURN = Claude Code's 5-hour billing window tracking
+# 3. These track DIFFERENT concepts: compression vs billing periods
+# 4. Compact = compression timing, Session = official billing window
 
 # 🚨 ABSOLUTE RULE: DO NOT MODIFY COMPACT LINE CODE 🚨
 # The 🪙 Compact line implementation must remain exactly as is.
@@ -66,7 +66,7 @@ class Colors:
 def get_total_tokens(usage_data):
     """Calculate total tokens from usage data (UNIVERSAL HELPER)
     
-    Used by BOTH compact line and session line systems.
+    Used by session/burn line systems for 5-hour billing window tracking.
     Sums all token types: input + output + cache_creation + cache_read
     
     Args:
@@ -517,16 +517,19 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """🏢 COMPACT LINE SYSTEM: Detect 5-hour billing blocks
+    """🕐 5-HOUR BILLING WINDOW: Detect Claude Code's official billing periods
     
-    Creates billing blocks for the compact line display.
-    Each block represents a 5-hour billing period with cumulative token totals.
+    Creates 5-hour billing windows as per Claude Code's official usage limits.
+    These blocks track the official Pro/Max plan 5-hour reset periods.
+    
+    Primarily used by session/burn lines for Claude Code's 5-hour billing window tracking.
+    Compact line uses different logic for conversation compaction monitoring.
     
     Args:
         all_messages: All messages across all sessions/projects
-        block_duration_hours: Block duration (default: 5 hours)
+        block_duration_hours: Block duration (default: 5 hours per Claude Code spec)
     Returns:
-        List of blocks with cumulative statistics for compact line
+        List of 5-hour billing blocks with statistics
     """
     if not all_messages:
         return []
@@ -652,15 +655,16 @@ def find_current_session_block(blocks, target_session_id):
     return None
 
 def calculate_block_statistics(block):
-    """🏢 COMPACT LINE SYSTEM: Calculate block statistics for compact line
+    """🕐 5-HOUR BILLING WINDOW: Calculate statistics for billing window
     
-    Processes a 5-hour billing block to generate cumulative token totals
-    for the compact line display. These are BLOCK totals, not session totals.
+    Processes a 5-hour billing window to generate cumulative statistics.
+    Used by session/burn lines for 5-hour billing window statistics.
+    Compact line uses separate conversation compaction logic.
     
     Args:
-        block: 5-hour block from detect_five_hour_blocks()
+        block: 5-hour billing window from detect_five_hour_blocks()
     Returns:
-        dict: Block statistics including total_tokens for compact line
+        dict: Window statistics including total_tokens (used differently by each system)
     """
     if not block or not block['messages']:
         return None
@@ -998,7 +1002,7 @@ def main():
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
                     message_count = user_messages + assistant_messages
         
-        # Calculate percentage for Compact display (use 5-hour block tokens)
+        # Calculate percentage for Compact display (use conversation compaction tokens)
         percentage = min(100, round((total_tokens / COMPACTION_THRESHOLD) * 100))
         
         # Get additional info
@@ -1074,12 +1078,12 @@ def main():
         # ═══════════════════════════════════════════════════════════════════
         # 🚨 COMPACT LINE CODE - PROTECTED SECTION - DO NOT MODIFY 🚨
         # ═══════════════════════════════════════════════════════════════════
-        # 🏢 COMPACT LINE SYSTEM: Shows 5-hour block tokens vs compaction limit
-        # SOURCE: block_stats['total_tokens'] (5-hour billing block cumulative)
-        # SCOPE: Multiple sessions across entire 5-hour billing period
-        # PURPOSE: Billing block tracking, NOT session tracking
-        five_hour_block_tokens = total_tokens  # From block_stats calculation above
-        compact_display = format_token_count(five_hour_block_tokens)
+        # 🗜️ COMPACT LINE SYSTEM: Shows conversation tokens vs 160K compaction limit
+        # SOURCE: calculate_tokens_since_time() with session start (current conversation)
+        # SCOPE: Single conversation, monitors compression timing
+        # PURPOSE: Conversation compaction monitoring, NOT billing tracking
+        conversation_tokens = total_tokens  # Should track current conversation for compaction monitoring
+        compact_display = format_token_count(conversation_tokens)
         line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Compact: {Colors.RESET}{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
         # ═══════════════════════════════════════════════════════════════════
         # 🚨 END OF PROTECTED COMPACT LINE CODE 🚨
@@ -1131,7 +1135,7 @@ def main():
             
             # Session情報（開始時間付き）
             if session_start_time:
-                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET} {Colors.BRIGHT_GREEN}(from {session_start_time}){Colors.RESET}")
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
             else:
                 line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
             
@@ -1142,8 +1146,11 @@ def main():
             # パーセンテージのみ（残り時間削除）
             line3_parts.append(f"{Colors.BRIGHT_WHITE}{int(block_progress)}%{Colors.RESET}")
             
-            # 現在時刻をSession行に追加
-            line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}")
+            # 現在時刻をSession行に追加（開始時刻付き）
+            if session_start_time:
+                line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}(from {session_start_time}){Colors.RESET}")
+            else:
+                line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}")
         
         # 出力モード（環境変数で制御）
         output_mode = os.environ.get('STATUSLINE_MODE', 'multi')

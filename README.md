@@ -8,17 +8,17 @@ A lightweight, optimized status line tool for Claude Code that provides dual-sco
 
 ### 🏢 Dual-Scope Token Tracking
 
-**5-Hour Billing Block System (Compact Line)**
-- Tracks cumulative tokens across entire 5-hour billing periods  
-- Monitors multiple sessions within billing blocks
-- Range: Can be millions of tokens across the billing period
-- Resets every 5 hours (11:00, 16:00, 21:00, etc.)
+**Conversation Compaction System (Compact Line - Line 2)**
+- Monitors current conversation progress toward compaction threshold (160K)
+- Predicts when conversation will be compressed/reset
+- Range: 0-200K tokens until next compaction
+- Resets when conversation gets compacted/compressed
 
-**Individual Session System (Burn Line)**  
-- Tracks tokens within current conversation only
-- Real-time burn rate monitoring with 30-minute sparklines
-- Range: Typically 50K-200K tokens per session
-- Resets with each new conversation
+**5-Hour Billing Window System (Session/Burn Lines - Lines 3-4)**  
+- Tracks Claude Code's official 5-hour billing periods (Pro/Max plans)
+- Monitors time and token usage within official billing windows
+- Range: 5-hour billing scope with real-time burn rate
+- Resets every 5 hours as per Claude Code's official usage limits
 
 ### Key Features
 
@@ -231,21 +231,20 @@ Features:
 - **📁 statusline**: Current project directory
 - **💬 583**: Total message count in current session
 
-#### Line 2: 🏢 Compact (5-Hour Billing Block System)
-- **🪙 Compact: 118.1K/160.0K**: Billing block cumulative tokens / Compaction threshold
-- **████████▒▒▒▒**: Progress through current 5-hour billing period (74%)
-- **💰 Cost: $0.214**: Total cost for current billing block
-- **♻️ 98% cached**: Cache efficiency across all sessions in block
+#### Line 2: 🗜️ Compact (Conversation Compaction System)
+- **🪙 Compact: 118.1K/160.0K**: Current conversation tokens / Compaction threshold (160K)
+- **████████▒▒▒▒**: Progress toward conversation compaction limit (74%)
+- **💰 Cost: $0.214**: Cost for current conversation
+- **♻️ 98% cached**: Cache efficiency for current conversation
 
 #### Line 3: ⏱️ Session Time (Billing Block Context)
 - **⏱️ Session: 1h6m/5h**: Time elapsed in current 5-hour billing period
-- **(from 16:00)**: Billing block start time (hour boundary)
 - **███▒▒▒▒▒▒▒▒▒▒▒▒**: Progress bar through 5-hour period (22%)
-- **17:06**: Current time
+- **17:06**: Current time (from 16:00)
 
 #### Line 4: 📊 Burn Rate (Individual Session System)
 - **🔥 Burn: 17,106,109**: **Session-specific** tokens (current conversation only)
-  - ⚠️ **CRITICAL**: Different scope from Line 2 (session vs billing block)
+  - ⚠️ **CRITICAL**: Different scope from Line 2 (conversation vs billing window)
   - Uses messageId:requestId deduplication for accuracy
   - Tracks single conversation thread, NOT entire billing period
 - **(Rate: 258,455 t/m)**: Real-time token consumption rate
@@ -264,12 +263,12 @@ Features:
 
 ### 🎯 Dual-Scope Architecture
 
-**🏢 Billing Block System (Line 2 - Compact)**
-- **Scope**: Entire 5-hour billing periods (multiple sessions/conversations)
-- **Purpose**: Cost management and billing block tracking  
-- **Data Source**: All messages from block start (e.g., 11:00) to current time
-- **Range**: Millions of tokens (accumulates across sessions)
-- **Reset**: Every 5 hours at hour boundaries
+**🗜️ Conversation Compaction System (Line 2 - Compact)**
+- **Scope**: Current conversation only (single session)
+- **Purpose**: Monitor conversation progress toward 160K compaction threshold
+- **Data Source**: Messages from current conversation start to now
+- **Range**: 0-200K tokens (single conversation until compaction)
+- **Reset**: When conversation gets compacted/compressed
 
 **📊 Session System (Line 4 - Burn)**
 - **Scope**: Individual conversation/session only
@@ -331,11 +330,11 @@ Features:
 
 **Two Distinct Calculation Methods:**
 
-**🏢 Billing Block Tokens (Compact Line)**
+**🗜️ Conversation Compaction Tokens (Compact Line)**
 ```
-Source: detect_five_hour_blocks() → calculate_block_statistics()
-Scope: 5-hour period (e.g., 11:00-16:00)
-Includes: ALL sessions within billing block
+Source: calculate_tokens_since_time() with session start
+Scope: Current conversation only
+Includes: Single conversation messages with deduplication
 Usage: Line 2 - "🪙 Compact: 118.1K/160.0K"
 ```
 
@@ -502,4 +501,4 @@ For issues, questions, or contributions:
 
 ---
 
-**statusline.py** - Dual-scope token tracking: billing precision meets session intelligence.
+**statusline.py** - Dual-scope token tracking: compact billing blocks + precise session burn rates.
