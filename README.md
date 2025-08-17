@@ -9,13 +9,14 @@ A comprehensive real-time status line tool for Claude Code that displays session
 ### Key Features
 
 - **Real-time Session Monitoring**: Live tracking of current Claude Code sessions
-- **5-Hour Block Analysis**: ccusage-compatible billing block detection and tracking
+- **5-Hour Block Analysis**: Professional billing block detection and tracking
 - **Multi-Project Support**: Analyzes transcript files across all Claude Code projects
 - **Token Usage Tracking**: Detailed breakdown of input/output/cache tokens with cost calculations
 - **Productivity Metrics**: Active time detection, efficiency ratios, and session statistics
 - **Git Integration**: Branch status, modified files, and repository information
 - **Visual Progress Bars**: Color-coded progress indicators for token usage and time blocks
 - **Cost Monitoring**: Real-time cost tracking with model-specific pricing (Claude 4 support)
+- **Professional Usage Reports**: Daily usage analysis with comprehensive statistics
 
 ## Installation
 
@@ -44,14 +45,59 @@ A comprehensive real-time status line tool for Claude Code that displays session
 
 ## Usage
 
-### Basic Display
+### Basic Display (Real-time Status)
 
 When properly configured with Claude Code, statusline automatically displays a 3-line status:
 
 ```
-[Claude Sonnet 4] 🌿 main ±2 📁 statusline 📝 3 💬 12/8 ⏱️ 2h15m 14:30
-🪙 45.2K/160K ████████████▒▒▒ 28% 💰 $2.45
-⏱️ Block 1/∞: 2h15m (45% of block) ████████▒▒▒▒▒▒▒ ⚡ 78% active (98m) ♻️ 12.1K cached (27%)
+[Claude Sonnet 4] 🌿 main ±2 📁 statusline 📝 3 💬 12
+🪙 45.2K/160K ████████████▒▒▒ 28% 💰 $2.45 ♻️ 72% cached
+⏱️ Session: 2h15m/5h ████████▒▒▒▒▒▒▒ 45% (14:30~) 16:45
+```
+
+### Usage Analysis Commands
+
+For usage analysis, statusline supports multiple commands:
+
+```bash
+# Show current session status (default)
+statusline
+
+# Show today's usage summary
+statusline daily
+
+# Show usage for specific date
+statusline daily --date 2025-01-15
+
+# Show help
+statusline --help
+```
+
+### Sample Daily Usage Report
+
+```
+📊 Daily Usage Report - 2025-08-17
+============================================================
+📈 Summary
+  Sessions: 7
+  Projects: 2
+  Models: claude-sonnet-4-20250514
+
+🪙 Token Usage
+  Input:         28
+  Output:       118
+  Cache Write: 162.7K
+  Cache Read:  387.4K
+  Total:        146
+  Cache Efficiency: 265361.0%
+
+💰 Cost Analysis
+  Total Cost:  $0.728
+  Avg/Session: $0.104
+
+📁 Projects
+  • statusline
+  • extension-monolith
 ```
 
 ### Display Elements
@@ -91,7 +137,7 @@ When properly configured with Claude Code, statusline automatically displays a 3
 ### Session Management
 
 **5-Hour Block Detection**
-- Compatible with ccusage billing block system
+- Professional 5-hour billing block system
 - Tracks progress within current 5-hour period
 - Provides recommendations for optimal work sessions
 
@@ -165,7 +211,7 @@ The script automatically detects:
 **Incorrect session times**
 - Session times are calculated from transcript timestamps
 - Times are automatically converted to local timezone
-- 5-hour blocks align with ccusage billing periods
+- 5-hour blocks for standardized billing analysis
 
 **Git information missing**
 - Ensure you're in a Git repository
@@ -240,7 +286,7 @@ This project is open source. Please check the license file for specific terms.
 
 ## Related Projects
 
-- **ccusage**: Claude Code usage analysis tool
+- Industry-standard 5-hour billing periods for usage tracking
 - **Claude Code**: Official Anthropic CLI tool
 
 ## Support

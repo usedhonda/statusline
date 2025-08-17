@@ -4,9 +4,11 @@ import json
 import sys
 import os
 import subprocess
+import argparse
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import time
+from collections import defaultdict
 
 # Constants
 COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
@@ -180,7 +182,7 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """Detect 5-hour blocks from all messages (ccusage-compatible)"""
+    """Detect 5-hour blocks from all messages for billing analysis"""
     if not all_messages:
         return []
     
@@ -208,13 +210,14 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
             if block_start <= msg['timestamp'] < block_end
         ]
         
-        if block_messages:
-            # 実際の終了時刻（最後のブロックは現在時刻を使用）
+        # 最後のブロック（現在アクティブ）は常に作成
+        if block_messages or block_num == num_blocks - 1:
+            # 実際の終了時刻
             if block_num == num_blocks - 1:  # 最後のブロック
                 actual_end_time = current_time
                 is_active = True
             else:
-                actual_end_time = block_messages[-1]['timestamp']
+                actual_end_time = block_messages[-1]['timestamp'] if block_messages else block_end
                 is_active = False
             
             blocks.append({
@@ -228,11 +231,21 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
     return blocks
 
 def find_current_session_block(blocks, target_session_id):
-    """Find the block containing the target session"""
-    for block in blocks:
+    """Find the most recent active block containing the target session"""
+    # 現在のセッションは最新のアクティブブロックにあるべき
+    for block in reversed(blocks):  # 新しいブロックから探す
+        if block.get('is_active', False):  # アクティブブロックのみ
+            for message in block['messages']:
+                if message['session_id'] == target_session_id:
+                    return block
+    
+    # フォールバック: アクティブブロックにセッションが見つからない場合
+    # セッションIDが含まれる最後のブロックを返す
+    for block in reversed(blocks):
         for message in block['messages']:
             if message['session_id'] == target_session_id:
                 return block
+    
     return None
 
 def calculate_block_statistics(block):
@@ -339,7 +352,7 @@ def get_time_info():
     return now.strftime("%H:%M")
 
 def detect_session_boundaries(messages, session_break_threshold=30*60):
-    """Detect session boundaries based on message gaps (ccusage compatible)"""
+    """Detect session boundaries based on message gaps"""
     boundaries = []
     
     for i in range(1, len(messages)):
@@ -401,7 +414,7 @@ def detect_active_periods(messages, idle_threshold=5*60):
     return active_periods
 
 def get_enhanced_session_analysis(transcript_file):
-    """Enhanced session analysis with ccusage-compatible features"""
+    """Enhanced session analysis with billing block features"""
     messages = []
     
     try:
@@ -454,7 +467,7 @@ def get_enhanced_session_analysis(transcript_file):
     }
 
 def get_session_duration(session_id):
-    """Enhanced session duration calculation with ccusage-compatible features
+    """Enhanced session duration calculation with 5-hour block features
     
     Improvements over basic version:
     - Session boundary detection
@@ -478,7 +491,7 @@ def get_session_duration(session_id):
         first_dt = analysis['first_message']
         last_dt = analysis['last_message']
         
-        # ccusage互換のセッション開始時刻決定
+        # 5時間ブロックベースのセッション開始時刻決定
         # 基本: 時間単位で切り捨て
         session_start = first_dt.replace(minute=0, second=0, microsecond=0)
         
@@ -642,10 +655,45 @@ def format_cost(cost):
     else:
         return f"${cost:.2f}"
 
+def print_help():
+    """Print help information"""
+    print("statusline.py - Enhanced Claude Code Status Line")
+    print()
+    print("USAGE:")
+    print("  echo '{\"session_id\":\"...\"}' | statusline")
+    print("  statusline --help")
+    print()
+    print("FEATURES:")
+    print("  • Real-time token usage and cost tracking")
+    print("  • 5-hour block session management for billing analysis")
+    print("  • Git integration with branch and file status")
+    print("  • Multi-project transcript analysis")
+    print("  • Cache efficiency monitoring")
+    print()
+    print("CONFIGURATION:")
+    print("  Add to .claude/settings.json:")
+    print('  {"statusLine": {"command": "statusline"}}')
+
+def print_version():
+    """Print version information"""
+    print("statusline.py v2.0 - enhanced status display with usage analytics")
+
 def main():
+    # Handle command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] in ['--help', '-h', 'help']:
+            print_help()
+            return
+        elif sys.argv[1] in ['--version', '-v']:
+            print_version()
+            return
+    
     try:
         # Read JSON from stdin
         input_data = sys.stdin.read()
+        if not input_data.strip():
+            print_help()
+            return
         data = json.loads(input_data)
         
         # Extract basic values
@@ -670,7 +718,7 @@ def main():
         cache_creation = 0
         cache_read = 0
         
-        # ccusage互換の5時間ブロック検出システム
+        # 5時間ブロック検出システム
         block_stats = None
         if session_id:
             try:
@@ -686,18 +734,24 @@ def main():
                 if current_block:
                     # ブロック全体の統計を計算
                     block_stats = calculate_block_statistics(current_block)
-                    
-                    # 統計データを既存の変数名に設定（互換性のため）
-                    if block_stats:
-                        total_tokens = block_stats['total_tokens']
-                        user_messages = block_stats['user_messages']
-                        assistant_messages = block_stats['assistant_messages']
-                        message_count = user_messages + assistant_messages
-                        error_count = block_stats['error_count']
-                        input_tokens = block_stats['input_tokens']
-                        output_tokens = block_stats['output_tokens']
-                        cache_creation = block_stats['cache_creation']
-                        cache_read = block_stats['cache_read']
+                elif blocks:
+                    # セッションが見つからない場合は最新のアクティブブロックを使用
+                    active_blocks = [b for b in blocks if b.get('is_active', False)]
+                    if active_blocks:
+                        current_block = active_blocks[-1]  # 最新のアクティブブロック
+                        block_stats = calculate_block_statistics(current_block)
+                
+                # 統計データを既存の変数名に設定（互換性のため）
+                if block_stats:
+                    total_tokens = block_stats['total_tokens']
+                    user_messages = block_stats['user_messages']
+                    assistant_messages = block_stats['assistant_messages']
+                    message_count = user_messages + assistant_messages
+                    error_count = block_stats['error_count']
+                    input_tokens = block_stats['input_tokens']
+                    output_tokens = block_stats['output_tokens']
+                    cache_creation = block_stats['cache_creation']
+                    cache_read = block_stats['cache_read']
             except Exception:
                 # フォールバック: 従来の単一ファイル方式
                 transcript_file = find_session_transcript(session_id)
@@ -713,7 +767,7 @@ def main():
         active_files = len(workspace.get('active_files', []))
         task_status = data.get('task', {}).get('status', 'idle')
         current_time = get_time_info()
-        # ccusage互換の5時間ブロック時間計算
+        # 5時間ブロック時間計算
         duration_seconds = None
         session_duration = None
         if block_stats:
@@ -768,7 +822,7 @@ def main():
         
         # Errors
         if error_count > 0:
-            line1_parts.append(f"{Colors.BRIGHT_RED}⚠️  {error_count}{Colors.RESET}")
+            line1_parts.append(f"{Colors.BRIGHT_RED}⚠️ {error_count}{Colors.RESET}")
         
         # Task status
         if task_status != 'idle':
@@ -779,11 +833,11 @@ def main():
         # 行2: Token情報の統合
         line2_parts = []
         
-        # Token使用量（ラベル付き）
-        line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙 Token:{Colors.RESET} {Colors.BRIGHT_WHITE}{token_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
+        # Token使用量（バランス版）
+        line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Token: {Colors.RESET}{Colors.BRIGHT_WHITE}{token_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
         
         # プログレスバー
-        line2_parts.append(get_progress_bar(percentage, width=15))
+        line2_parts.append(get_progress_bar(percentage, width=12))
         
         # パーセンテージ（色付き）
         line2_parts.append(f"{percentage_color}{Colors.BOLD}{percentage}%{Colors.RESET}")
@@ -791,20 +845,15 @@ def main():
         # コスト表示
         if session_cost > 0:
             cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
-            line2_parts.append(f"{cost_color}💰 {format_cost(session_cost)}{Colors.RESET}")
+            line2_parts.append(f"{cost_color}💰 Cost: {format_cost(session_cost)}{Colors.RESET}")
         
-        # キャッシュ情報をToken行に移動
+        # キャッシュ情報（説明付き簡潔版）
         if cache_read > 0 or cache_creation > 0:
             cache_ratio = (cache_read / total_tokens * 100) if total_tokens > 0 else 0
-            line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {format_token_count(cache_read)} cached ({int(cache_ratio)}%){Colors.RESET}")
+            if cache_ratio >= 50:  # 50%以上の場合のみ表示
+                line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️  {int(cache_ratio)}% cached{Colors.RESET}")
         
-        # 警告表示の改善
-        if percentage >= 80:
-            remaining = COMPACTION_THRESHOLD - total_tokens
-            line2_parts.append(f"{Colors.BRIGHT_RED}⚠️  Auto-compact soon! {format_token_count(remaining)} left{Colors.RESET}")
-        elif percentage >= 70:
-            remaining = COMPACTION_THRESHOLD - total_tokens
-            line2_parts.append(f"{Colors.BRIGHT_YELLOW}📊 {format_token_count(remaining)} remaining{Colors.RESET}")
+        # 警告表示を削除（ユーザーリクエスト）
         
         # 行3: Session情報の統合
         line3_parts = []
@@ -812,38 +861,51 @@ def main():
             # 5時間制限での計算
             hours_elapsed = duration_seconds / 3600
             block_progress = (hours_elapsed % 5) / 5 * 100  # 5時間内の進捗
-            remaining_in_block = max(0, 5 - (hours_elapsed % 5))
             
             # 効率性指標は表示しない（削除）
             
-            # Session情報（ラベル付き）
-            line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session:{Colors.RESET} {Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
+            # セッション開始時間を取得
+            session_start_time = None
+            if block_stats:
+                session_start_time = block_stats['start_time'].strftime("%H:%M")
+            
+            # Session情報（開始時間付き）
+            if session_start_time:
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET} {Colors.BRIGHT_GREEN}(from {session_start_time}){Colors.RESET}")
+            else:
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
             
             # 統一されたプログレスバー（同じ文字を使用）
             session_bar = get_progress_bar(block_progress, width=15)
             line3_parts.append(session_bar)
             
-            # パーセンテージと残り時間
+            # パーセンテージのみ（残り時間削除）
             line3_parts.append(f"{Colors.BRIGHT_WHITE}{int(block_progress)}%{Colors.RESET}")
-            
-            if remaining_in_block > 0:
-                if remaining_in_block < 1:
-                    line3_parts.append(f"{Colors.BRIGHT_YELLOW}(~{int(remaining_in_block * 60)}min left){Colors.RESET}")
-                else:
-                    line3_parts.append(f"{Colors.BRIGHT_GREEN}(~{remaining_in_block:.1f}h left){Colors.RESET}")
-            else:
-                line3_parts.append(f"{Colors.BRIGHT_RED}(ending soon){Colors.RESET}")
             
             # 現在時刻をSession行に追加
             line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}")
         
-        # 出力（2行版または3行版）
-        print(" | ".join(line1_parts))
-        print(" ".join(line2_parts))
+        # 出力モード（環境変数で制御）
+        output_mode = os.environ.get('STATUSLINE_MODE', 'multi')
         
-        # 3行目（セッション時間の詳細）を表示する場合
-        if line3_parts:
-            print(" ".join(line3_parts))
+        if output_mode == 'single':
+            # 1行集約版（公式仕様準拠）
+            single_line = []
+            if line1_parts:
+                single_line.extend(line1_parts[:3])  # モデル、Git、ディレクトリのみ
+            if token_display and percentage:
+                single_line.append(f"🪙 Tokens: {token_display}({percentage}%)")
+            if session_duration:
+                single_line.append(f"⏱️ Time: {session_duration}")
+            print(" | ".join(single_line))
+        else:
+            # 複数行版（デフォルト、より詳細）
+            print(" | ".join(line1_parts))
+            print(" ".join(line2_parts))
+            
+            # 3行目（セッション時間の詳細）を表示する場合
+            if line3_parts:
+                print(" ".join(line3_parts))
         
     except Exception as e:
         # Fallback status line on error
@@ -855,5 +917,195 @@ def main():
             f.write(f"{datetime.now()}: {e}\n")
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
 
+def analyze_daily_usage(target_date=None):
+    """Analyze daily usage with comprehensive reporting"""
+    if target_date is None:
+        target_date = date.today()
+    
+    # Find all transcript files
+    projects_dir = Path.home() / '.claude' / 'projects'
+    if not projects_dir.exists():
+        print(f"{Colors.BRIGHT_RED}No Claude projects found{Colors.RESET}")
+        return
+    
+    daily_stats = defaultdict(lambda: {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cache_creation': 0,
+        'cache_read': 0,
+        'total_cost': 0.0,
+        'sessions': 0,
+        'projects': set(),
+        'models': set()
+    })
+    
+    # Scan all transcript files
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+            
+        for transcript_file in project_dir.glob('*.jsonl'):
+            try:
+                with open(transcript_file, 'r') as f:
+                    session_data = defaultdict(lambda: {
+                        'input_tokens': 0,
+                        'output_tokens': 0,
+                        'cache_creation': 0,
+                        'cache_read': 0,
+                        'model': None,
+                        'start_time': None
+                    })
+                    
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            timestamp_str = entry.get('timestamp')
+                            if not timestamp_str:
+                                continue
+                                
+                            # Parse timestamp and check if it's from target date
+                            try:
+                                entry_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                entry_date = entry_time.date()
+                            except:
+                                continue
+                                
+                            if entry_date != target_date:
+                                continue
+                            
+                            # Track session start time
+                            if session_data[transcript_file.name]['start_time'] is None:
+                                session_data[transcript_file.name]['start_time'] = entry_time
+                            
+                            # Extract usage data
+                            if entry.get('type') == 'assistant' and entry.get('message', {}).get('usage'):
+                                usage = entry['message']['usage']
+                                model = entry['message'].get('model', 'unknown')
+                                
+                                session_data[transcript_file.name]['input_tokens'] = usage.get('input_tokens', 0)
+                                session_data[transcript_file.name]['output_tokens'] = usage.get('output_tokens', 0)
+                                session_data[transcript_file.name]['cache_creation'] = usage.get('cache_creation_input_tokens', 0)
+                                session_data[transcript_file.name]['cache_read'] = usage.get('cache_read_input_tokens', 0)
+                                session_data[transcript_file.name]['model'] = model
+                                
+                        except json.JSONDecodeError:
+                            continue
+                    
+                    # Aggregate session data to daily stats
+                    for data in session_data.values():
+                        if data['start_time'] is not None:
+                            daily_stats[target_date]['input_tokens'] += data['input_tokens']
+                            daily_stats[target_date]['output_tokens'] += data['output_tokens']
+                            daily_stats[target_date]['cache_creation'] += data['cache_creation']
+                            daily_stats[target_date]['cache_read'] += data['cache_read']
+                            daily_stats[target_date]['sessions'] += 1
+                            daily_stats[target_date]['projects'].add(project_dir.name)
+                            if data['model']:
+                                daily_stats[target_date]['models'].add(data['model'])
+                            
+                            # Calculate cost
+                            cost = calculate_cost(
+                                data['input_tokens'],
+                                data['output_tokens'],
+                                data['cache_creation'],
+                                data['cache_read'],
+                                data['model'] or 'claude-3-5-sonnet-20241022'
+                            )
+                            daily_stats[target_date]['total_cost'] += cost
+                            
+            except Exception:
+                continue
+    
+    # Display results
+    print(f"{Colors.BRIGHT_CYAN}📊 Daily Usage Report - {target_date.strftime('%Y-%m-%d')}{Colors.RESET}")
+    print("=" * 60)
+    
+    if not daily_stats:
+        print(f"{Colors.BRIGHT_YELLOW}No usage data found for {target_date}{Colors.RESET}")
+        return
+    
+    stats = daily_stats[target_date]
+    total_tokens = stats['input_tokens'] + stats['output_tokens']
+    cache_total = stats['cache_creation'] + stats['cache_read']
+    
+    # Summary stats
+    print(f"{Colors.BRIGHT_WHITE}📈 Summary{Colors.RESET}")
+    print(f"  Sessions: {Colors.BRIGHT_GREEN}{stats['sessions']}{Colors.RESET}")
+    print(f"  Projects: {Colors.BRIGHT_BLUE}{len(stats['projects'])}{Colors.RESET}")
+    print(f"  Models: {Colors.BRIGHT_MAGENTA}{', '.join(stats['models'])}{Colors.RESET}")
+    print()
+    
+    # Token breakdown
+    print(f"{Colors.BRIGHT_WHITE}🪙 Token Usage{Colors.RESET}")
+    print(f"  Input:       {Colors.BRIGHT_CYAN}{format_token_count(stats['input_tokens']):>8}{Colors.RESET}")
+    print(f"  Output:      {Colors.BRIGHT_GREEN}{format_token_count(stats['output_tokens']):>8}{Colors.RESET}")
+    print(f"  Cache Write: {Colors.BRIGHT_YELLOW}{format_token_count(stats['cache_creation']):>8}{Colors.RESET}")
+    print(f"  Cache Read:  {Colors.BRIGHT_MAGENTA}{format_token_count(stats['cache_read']):>8}{Colors.RESET}")
+    print(f"  {Colors.BOLD}Total:       {Colors.BRIGHT_WHITE}{format_token_count(total_tokens):>8}{Colors.RESET}")
+    if cache_total > 0:
+        cache_ratio = (stats['cache_read'] / total_tokens * 100) if total_tokens > 0 else 0
+        print(f"  Cache Efficiency: {Colors.BRIGHT_GREEN}{cache_ratio:.1f}%{Colors.RESET}")
+    print()
+    
+    # Cost breakdown
+    print(f"{Colors.BRIGHT_WHITE}💰 Cost Analysis{Colors.RESET}")
+    print(f"  Total Cost:  {Colors.BRIGHT_YELLOW}${stats['total_cost']:.3f}{Colors.RESET}")
+    if stats['sessions'] > 0:
+        avg_cost = stats['total_cost'] / stats['sessions']
+        print(f"  Avg/Session: {Colors.BRIGHT_WHITE}${avg_cost:.3f}{Colors.RESET}")
+    print()
+    
+    # Projects breakdown
+    if len(stats['projects']) > 1:
+        print(f"{Colors.BRIGHT_WHITE}📁 Projects{Colors.RESET}")
+        for project in sorted(stats['projects']):
+            print(f"  • {Colors.BRIGHT_BLUE}{project}{Colors.RESET}")
+        print()
+
+def show_usage_help():
+    """Show usage help and available commands"""
+    print(f"{Colors.BRIGHT_CYAN}statusline - Claude Code Usage Analysis{Colors.RESET}")
+    print("=" * 40)
+    print()
+    print("Usage:")
+    print(f"  {Colors.BRIGHT_WHITE}statusline{Colors.RESET}                    # Show current status (default)")
+    print(f"  {Colors.BRIGHT_WHITE}statusline daily{Colors.RESET}              # Show today's usage")
+    print(f"  {Colors.BRIGHT_WHITE}statusline daily --date YYYY-MM-DD{Colors.RESET}  # Show specific date")
+    print(f"  {Colors.BRIGHT_WHITE}statusline --help{Colors.RESET}             # Show this help")
+    print()
+    print("Examples:")
+    print(f"  {Colors.LIGHT_GRAY}statusline daily{Colors.RESET}")
+    print(f"  {Colors.LIGHT_GRAY}statusline daily --date 2025-01-15{Colors.RESET}")
+    print()
+
 if __name__ == "__main__":
-    main()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Claude Code statusline and usage analysis', add_help=False)
+    parser.add_argument('command', nargs='?', choices=['daily'], help='Usage analysis command')
+    parser.add_argument('--date', type=str, help='Date for analysis (YYYY-MM-DD)')
+    parser.add_argument('--help', action='store_true', help='Show help')
+    
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        # If parsing fails, assume it's being called as statusline (no args)
+        args = argparse.Namespace(command=None, date=None, help=False)
+    
+    # Handle help
+    if args.help:
+        show_usage_help()
+        sys.exit(0)
+    
+    # Handle commands
+    if args.command == 'daily':
+        target_date = None
+        if args.date:
+            try:
+                target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+            except ValueError:
+                print(f"{Colors.BRIGHT_RED}Invalid date format. Use YYYY-MM-DD{Colors.RESET}")
+                sys.exit(1)
+        analyze_daily_usage(target_date)
+    else:
+        # Default: show current status line
+        main()
