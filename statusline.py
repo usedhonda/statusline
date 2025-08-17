@@ -1281,9 +1281,7 @@ def main():
                     # ブロック全体の統計を計算
                     try:
                         block_stats = calculate_block_statistics(current_block)
-                        print(f"DEBUG: block_stats created: {block_stats is not None}", file=sys.stderr)
-                    except Exception as e:
-                        print(f"DEBUG: Error in calculate_block_statistics: {e}", file=sys.stderr)
+                    except Exception:
                         block_stats = None
                 elif blocks:
                     # セッションが見つからない場合は最新のアクティブブロックを使用
@@ -1292,8 +1290,7 @@ def main():
                         current_block = active_blocks[-1]  # 最新のアクティブブロック
                         try:
                             block_stats = calculate_block_statistics(current_block)
-                        except Exception as e:
-                            print(f"DEBUG: Error in calculate_block_statistics: {e}", file=sys.stderr)
+                        except Exception:
                             block_stats = None
                 
                 # 統計データを既存の変数名に設定（互換性のため）
@@ -1482,8 +1479,11 @@ def main():
             # 4行目: ccusage-style Tokens + Burn Rate表示（1行統合）
             session_data = None
             if block_stats:
+                # Burn line: Calculate tokens from session start time (same time period as Session line)
+                session_start_time = block_stats.get('start_time')
+                session_tokens = calculate_tokens_since_time(session_start_time, session_id) if session_start_time else 0
                 session_data = {
-                    'total_tokens': total_tokens,
+                    'total_tokens': session_tokens,  # Use tokens from session start time
                     'duration_seconds': duration_seconds,
                     'start_time': block_stats.get('start_time'),
                     'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
@@ -1504,6 +1504,74 @@ def main():
         with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
             f.write(f"{datetime.now()}: {e}\n")
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
+
+def calculate_tokens_since_time(start_time, session_id):
+    """Calculate tokens from session start time to now (ccusage compatible)"""
+    try:
+        if not start_time or not session_id:
+            return 0
+        
+        transcript_file = find_session_transcript(session_id)
+        if not transcript_file:
+            return 0
+        
+        # Normalize start_time to UTC for comparison (ccusage style)
+        if hasattr(start_time, 'tzinfo') and start_time.tzinfo:
+            start_time_utc = start_time.astimezone(timezone.utc)
+        else:
+            start_time_utc = start_time.replace(tzinfo=timezone.utc)
+        
+        session_messages = []
+        
+        with open(transcript_file, 'r') as f:
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                    if not data:
+                        continue
+                    
+                    # Get message timestamp
+                    msg_timestamp = data.get('timestamp')
+                    if not msg_timestamp:
+                        continue
+                    
+                    # Parse timestamp and normalize to UTC
+                    if isinstance(msg_timestamp, str):
+                        msg_time = datetime.fromisoformat(msg_timestamp.replace('Z', '+00:00'))
+                        if msg_time.tzinfo is None:
+                            msg_time = msg_time.replace(tzinfo=timezone.utc)
+                        msg_time_utc = msg_time.astimezone(timezone.utc)
+                    else:
+                        continue
+                    
+                    # Only include messages from session start time onwards
+                    if msg_time_utc >= start_time_utc:
+                        # Check for assistant messages with usage data
+                        if (data.get('type') == 'assistant' and 
+                            data.get('message', {}).get('usage')):
+                            session_messages.append(data)
+                
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
+        
+        # Sum all usage from session messages (not cumulative, each message is individual usage)
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cache_creation = 0
+        total_cache_read = 0
+        
+        for message in session_messages:
+            usage = message.get('message', {}).get('usage', {})
+            if usage:
+                total_input_tokens += usage.get('input_tokens', 0)
+                total_output_tokens += usage.get('output_tokens', 0)
+                total_cache_creation += usage.get('cache_creation_input_tokens', 0)
+                total_cache_read += usage.get('cache_read_input_tokens', 0)
+        
+        return total_input_tokens + total_output_tokens + total_cache_creation + total_cache_read
+        
+    except Exception:
+        return 0
 
 def calculate_true_session_cumulative(session_id):
     """Calculate true session cumulative by summing current transcript tokens
@@ -1611,9 +1679,11 @@ def get_ccusage_style_line(current_session_data=None, session_id=None):
             status_text = "NORMAL"
             status_emoji = "✓"
         
-        # 🔥 Burn line: Shows CURRENT_TRANSCRIPT_TOKENS (current file cumulative)
-        # SOURCE: calculate_true_session_cumulative() (current JSONL file only)
-        current_transcript_tokens = calculate_true_session_cumulative(session_id) if session_id else 0
+        # 🔥 Burn line: Shows SESSION BLOCK TOKENS (same time period as Session line)
+        # Must show cumulative tokens for the SAME time period as Session line (11:00 ~ current)
+        # This tracks "how many tokens consumed within this session"
+        # Use the same total_tokens that was passed in session_data (from session block)
+        current_transcript_tokens = current_session_data.get('total_tokens', 0) if current_session_data else 0
         
         # Format exactly like ccusage
         tokens_formatted = f"{current_transcript_tokens:,}"
@@ -1633,10 +1703,11 @@ def get_ccusage_style_line(current_session_data=None, session_id=None):
         sparkline = create_sparkline(burn_rates, width=30)
         
         return (f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}{Colors.BRIGHT_WHITE}{tokens_formatted}{Colors.RESET} "
-                f"(Rate: {burn_rate_formatted}/min) {sparkline}")
+                f"(Rate: {burn_rate_formatted} t/m) {sparkline}")
         
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"DEBUG: Burn line error: {e}", file=sys.stderr)
+        return f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}{Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
 
 def analyze_daily_usage(target_date=None):
     """Analyze daily usage with comprehensive reporting"""
