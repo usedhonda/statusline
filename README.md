@@ -28,22 +28,62 @@ A comprehensive real-time status line tool for Claude Code that displays session
 - Claude Code with active sessions
 - Git (optional, for repository information)
 
-### Setup
+### Quick Install (Recommended)
 
-1. Clone or download `statusline.py` to your desired location
-2. Make it executable:
+The easiest way to install statusline is using the Python installer:
+
+1. **Download the repository**:
    ```bash
-   chmod +x statusline.py
+   git clone https://github.com/usedhonda/statusline.git
+   cd statusline
    ```
 
-3. Configure Claude Code to use statusline (add to your Claude Code settings):
+2. **Run the installer**:
+   ```bash
+   python3 install.py
+   ```
+
+The installer will:
+- ✅ Install `statusline.py` to `~/.claude/statusline.py`
+- ✅ Automatically configure Claude Code settings with proper JSON handling
+- ✅ Create backup of existing settings before making changes
+- ✅ Verify Python requirements and file permissions
+- ✅ Provide clear success/error messages
+
+### Manual Installation
+
+If you prefer manual setup:
+
+1. **Copy statusline to Claude directory**:
+   ```bash
+   cp statusline.py ~/.claude/statusline.py
+   chmod +x ~/.claude/statusline.py
+   ```
+
+2. **Configure Claude Code settings**:
+   Add to your `~/.claude/settings.json`:
    ```json
    {
      "statusLine": {
-       "command": "~/.claude/statusline.py"
+       "type": "command",
+       "command": "~/.claude/statusline.py",
+       "padding": 0
      }
    }
    ```
+
+### Installation Verification
+
+After installation, verify it works:
+
+1. **Test manually**:
+   ```bash
+   ~/.claude/statusline.py
+   ```
+
+2. **Restart Claude Code** to see the new status line
+
+3. **Check for errors** in `~/.claude/statusline-error.log` if needed
 
 ## Usage
 
