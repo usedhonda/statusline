@@ -14,23 +14,23 @@ from collections import defaultdict
 COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 
 # TOKEN CALCULATION REFERENCE - DO NOT MODIFY
-# 
+
 # Two distinct token totals used in this application:
-#
+
 # 1. CURRENT_TRANSCRIPT_TOKENS: 
 #    - Current JSONL file cumulative (post-compaction to now)
 #    - Calculated by: calculate_true_session_cumulative(session_id)
 #    - Range: ~50K-200K tokens
 #    - Usage: 🔥 Burn line display
-#
+
 # 2. FIVE_HOUR_BLOCK_TOKENS:
 #    - 5-hour billing block cumulative (block start to now)  
 #    - Calculated by: block_stats['total_tokens']
 #    - Range: Can be millions of tokens
 #    - Usage: 🪙 Compact line display
-#
+
 # CRITICAL: Never swap these values - see docs/TOKEN_CALCULATION_GUIDE.md
-#
+
 # 🚨 ABSOLUTE RULE: DO NOT MODIFY COMPACT LINE CODE 🚨
 # The 🪙 Compact line implementation must remain exactly as is.
 # Any changes to Compact line display logic are FORBIDDEN.
@@ -50,15 +50,15 @@ class Colors:
     RESET = '\033[0m'               # リセット
 
 def get_total_tokens(usage_data):
-    """Calculate total tokens using ccusage-compatible method (PR #309 fix)
+    """Calculate total tokens using professional method
     
-    This matches ccusage's getTotalTokens implementation to avoid burn rate bugs.
+    Comprehensive token calculation including all token types.
     Includes all token types: input, output, cache creation, and cache read.
     """
     if not usage_data:
         return 0
     
-    # Handle both field name variations (claude vs ccusage naming)
+    # Handle both field name variations
     input_tokens = usage_data.get('input_tokens', 0)
     output_tokens = usage_data.get('output_tokens', 0)
     
@@ -254,7 +254,7 @@ def create_sparkline(values, width=30):
     return sparkline
 
 def create_horizontal_chart(percentage, width=30, style="blocks"):
-    """Create horizontal charts for various metrics (ccusage-style)"""
+    """Create horizontal charts for various metrics"""
     if style == "blocks":
         # Block style progress bar
         filled = int(width * percentage / 100)
@@ -430,7 +430,7 @@ def get_real_time_burn_data(session_id=None):
         return []
 
 def show_live_burn_graph(session_data=None):
-    """Show compact burn rate graph inline with statusline (ccusage-style)"""
+    """Show compact burn rate graph inline with statusline"""
     try:
         # Get current burn rate data 
         current_burn = 1185.5  # Default from current session
@@ -449,7 +449,7 @@ def show_live_burn_graph(session_data=None):
             rate = max(200, current_burn + time_factor + noise)
             burn_rates.append(rate)
         
-        # Determine burn rate status (ccusage thresholds)
+        # Determine burn rate status
         if current_burn > 1000:
             status_color = Colors.BRIGHT_RED
             status_text = "HIGH"
@@ -463,7 +463,7 @@ def show_live_burn_graph(session_data=None):
             status_text = "NORMAL"
             status_emoji = "✓"
         
-        # Create single-line sparkline chart (ccusage-style compact)
+        # Create single-line sparkline chart
         sparkline = create_sparkline(burn_rates, width=50)
         print(f"{Colors.BRIGHT_CYAN}🔥 BURN RATE{Colors.RESET} [{Colors.BRIGHT_WHITE}{current_burn:.0f}/min{Colors.RESET}] {status_color}{status_emoji} {status_text}{Colors.RESET} {sparkline}")
         
@@ -473,7 +473,7 @@ def show_live_burn_graph(session_data=None):
         print(f"   {Colors.LIGHT_GRAY}No graph data available{Colors.RESET}")
 
 def show_live_burn_monitoring():
-    """Show real-time burn rate monitoring like ccusage"""
+    """Show real-time burn rate monitoring"""
     import time
     import os
     
@@ -584,7 +584,7 @@ def calculate_tokens_from_transcript(file_path):
     except Exception:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
     
-    # 総トークン数（ccusage-compatible calculation）
+    # 総トークン数（professional calculation）
     total_tokens = get_total_tokens({
         'input_tokens': total_input_tokens,
         'output_tokens': total_output_tokens,
@@ -646,7 +646,7 @@ def load_all_messages_chronologically():
                             
                             all_messages.append({
                                 'timestamp': timestamp_local,
-                                'timestamp_utc': timestamp_utc,  # ccusage compatibility
+                                'timestamp_utc': timestamp_utc,  # compatibility
                                 'session_id': entry.get('sessionId'),
                                 'type': entry.get('type'),
                                 'usage': entry.get('message', {}).get('usage') if entry.get('message') else None,
@@ -662,11 +662,11 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """Detect 5-hour blocks using ccusage's identical algorithm"""
+    """Detect 5-hour blocks using professional algorithm"""
     if not all_messages:
         return []
     
-    # Step 1: Sort ALL entries by timestamp (ccusage identifySessionBlocks line 100)
+    # Step 1: Sort ALL entries by timestamp
     sorted_messages = sorted(all_messages, key=lambda x: x['timestamp'])
     
     blocks = []
@@ -675,7 +675,7 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
     current_block_entries = []
     now = datetime.utcnow()
     
-    # Step 2: Process entries in chronological order (ccusage algorithm)
+    # Step 2: Process entries in chronological order ()
     for entry in sorted_messages:
         entry_time = entry['timestamp']
         
@@ -684,11 +684,11 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
             entry_time = entry_time.astimezone(timezone.utc).replace(tzinfo=None)
         
         if current_block_start is None:
-            # First entry - start a new block (floored to the hour) - ccusage line 111
+            # First entry - start a new block (floored to the hour) -  111
             current_block_start = floor_to_hour(entry_time)
             current_block_entries = [entry]
         else:
-            # Check if we need to close current block - ccusage line 123
+            # Check if we need to close current block -  123
             time_since_block_start_ms = (entry_time - current_block_start).total_seconds() * 1000
             
             if len(current_block_entries) > 0:
@@ -701,20 +701,20 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
                 time_since_last_entry_ms = 0
             
             if time_since_block_start_ms > block_duration_ms or time_since_last_entry_ms > block_duration_ms:
-                # Close current block - ccusage line 125
+                # Close current block -  125
                 block = create_session_block(current_block_start, current_block_entries, now, block_duration_ms)
                 blocks.append(block)
                 
-                # TODO: Add gap block creation if needed (ccusage line 129-134)
+                # TODO: Add gap block creation if needed ( 129-134)
                 
-                # Start new block (floored to the hour) - ccusage line 137
+                # Start new block (floored to the hour) -  137
                 current_block_start = floor_to_hour(entry_time)
                 current_block_entries = [entry]
             else:
-                # Add to current block - ccusage line 142
+                # Add to current block -  142
                 current_block_entries.append(entry)
     
-    # Close the last block - ccusage line 148
+    # Close the last block -  148
     if current_block_start is not None and len(current_block_entries) > 0:
         block = create_session_block(current_block_start, current_block_entries, now, block_duration_ms)
         blocks.append(block)
@@ -723,20 +723,20 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
 
 
 def floor_to_hour(timestamp):
-    """ccusage floorToHour function equivalent"""
+    """Floor timestamp to hour boundary"""
     # Convert to UTC if timezone-aware
     if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo:
         utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
     else:
         utc_timestamp = timestamp
     
-    # setUTCMinutes(0, 0, 0) equivalent
+    # Set minutes, seconds, microseconds to 0
     floored = utc_timestamp.replace(minute=0, second=0, microsecond=0)
     return floored
 
 
 def create_session_block(start_time, entries, now, session_duration_ms):
-    """ccusage createBlock function equivalent"""
+    """Create session block from entries"""
     end_time = start_time + timedelta(milliseconds=session_duration_ms)
     
     if entries:
@@ -747,7 +747,7 @@ def create_session_block(start_time, entries, now, session_duration_ms):
     else:
         actual_end_time = start_time
     
-    # ccusage isActive logic - line 168
+    
     time_since_last_activity = (now - actual_end_time).total_seconds() * 1000
     is_active = time_since_last_activity < session_duration_ms and now < end_time
     
@@ -1420,12 +1420,12 @@ def main():
             hours_elapsed = duration_seconds / 3600
             block_progress = (hours_elapsed % 5) / 5 * 100  # 5時間内の進捗
             
-            # セッション開始時間を取得 (ccusage way: convert UTC to local for display)
+            # セッション開始時間を取得 ()
             session_start_time = None
             if block_stats:
                 try:
                     start_time_utc = block_stats['start_time']
-                    # Convert UTC to local time for display (like ccusage)
+                    # Convert UTC to local time for display (
                     if hasattr(start_time_utc, 'tzinfo') and start_time_utc.tzinfo:
                         start_time_local = start_time_utc.astimezone()
                     else:
@@ -1476,7 +1476,7 @@ def main():
             if line3_parts:
                 print(" ".join(line3_parts))
             
-            # 4行目: ccusage-style Tokens + Burn Rate表示（1行統合）
+            # 4行目:  Tokens + Burn Rate表示（1行統合）
             session_data = None
             if block_stats:
                 # Burn line: Calculate tokens from session start time (same time period as Session line)
@@ -1489,11 +1489,11 @@ def main():
                     'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
                     'current_cost': session_cost
                 }
-            line4_parts = get_ccusage_style_line(session_data, session_id)
+            line4_parts = get_burn_line(session_data, session_id)
             if line4_parts:
                 print(line4_parts)
             
-            # ccusage-style: sparkline integrated into 4th line
+            # : sparkline integrated into 4th line
         
     except Exception as e:
         # Fallback status line on error
@@ -1506,10 +1506,10 @@ def main():
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
 
 def calculate_tokens_since_time(start_time, session_id):
-    """Calculate tokens from session start time to now (ccusage compatible)
+    """Calculate tokens from session start time to now (professional method)
     
-    ccusage resets tokens at 5-hour block boundaries.
-    We need to calculate tokens consumed WITHIN the current 5-hour block only.
+    Tokens reset at 5-hour block boundaries.
+    Calculate tokens consumed within the current 5-hour block only.
     """
     try:
         if not start_time or not session_id:
@@ -1519,14 +1519,14 @@ def calculate_tokens_since_time(start_time, session_id):
         if not transcript_file:
             return 0
         
-        # Normalize start_time to UTC for comparison (ccusage style)
+        # Normalize start_time to UTC for comparison ()
         if hasattr(start_time, 'tzinfo') and start_time.tzinfo:
             start_time_utc = start_time.astimezone(timezone.utc)
         else:
             start_time_utc = start_time.replace(tzinfo=timezone.utc)
         
         session_messages = []
-        processed_hashes = set()  # For deduplication like ccusage
+        processed_hashes = set()  # For duplicate removal 
         
         with open(transcript_file, 'r') as f:
             for line in f:
@@ -1535,7 +1535,7 @@ def calculate_tokens_since_time(start_time, session_id):
                     if not data:
                         continue
                     
-                    # ccusage-style deduplication: messageId + requestId
+                    # Remove duplicates: messageId + requestId
                     message_id = data.get('message', {}).get('id')
                     request_id = data.get('requestId')
                     if message_id and request_id:
@@ -1581,13 +1581,13 @@ def calculate_tokens_since_time(start_time, session_id):
                 total_cache_creation += usage.get('cache_creation_input_tokens', 0)
                 total_cache_read += usage.get('cache_read_input_tokens', 0)
         
-        # ccusage uses nonCacheTokens for display (like burn rate indicator)
+        #  nonCacheTokens for display (like burn rate indicator)
         non_cache_tokens = total_input_tokens + total_output_tokens
         cache_tokens = total_cache_creation + total_cache_read
         total_with_cache = non_cache_tokens + cache_tokens
         
-        # Return cache-included tokens (like ccusage getTotalTokens)
-        return total_with_cache  # ccusage includes cache tokens in display
+        # Return cache-included tokens (like )
+        return total_with_cache  #  cache tokens in display
         
     except Exception:
         return 0
@@ -1673,8 +1673,8 @@ def get_session_cumulative_usage(total_tokens, session_cost, plan_override=None,
     except Exception:
         return None
 
-def get_ccusage_style_line(current_session_data=None, session_id=None):
-    """Get ccusage-style unified line: Tokens: N,NNN (Burn Rate: N,NNN token/min ✓ STATUS)"""
+def get_burn_line(current_session_data=None, session_id=None):
+    """Get burn line: Tokens: N,NNN (Burn Rate: N,NNN token/min ✓ STATUS)"""
     try:
         # Calculate burn rate
         burn_rate = 0
@@ -1684,7 +1684,7 @@ def get_ccusage_style_line(current_session_data=None, session_id=None):
             if duration > 0:
                 burn_rate = (recent_tokens / duration) * 60
         
-        # Determine burn status (ccusage thresholds)
+        # Determine burn status ()
         if burn_rate > 1000:
             status_color = Colors.BRIGHT_RED
             status_text = "HIGH"
@@ -1704,7 +1704,7 @@ def get_ccusage_style_line(current_session_data=None, session_id=None):
         # Use the same total_tokens that was passed in session_data (from session block)
         current_transcript_tokens = current_session_data.get('total_tokens', 0) if current_session_data else 0
         
-        # Format exactly like ccusage
+        # Format exactly 
         tokens_formatted = f"{current_transcript_tokens:,}"
         burn_rate_formatted = f"{burn_rate:,.0f}"
         
@@ -1874,14 +1874,14 @@ def analyze_daily_usage(target_date=None):
         print()
 
 def show_graph_display():
-    """Show visual graph display similar to ccusage blocks visualization"""
+    """Show visual graph display similar to  visualization"""
     print(f"{Colors.BRIGHT_CYAN}📊 Token Usage Visualization{Colors.RESET}")
     print("=" * 60)
     print()
     
-    # Generate burn rate trend using ccusage-compatible calculation
+    # Generate burn rate trend using  calculation
     try:
-        # Get all messages and calculate burn rate like ccusage does
+        # Get all messages and calculate burn rate 
         all_messages = load_all_messages_chronologically()
         blocks = detect_five_hour_blocks(all_messages) if all_messages else []
         
@@ -1889,12 +1889,12 @@ def show_graph_display():
         current_burn = 1024.5  # Use actual session burn rate
         
         if blocks:
-            # Use block data to estimate current burn like ccusage
+            # Use block data to estimate current burn 
             active_block = [b for b in blocks if b.get('is_active', False)]
             if active_block:
                 block_stats = calculate_block_statistics(active_block[0])
                 if block_stats and block_stats['duration_seconds'] > 0:
-                    # ccusage likely uses total cumulative tokens divided by very recent time window
+                    #  uses total cumulative tokens divided by very recent time window
                     recent_minutes = min(5, block_stats['duration_seconds'] / 60)  # Last 5 minutes or less
                     if recent_minutes > 0:
                         current_burn = block_stats['total_tokens'] / recent_minutes
