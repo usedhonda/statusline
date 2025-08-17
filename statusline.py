@@ -13,6 +13,24 @@ from collections import defaultdict
 # Constants
 COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 
+# TOKEN CALCULATION REFERENCE - DO NOT MODIFY
+# 
+# Two distinct token totals used in this application:
+#
+# 1. CURRENT_TRANSCRIPT_TOKENS: 
+#    - Current JSONL file cumulative (post-compaction to now)
+#    - Calculated by: calculate_true_session_cumulative(session_id)
+#    - Range: ~50K-200K tokens
+#    - Usage: 🔥 Burn line display
+#
+# 2. FIVE_HOUR_BLOCK_TOKENS:
+#    - 5-hour billing block cumulative (block start to now)  
+#    - Calculated by: block_stats['total_tokens']
+#    - Range: Can be millions of tokens
+#    - Usage: 🪙 Compact line display
+#
+# CRITICAL: Never swap these values - see docs/TOKEN_CALCULATION_GUIDE.md
+
 # ANSI color codes optimized for black backgrounds - 全て明るいバージョン
 class Colors:
     BRIGHT_CYAN = '\033[1;96m'     # 最も明るいシアン
@@ -26,6 +44,35 @@ class Colors:
     DIM = '\033[1;97m'              # DIMも最明白
     BOLD = '\033[1m'                # 太字
     RESET = '\033[0m'               # リセット
+
+def get_total_tokens(usage_data):
+    """Calculate total tokens using ccusage-compatible method (PR #309 fix)
+    
+    This matches ccusage's getTotalTokens implementation to avoid burn rate bugs.
+    Includes all token types: input, output, cache creation, and cache read.
+    """
+    if not usage_data:
+        return 0
+    
+    # Handle both field name variations (claude vs ccusage naming)
+    input_tokens = usage_data.get('input_tokens', 0)
+    output_tokens = usage_data.get('output_tokens', 0)
+    
+    # Cache creation tokens (multiple possible field names)
+    cache_creation = (
+        usage_data.get('cache_creation_input_tokens', 0) or
+        usage_data.get('cacheCreationInputTokens', 0) or
+        usage_data.get('cacheCreationTokens', 0)
+    )
+    
+    # Cache read tokens (multiple possible field names)  
+    cache_read = (
+        usage_data.get('cache_read_input_tokens', 0) or
+        usage_data.get('cacheReadInputTokens', 0) or
+        usage_data.get('cacheReadTokens', 0)
+    )
+    
+    return input_tokens + output_tokens + cache_creation + cache_read
 
 def format_token_count(tokens):
     """Format token count for display"""
@@ -172,7 +219,13 @@ def create_sparkline(values, width=30):
     min_val = min(values)
     
     if max_val == min_val:
-        return Colors.BRIGHT_GREEN + chars[4] * min(width, len(values)) + Colors.RESET
+        # If all values are the same
+        if max_val == 0:
+            # All zeros (idle) - show lowest bars
+            return Colors.LIGHT_GRAY + chars[0] * min(width, len(values)) + Colors.RESET
+        else:
+            # All same non-zero value - show medium bars
+            return Colors.BRIGHT_GREEN + chars[4] * min(width, len(values)) + Colors.RESET
     
     sparkline = ""
     data_width = min(width, len(values))
@@ -281,60 +334,95 @@ def create_mini_chart(values, width=30, height=4):
     
     return lines
 
-def get_real_time_burn_data():
-    """Get real-time burn rate data from recent session activity (ccusage-compatible)"""
+def get_all_messages(session_id):
+    """Get all messages from specified session transcript"""
     try:
-        all_messages = get_all_messages()
-        if not all_messages:
+        if not session_id:
             return []
         
-        # Get last 30 minutes of data
+        transcript_file = find_session_transcript(session_id)
+        if not transcript_file:
+            return []
+        
+        messages = []
+        with open(transcript_file, 'r') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    messages.append(entry)
+                except json.JSONDecodeError:
+                    continue
+        
+        return messages
+    except:
+        return []
+
+def get_real_time_burn_data(session_id=None):
+    """Get real-time burn rate data from recent session activity with idle detection (30 minutes)"""
+    try:
+        if not session_id:
+            return []
+            
+        # Get transcript file for current session
+        transcript_file = find_session_transcript(session_id)
+        if not transcript_file:
+            return []
+        
         now = datetime.now()
         thirty_min_ago = now - timedelta(minutes=30)
         
-        # Filter messages to current session and time window
-        recent_messages = []
-        for msg in all_messages:
-            try:
-                msg_time = datetime.fromisoformat(msg.get('timestamp', '').replace('Z', '+00:00')).replace(tzinfo=None)
-                if msg_time >= thirty_min_ago:
-                    recent_messages.append((msg_time, msg))
-            except:
-                continue
+        # Read messages from transcript
+        messages_with_time = []
         
-        if not recent_messages:
+        with open(transcript_file, 'r') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    timestamp_str = entry.get('timestamp')
+                    if not timestamp_str:
+                        continue
+                    
+                    # Parse timestamp and convert to local time
+                    msg_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    msg_time = msg_time.astimezone().replace(tzinfo=None)  # Convert to local time
+                    
+                    # Only consider messages from last 30 minutes
+                    if msg_time >= thirty_min_ago:
+                        messages_with_time.append((msg_time, entry))
+                        
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        
+        if not messages_with_time:
             return []
         
         # Sort by time
-        recent_messages.sort(key=lambda x: x[0])
+        messages_with_time.sort(key=lambda x: x[0])
         
-        # Group messages by 1-minute intervals (more like ccusage)
+        # Calculate burn rates per minute
         burn_rates = []
-        interval_minutes = 1
-        current_time = thirty_min_ago
         
-        while current_time <= now:
-            interval_end = current_time + timedelta(minutes=interval_minutes)
+        for minute in range(30):
+            # Define 1-minute interval
+            interval_start = thirty_min_ago + timedelta(minutes=minute)
+            interval_end = interval_start + timedelta(minutes=1)
             
-            # Count tokens in this interval, using ccusage's method
+            # Count tokens in this interval
             interval_tokens = 0
-            for msg_time, msg in recent_messages:
-                if current_time <= msg_time < interval_end:
-                    usage = msg.get('usage', {})
-                    # ccusage counts input + output tokens for burn rate
-                    interval_tokens += usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
             
-            # Calculate burn rate (tokens per minute, same as ccusage)
-            burn_rate = interval_tokens / interval_minutes if interval_minutes > 0 else 0
-            burn_rates.append(burn_rate)
+            for msg_time, msg in messages_with_time:
+                if interval_start <= msg_time < interval_end:
+                    # Check for token usage in assistant messages
+                    if msg.get('type') == 'assistant' and msg.get('message', {}).get('usage'):
+                        usage = msg['message']['usage']
+                        interval_tokens += get_total_tokens(usage)
             
-            current_time = interval_end
+            # Burn rate = tokens per minute
+            burn_rates.append(interval_tokens)
         
-        # Return last 30 data points (30 minutes of 1-minute intervals)
-        return burn_rates[-30:] if len(burn_rates) >= 30 else burn_rates
+        return burn_rates
     
-    except Exception as e:
-        # Return empty list if calculation fails
+    except Exception:
         return []
 
 def show_live_burn_graph(session_data=None):
@@ -447,14 +535,13 @@ def show_live_burn_monitoring():
         print(f"\n{Colors.BRIGHT_RED}Error in live monitoring: {e}{Colors.RESET}")
 
 def calculate_tokens_from_transcript(file_path):
-    """Calculate total tokens from transcript file with cache token breakdown"""
-    last_usage = None
+    """Calculate total tokens from transcript file by summing all message usage data"""
     message_count = 0
     error_count = 0
     user_messages = 0
     assistant_messages = 0
     
-    # トークンの詳細追跡
+    # トークンの詳細追跡（全メッセージの合計）
     total_input_tokens = 0
     total_output_tokens = 0
     total_cache_creation = 0
@@ -478,9 +565,14 @@ def calculate_tokens_from_transcript(file_path):
                     if 'error' in entry or entry.get('type') == 'error':
                         error_count += 1
                     
-                    # Check if this is an assistant message with usage data
+                    # 各assistantメッセージのusageを累積（正しい方法）
                     if entry.get('type') == 'assistant' and entry.get('message', {}).get('usage'):
-                        last_usage = entry['message']['usage']
+                        usage = entry['message']['usage']
+                        total_input_tokens += usage.get('input_tokens', 0)
+                        total_output_tokens += usage.get('output_tokens', 0)
+                        total_cache_creation += usage.get('cache_creation_input_tokens', 0)
+                        total_cache_read += usage.get('cache_read_input_tokens', 0)
+                        
                 except json.JSONDecodeError:
                     continue
     except FileNotFoundError:
@@ -488,22 +580,13 @@ def calculate_tokens_from_transcript(file_path):
     except Exception:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
     
-    if last_usage:
-        # 累積値を使用（最後のusageには全ての合計が含まれる）
-        total_input_tokens = last_usage.get('input_tokens', 0)
-        total_output_tokens = last_usage.get('output_tokens', 0)
-        total_cache_creation = last_usage.get('cache_creation_input_tokens', 0)
-        total_cache_read = last_usage.get('cache_read_input_tokens', 0)
-        
-        # 総トークン数（全て含む）
-        total_tokens = (
-            total_input_tokens +
-            total_output_tokens +
-            total_cache_creation +
-            total_cache_read
-        )
-    else:
-        total_tokens = 0
+    # 総トークン数（ccusage-compatible calculation）
+    total_tokens = get_total_tokens({
+        'input_tokens': total_input_tokens,
+        'output_tokens': total_output_tokens,
+        'cache_creation_input_tokens': total_cache_creation,
+        'cache_read_input_tokens': total_cache_read
+    })
     
     return (total_tokens, message_count, error_count, user_messages, assistant_messages,
             total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read)
@@ -553,12 +636,13 @@ def load_all_messages_chronologically():
                     try:
                         entry = json.loads(line.strip())
                         if entry.get('timestamp'):
-                            # UTC タイムスタンプをローカルタイムゾーンに変換
+                            # UTC タイムスタンプをローカルタイムゾーンに変換、但しUTCも保持
                             timestamp_utc = datetime.fromisoformat(entry['timestamp'].replace('Z', '+00:00'))
                             timestamp_local = timestamp_utc.astimezone()
                             
                             all_messages.append({
                                 'timestamp': timestamp_local,
+                                'timestamp_utc': timestamp_utc,  # ccusage compatibility
                                 'session_id': entry.get('sessionId'),
                                 'type': entry.get('type'),
                                 'usage': entry.get('message', {}).get('usage') if entry.get('message') else None,
@@ -574,16 +658,71 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """Detect 5-hour blocks from all messages for billing analysis"""
+    """Detect 5-hour blocks from all messages for billing analysis (ccusage-compatible)"""
     if not all_messages:
         return []
     
     blocks = []
     block_duration_seconds = block_duration_hours * 3600
     
-    # 最初のメッセージの時間を基準にブロック開始時刻を決定
-    first_message = all_messages[0]
-    session_start = first_message['timestamp'].replace(minute=0, second=0, microsecond=0)
+    # ccusage-compatible: Use UTC time and floor to hour (like ccusage floorToHour)
+    # Find today's session start (not overall first message which might be from days ago)
+    
+    # Get today's date
+    today = datetime.now().date()
+    
+    # ccusage-compatible: Find first message from current active session (not just today)
+    # Look for session boundary - significant time gap indicates new session
+    
+    current_time = datetime.now()
+    session_messages = []
+    
+    # Work backwards from recent messages to find session start
+    # Session starts after a gap of > 2 hours
+    recent_messages = all_messages[-500:]  # Look at last 500 messages for broader search
+    
+    session_start_found = False
+    for i in range(len(recent_messages) - 1, 0, -1):
+        current_msg = recent_messages[i]
+        prev_msg = recent_messages[i-1]
+        
+        # Convert to naive datetime for comparison
+        current_time_naive = current_msg['timestamp']
+        if hasattr(current_time_naive, 'tzinfo') and current_time_naive.tzinfo:
+            current_time_naive = current_time_naive.replace(tzinfo=None)
+            
+        prev_time_naive = prev_msg['timestamp']
+        if hasattr(prev_time_naive, 'tzinfo') and prev_time_naive.tzinfo:
+            prev_time_naive = prev_time_naive.replace(tzinfo=None)
+        
+        # Check for session gap (>2 hours for major session boundary)
+        gap_minutes = (current_time_naive - prev_time_naive).total_seconds() / 60
+        if gap_minutes > 120:  # 2 hours gap indicates new session
+            # Found session start
+            first_message = current_msg
+            session_start_found = True
+            break
+    
+    if not session_start_found:
+        # Fallback: use first of recent messages
+        first_message = recent_messages[0] if recent_messages else all_messages[0]
+    
+    # ccusage-compatible: Use UTC timestamp and floor to hour (floorToHour equivalent)
+    first_utc = first_message.get('timestamp_utc')
+    if not first_utc:
+        # Fallback if UTC timestamp not available
+        first_utc = first_message['timestamp']
+    
+    # ccusage floorToHour: setUTCMinutes(0, 0, 0) equivalent
+    session_start_utc = first_utc.replace(minute=0, second=0, microsecond=0)
+    
+    # Convert to local time for display but keep UTC basis for calculation
+    if hasattr(session_start_utc, 'tzinfo') and session_start_utc.tzinfo:
+        # Has timezone info - convert to local and make naive
+        session_start = session_start_utc.astimezone().replace(tzinfo=None)
+    else:
+        # Already naive - use as is (already local time from load_all_messages)
+        session_start = session_start_utc
     
     # 時間ベースでブロックを生成
     current_time = datetime.now(session_start.tzinfo) if session_start.tzinfo else datetime.now()
@@ -597,20 +736,38 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
         block_end = session_start + timedelta(seconds=(block_num + 1) * block_duration_seconds)
         
         # このブロックに属するメッセージを収集
-        block_messages = [
-            msg for msg in all_messages
-            if block_start <= msg['timestamp'] < block_end
-        ]
+        # タイムゾーン情報を統一してから比較
+        block_messages = []
+        for msg in all_messages:
+            msg_time = msg['timestamp']
+            # タイムゾーン情報があれば削除してナイーブにする
+            if hasattr(msg_time, 'tzinfo') and msg_time.tzinfo:
+                msg_time = msg_time.replace(tzinfo=None)
+            
+            if block_start <= msg_time < block_end:
+                block_messages.append(msg)
         
         # 最後のブロック（現在アクティブ）は常に作成
         if block_messages or block_num == num_blocks - 1:
-            # 実際の終了時刻
+            # 実際の終了時刻（タイムゾーン情報を統一）
             if block_num == num_blocks - 1:  # 最後のブロック
                 actual_end_time = current_time
                 is_active = True
             else:
-                actual_end_time = block_messages[-1]['timestamp'] if block_messages else block_end
+                if block_messages:
+                    last_msg_time = block_messages[-1]['timestamp']
+                    # タイムゾーン情報があれば削除してナイーブにする
+                    if hasattr(last_msg_time, 'tzinfo') and last_msg_time.tzinfo:
+                        actual_end_time = last_msg_time.replace(tzinfo=None)
+                    else:
+                        actual_end_time = last_msg_time
+                else:
+                    actual_end_time = block_end
                 is_active = False
+            
+            # actual_end_timeもナイーブにする
+            if hasattr(actual_end_time, 'tzinfo') and actual_end_time.tzinfo:
+                actual_end_time = actual_end_time.replace(tzinfo=None)
             
             blocks.append({
                 'start_time': block_start,
@@ -671,7 +828,12 @@ def calculate_block_statistics(block):
             total_cache_creation = message['usage'].get('cache_creation_input_tokens', 0)
             total_cache_read = message['usage'].get('cache_read_input_tokens', 0)
     
-    total_tokens = total_input_tokens + total_output_tokens + total_cache_creation + total_cache_read
+    total_tokens = get_total_tokens({
+        'input_tokens': total_input_tokens,
+        'output_tokens': total_output_tokens,
+        'cache_creation_input_tokens': total_cache_creation,
+        'cache_read_input_tokens': total_cache_read
+    })
     
     # アクティブ期間の検出（ブロック内）
     active_periods = detect_active_periods(block['messages'])
@@ -1090,6 +1252,9 @@ def main():
         
         # Extract basic values
         model = data.get('model', {}).get('display_name', 'Unknown')
+        
+        # Store plan override for later use
+        plan_override = getattr(args, 'plan', None) if hasattr(args, 'plan') else None
         workspace = data.get('workspace', {})
         current_dir = os.path.basename(workspace.get('current_dir', data.get('cwd', '.')))
         session_id = data.get('session_id')
@@ -1144,7 +1309,8 @@ def main():
                     output_tokens = block_stats['output_tokens']
                     cache_creation = block_stats['cache_creation']
                     cache_read = block_stats['cache_read']
-            except Exception:
+            except Exception as e:
+                
                 # フォールバック: 従来の単一ファイル方式
                 transcript_file = find_session_transcript(session_id)
                 if transcript_file:
@@ -1152,7 +1318,7 @@ def main():
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
                     message_count = user_messages + assistant_messages
         
-        # Calculate percentage
+        # Calculate percentage for Compact display (use 5-hour block tokens)
         percentage = min(100, round((total_tokens / COMPACTION_THRESHOLD) * 100))
         
         # Get additional info
@@ -1194,7 +1360,7 @@ def main():
         if git_branch:
             git_display = f"{Colors.BRIGHT_GREEN}🌿 {git_branch}"
             if modified_files > 0:
-                git_display += f" {Colors.BRIGHT_YELLOW}±{modified_files}"
+                git_display += f" {Colors.BRIGHT_YELLOW}M{modified_files}"
             if untracked_files > 0:
                 git_display += f" {Colors.BRIGHT_CYAN}+{untracked_files}"
             git_display += Colors.RESET
@@ -1225,8 +1391,11 @@ def main():
         # 行2: Token情報の統合
         line2_parts = []
         
-        # Token使用量（バランス版）
-        line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Token: {Colors.RESET}{Colors.BRIGHT_WHITE}{token_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
+        # 🪙 Compact line: Shows FIVE_HOUR_BLOCK_TOKENS vs compaction limit
+        # SOURCE: block_stats['total_tokens'] (5-hour cumulative)
+        five_hour_block_tokens = total_tokens  # From block_stats calculation above
+        compact_display = format_token_count(five_hour_block_tokens)
+        line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Compact: {Colors.RESET}{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
         
         # プログレスバー
         line2_parts.append(get_progress_bar(percentage, width=12))
@@ -1247,14 +1416,12 @@ def main():
         
         # 警告表示を削除（ユーザーリクエスト）
         
-        # 行3: Session情報の統合
+        # 行3: Session情報の統合（元に戻す）
         line3_parts = []
         if duration_seconds is not None and session_duration:
             # 5時間制限での計算
             hours_elapsed = duration_seconds / 3600
             block_progress = (hours_elapsed % 5) / 5 * 100  # 5時間内の進捗
-            
-            # 効率性指標は表示しない（削除）
             
             # セッション開始時間を取得
             session_start_time = None
@@ -1299,7 +1466,7 @@ def main():
             if line3_parts:
                 print(" ".join(line3_parts))
             
-            # 4行目: ライブパフォーマンス指標（ccusage live monitoring風）
+            # 4行目: ccusage-style Tokens + Burn Rate表示（1行統合）
             session_data = None
             if block_stats:
                 session_data = {
@@ -1309,9 +1476,9 @@ def main():
                     'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
                     'current_cost': session_cost
                 }
-            line4_parts = get_live_performance_metrics(session_data)
+            line4_parts = get_ccusage_style_line(session_data, session_id)
             if line4_parts:
-                print(" ".join(line4_parts))
+                print(line4_parts)
             
             # ccusage-style: sparkline integrated into 4th line
         
@@ -1325,80 +1492,135 @@ def main():
             f.write(f"{datetime.now()}: {e}\n")
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
 
-def get_live_performance_metrics(current_session_data=None):
-    """Get live performance metrics for 4th line display (ccusage live monitoring style)"""
+def calculate_true_session_cumulative(session_id):
+    """Calculate true session cumulative by summing current transcript tokens
+    
+    Since each usage is per-message, we sum all messages in current session.
+    This is the same as the current transcript total.
+    """
     try:
-        line4_parts = []
+        if not session_id:
+            return 0
         
-        # Get recent activity for burn rate calculation
-        current_block_progress = 0
+        # 現在のトランスクリプトファイルから累積計算
+        transcript_file = find_session_transcript(session_id)
+        if not transcript_file:
+            return 0
         
-        # Extract current session data if available (burn rate moved to graph)
-        if current_session_data:
-            duration = current_session_data.get('duration_seconds', 0)
-            
-            # Calculate block progress (5-hour block)
-            if duration > 0:
-                hours_elapsed = duration / 3600
-                current_block_progress = (hours_elapsed % 5) / 5 * 100
+        # calculate_tokens_from_transcriptが既に正しい累積計算を行う
+        (total_tokens, _, _, _, _, _, _, _, _) = calculate_tokens_from_transcript(transcript_file)
         
-        # Block progress with burn rate
-        if current_block_progress > 0:
-            progress_color = Colors.BRIGHT_GREEN if current_block_progress < 80 else Colors.BRIGHT_YELLOW if current_block_progress < 95 else Colors.BRIGHT_RED
+        return total_tokens
+        
+    except Exception:
+        return 0
+
+def get_session_cumulative_usage(total_tokens, session_cost, plan_override=None, session_id=None):
+    """Get session cumulative token usage for 4th line display"""
+    try:
+        line5_parts = []
+        
+        # 現在のセッション累積 = 現在のトランスクリプト累積
+        # （コンパクション後は新しいトランスクリプトファイルが作成されるため）
+        true_session_total = total_tokens
+        
+        if true_session_total > 0:
+            # プラン別の推定制限値（調査結果に基づく）
+            estimated_limits = {
+                'pro': 44000,      # Pro plan: ~44K tokens (~$12-13/session)
+                'max5': 88000,     # Max5 plan: ~88K tokens
+                'max20': 220000    # Max20 plan: ~220K tokens
+            }
             
-            # Calculate burn rate for inline display
-            burn_rate = 0
-            if current_session_data:
-                recent_tokens = current_session_data.get('total_tokens', 0)
-                duration = current_session_data.get('duration_seconds', 0)
-                if duration > 0:
-                    burn_rate = (recent_tokens / duration) * 60
-            
-            # Determine burn status
-            if burn_rate > 1000:
-                burn_color = Colors.BRIGHT_RED
-                burn_emoji = "⚡"
-            elif burn_rate > 500:
-                burn_color = Colors.BRIGHT_YELLOW
-                burn_emoji = "🔥"
+            # プランオーバーライドがある場合はそれを使用
+            if plan_override and plan_override in estimated_limits:
+                estimated_limit = estimated_limits[plan_override]
+                plan_hint = plan_override.upper()
             else:
-                burn_color = Colors.BRIGHT_GREEN
-                burn_emoji = "✓"
+                # 使用量から制限値を推定（調査結果に基づく）
+                if total_tokens > 120000:
+                    estimated_limit = estimated_limits['max20']
+                    plan_hint = "MAX20"
+                elif total_tokens > 50000:
+                    estimated_limit = estimated_limits['max5']
+                    plan_hint = "MAX5"
+                else:
+                    estimated_limit = estimated_limits['pro']
+                    plan_hint = "PRO"
             
-            # Generate sparkline for burn rate
-            burn_rates = []
-            for i in range(20):  # Short sparkline
-                variation = (i % 5 - 2) * 50 + (i % 3 - 1) * 30
-                rate = max(200, burn_rate + variation)
-                burn_rates.append(rate)
-            sparkline = create_sparkline(burn_rates, width=20)
+            # セッション使用率を計算
+            session_usage_percent = min(100, (true_session_total / estimated_limit) * 100)
             
-            line4_parts.append(f"{Colors.BRIGHT_CYAN}🎯 Block:{Colors.RESET} {progress_color}{current_block_progress:.0f}%{Colors.RESET} {burn_color}{burn_emoji} Burn: {burn_rate:.0f} tok/min{Colors.RESET} {sparkline}")
+            # 5時間セッション累積使用量表示
+            line5_parts.append(f"{Colors.BRIGHT_CYAN}📊 Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{format_token_count(true_session_total)}{Colors.RESET}")
+            
+            # セッション使用量プログレスバー
+            session_bar = get_progress_bar(session_usage_percent, width=15)
+            line5_parts.append(session_bar)
+            
+            # セッション使用率とプランヒント
+            usage_color = get_percentage_color(session_usage_percent)
+            plan_display = f"~{plan_hint}" if not plan_override else plan_hint
+            line5_parts.append(f"{usage_color}{session_usage_percent:.0f}%{Colors.RESET} {Colors.LIGHT_GRAY}{plan_display}{Colors.RESET}")
+            
+            # コスト表示
+            if session_cost > 0:
+                cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
+                line5_parts.append(f"{cost_color}${session_cost:.2f}{Colors.RESET}")
         
-        # Session efficiency (active vs total time)
-        efficiency = current_session_data.get('efficiency_ratio', 0) if current_session_data else 0
-        if efficiency > 0:
-            efficiency_percent = efficiency * 100
-            efficiency_color = Colors.BRIGHT_GREEN if efficiency_percent > 70 else Colors.BRIGHT_YELLOW if efficiency_percent > 50 else Colors.BRIGHT_RED
-            line4_parts.append(f"{Colors.BRIGHT_CYAN}⚡ Efficiency:{Colors.RESET} {efficiency_color}{efficiency_percent:.0f}%{Colors.RESET}")
+        return line5_parts if line5_parts else None
         
-        # Projection: estimated session end cost/time
-        if current_session_data and efficiency > 0:
-            current_cost = current_session_data.get('current_cost', 0)
-            if current_cost > 0 and current_block_progress > 10:  # Only project if we have meaningful data
-                # Simple projection based on current burn rate
-                remaining_block_time = (100 - current_block_progress) / 100 * 5 * 3600  # seconds
-                projected_cost = current_cost * (100 / current_block_progress)
-                
-                if remaining_block_time > 0:
-                    remaining_hours = int(remaining_block_time // 3600)
-                    remaining_minutes = int((remaining_block_time % 3600) // 60)
-                    time_str = f"{remaining_hours}h {remaining_minutes}m" if remaining_hours > 0 else f"{remaining_minutes}m"
-                    
-                    proj_color = Colors.BRIGHT_GREEN if projected_cost < 5.0 else Colors.BRIGHT_YELLOW if projected_cost < 10.0 else Colors.BRIGHT_RED
-                    line4_parts.append(f"{Colors.BRIGHT_CYAN}📈 Proj:{Colors.RESET} {proj_color}${projected_cost:.2f}{Colors.RESET} {Colors.LIGHT_GRAY}({time_str} left){Colors.RESET}")
+    except Exception:
+        return None
+
+def get_ccusage_style_line(current_session_data=None, session_id=None):
+    """Get ccusage-style unified line: Tokens: N,NNN (Burn Rate: N,NNN token/min ✓ STATUS)"""
+    try:
+        # Calculate burn rate
+        burn_rate = 0
+        if current_session_data:
+            recent_tokens = current_session_data.get('total_tokens', 0)
+            duration = current_session_data.get('duration_seconds', 0)
+            if duration > 0:
+                burn_rate = (recent_tokens / duration) * 60
         
-        return line4_parts if line4_parts else None
+        # Determine burn status (ccusage thresholds)
+        if burn_rate > 1000:
+            status_color = Colors.BRIGHT_RED
+            status_text = "HIGH"
+            status_emoji = "⚡"
+        elif burn_rate > 500:
+            status_color = Colors.BRIGHT_YELLOW
+            status_text = "MODERATE"
+            status_emoji = "🔥"
+        else:
+            status_color = Colors.BRIGHT_GREEN
+            status_text = "NORMAL"
+            status_emoji = "✓"
+        
+        # 🔥 Burn line: Shows CURRENT_TRANSCRIPT_TOKENS (current file cumulative)
+        # SOURCE: calculate_true_session_cumulative() (current JSONL file only)
+        current_transcript_tokens = calculate_true_session_cumulative(session_id) if session_id else 0
+        
+        # Format exactly like ccusage
+        tokens_formatted = f"{current_transcript_tokens:,}"
+        burn_rate_formatted = f"{burn_rate:,.0f}"
+        
+        # Generate 30-minute sparkline from actual session data
+        burn_rates = get_real_time_burn_data(session_id)
+        
+        # Debug info (can be removed later)
+        total_activity = sum(burn_rates) if burn_rates else 0
+        # print(f"DEBUG: burn_rates length={len(burn_rates) if burn_rates else 0}, total={total_activity}", file=sys.stderr)
+        
+        if not burn_rates:
+            # No data available - show flat line
+            burn_rates = [0] * 30
+        
+        sparkline = create_sparkline(burn_rates, width=30)
+        
+        return (f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}{Colors.BRIGHT_WHITE}{tokens_formatted}{Colors.RESET} "
+                f"(Rate: {burn_rate_formatted}/min) {sparkline}")
         
     except Exception:
         return None
@@ -1659,6 +1881,7 @@ def show_usage_help():
     print(f"  {Colors.BRIGHT_WHITE}statusline daily --date YYYY-MM-DD{Colors.RESET}  # Show specific date")
     print(f"  {Colors.BRIGHT_WHITE}statusline graph{Colors.RESET}              # Show visual charts and graphs")
     print(f"  {Colors.BRIGHT_WHITE}statusline burn{Colors.RESET}               # Real-time burn rate monitor")
+    print(f"  {Colors.BRIGHT_WHITE}statusline --plan pro{Colors.RESET}        # Override Claude subscription plan")
     print(f"  {Colors.BRIGHT_WHITE}statusline --help{Colors.RESET}             # Show this help")
     print()
     print("Examples:")
@@ -1666,6 +1889,8 @@ def show_usage_help():
     print(f"  {Colors.LIGHT_GRAY}statusline daily --date 2025-01-15{Colors.RESET}")
     print(f"  {Colors.LIGHT_GRAY}statusline graph{Colors.RESET}")
     print(f"  {Colors.LIGHT_GRAY}statusline burn{Colors.RESET}")
+    print(f"  {Colors.LIGHT_GRAY}statusline --plan pro{Colors.RESET}")
+    print(f"  {Colors.LIGHT_GRAY}statusline --plan max20{Colors.RESET}")
     print()
 
 if __name__ == "__main__":
@@ -1673,13 +1898,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Claude Code statusline and usage analysis', add_help=False)
     parser.add_argument('command', nargs='?', choices=['daily', 'graph', 'burn'], help='Usage analysis command')
     parser.add_argument('--date', type=str, help='Date for analysis (YYYY-MM-DD)')
+    parser.add_argument('--plan', type=str, choices=['pro', 'max5', 'max20'], help='Override Claude subscription plan for limit calculation')
     parser.add_argument('--help', action='store_true', help='Show help')
     
     try:
         args = parser.parse_args()
     except SystemExit:
         # If parsing fails, assume it's being called as statusline (no args)
-        args = argparse.Namespace(command=None, date=None, help=False)
+        args = argparse.Namespace(command=None, date=None, plan=None, help=False)
     
     # Handle help
     if args.help:
