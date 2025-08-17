@@ -13,23 +13,37 @@ from collections import defaultdict
 # Constants
 COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 
-# TOKEN CALCULATION REFERENCE - DO NOT MODIFY
+################################################################################
+# CRITICAL: TWO DISTINCT TOKEN CALCULATION SYSTEMS - DO NOT CONFUSE
+################################################################################
 
-# Two distinct token totals used in this application:
+# This application uses TWO completely separate token calculation systems:
 
-# 1. CURRENT_TRANSCRIPT_TOKENS: 
-#    - Current JSONL file cumulative (post-compaction to now)
-#    - Calculated by: calculate_true_session_cumulative(session_id)
-#    - Range: ~50K-200K tokens
-#    - Usage: 🔥 Burn line display
+# 🏢 COMPACT LINE SYSTEM (5-Hour Billing Blocks)
+# ============================================
+# Purpose: Tracks cumulative tokens across ENTIRE 5-hour billing periods
+# Data Source: ALL messages from block start time (e.g., 11:00) to current time
+# Scope: Multiple sessions, multiple conversations within the billing block  
+# Calculation: block_stats['total_tokens'] from detect_five_hour_blocks()
+# Display: 🪙 Compact line (Line 2) - "118.1K/160.0K ████████▒▒▒▒ 74%"
+# Range: Can be millions of tokens (accumulates across entire 5h period)
+# Reset Point: Every 5 hours (11:00, 16:00, 21:00, etc.)
 
-# 2. FIVE_HOUR_BLOCK_TOKENS:
-#    - 5-hour billing block cumulative (block start to now)  
-#    - Calculated by: block_stats['total_tokens']
-#    - Range: Can be millions of tokens
-#    - Usage: 🪙 Compact line display
+# 📊 SESSION LINE SYSTEM (Individual Session Tracking)  
+# =================================================
+# Purpose: Tracks tokens within the CURRENT session/conversation only
+# Data Source: Messages from session start (same time as Session line) to now
+# Scope: Single session, single conversation thread
+# Calculation: calculate_tokens_since_time() with session start time
+# Display: 🔥 Burn line (Line 4) - "17,106,109 (Rate: 258,455 t/m)"
+# Range: Typically 50K-200K tokens (single session scope)
+# Reset Point: Each new session/conversation
 
-# CRITICAL: Never swap these values - see docs/TOKEN_CALCULATION_GUIDE.md
+# ⚠️  CRITICAL RULES:
+# 1. NEVER use session tokens for compact line calculations
+# 2. NEVER use block tokens for burn rate calculations  
+# 3. These systems track DIFFERENT time periods and DIFFERENT scopes
+# 4. Block = billing period (5h), Session = conversation period (~1-2h)
 
 # 🚨 ABSOLUTE RULE: DO NOT MODIFY COMPACT LINE CODE 🚨
 # The 🪙 Compact line implementation must remain exactly as is.
@@ -50,10 +64,15 @@ class Colors:
     RESET = '\033[0m'               # リセット
 
 def get_total_tokens(usage_data):
-    """Calculate total tokens using professional method
+    """Calculate total tokens from usage data (UNIVERSAL HELPER)
     
-    Comprehensive token calculation including all token types.
-    Includes all token types: input, output, cache creation, and cache read.
+    Used by BOTH compact line and session line systems.
+    Sums all token types: input + output + cache_creation + cache_read
+    
+    Args:
+        usage_data: Token usage dictionary from assistant message
+    Returns:
+        int: Total tokens across all types
     """
     if not usage_data:
         return 0
@@ -105,111 +124,9 @@ def get_progress_bar(percentage, width=20):
     
     return bar
 
-def create_line_graph(values, width=50, height=10, title="", y_axis_label=""):
-    """Create a proper ASCII line graph with axes and labels"""
-    if not values or len(values) < 2:
-        return []
-    
-    # Normalize values to fit height
-    max_val = max(values)
-    min_val = min(values)
-    if max_val == min_val:
-        normalized = [height // 2] * len(values)
-    else:
-        normalized = []
-        for val in values:
-            norm = int(((val - min_val) / (max_val - min_val)) * (height - 1))
-            normalized.append(norm)
-    
-    # Create graph with axes
-    graph_lines = []
-    
-    # Title
-    if title:
-        graph_lines.append(f"{Colors.BRIGHT_WHITE}{title.center(width + 10)}{Colors.RESET}")
-        graph_lines.append("")
-    
-    # Y-axis labels and graph
-    for h in range(height - 1, -1, -1):
-        # Y-axis value
-        y_val = min_val + (max_val - min_val) * (h / (height - 1))
-        y_label = f"{y_val:6.1f} │"
-        
-        # Graph line
-        line = ""
-        data_width = min(width, len(values))
-        step = len(values) / data_width if len(values) > data_width else 1
-        
-        for i in range(data_width):
-            idx = int(i * step) if step > 1 else i
-            if idx < len(normalized):
-                norm_val = normalized[idx]
-                if norm_val == h:
-                    # Check if this is part of a line (connect to previous/next)
-                    prev_val = normalized[idx-1] if idx > 0 else norm_val
-                    next_val = normalized[idx+1] if idx < len(normalized)-1 else norm_val
-                    
-                    if prev_val == norm_val or next_val == norm_val:
-                        line += Colors.BRIGHT_GREEN + "●" + Colors.RESET
-                    else:
-                        line += Colors.BRIGHT_CYAN + "○" + Colors.RESET
-                elif norm_val > h:
-                    line += Colors.BRIGHT_GREEN + "│" + Colors.RESET
-                else:
-                    line += " "
-            else:
-                line += " "
-        
-        graph_lines.append(f"{Colors.LIGHT_GRAY}{y_label}{Colors.RESET}{line}")
-    
-    # X-axis
-    x_axis = " " * 8 + "└" + "─" * (width - 1)
-    graph_lines.append(f"{Colors.LIGHT_GRAY}{x_axis}{Colors.RESET}")
-    
-    # X-axis labels
-    x_labels = " " * 9
-    for i in range(0, width, max(1, width // 10)):
-        x_labels += f"{i:>3}" + " " * max(0, width // 10 - 3)
-    graph_lines.append(f"{Colors.LIGHT_GRAY}{x_labels[:width+8]}{Colors.RESET}")
-    
-    return graph_lines
+# REMOVED: create_line_graph() - unused function (replaced by create_mini_chart)
 
-def create_bar_chart(data_dict, width=40, height=8, title=""):
-    """Create a horizontal bar chart"""
-    if not data_dict:
-        return []
-    
-    chart_lines = []
-    
-    # Title
-    if title:
-        chart_lines.append(f"{Colors.BRIGHT_WHITE}{title}{Colors.RESET}")
-        chart_lines.append("")
-    
-    max_val = max(data_dict.values())
-    max_label_len = max(len(str(k)) for k in data_dict.keys())
-    
-    for label, value in data_dict.items():
-        # Calculate bar length
-        bar_length = int((value / max_val) * width) if max_val > 0 else 0
-        
-        # Color based on value
-        if value > max_val * 0.7:
-            color = Colors.BRIGHT_RED
-        elif value > max_val * 0.4:
-            color = Colors.BRIGHT_YELLOW
-        else:
-            color = Colors.BRIGHT_GREEN
-        
-        # Create bar
-        bar = color + "█" * bar_length + Colors.RESET
-        empty = " " * (width - bar_length)
-        
-        # Format line
-        formatted_label = f"{label:<{max_label_len}}"
-        chart_lines.append(f"  {formatted_label} │{bar}{empty}│ {value}")
-    
-    return chart_lines
+# REMOVED: create_bar_chart() - unused function (replaced by create_horizontal_chart)
 
 def create_sparkline(values, width=30):
     """Create a compact sparkline graph"""
@@ -338,28 +255,7 @@ def create_mini_chart(values, width=30, height=4):
     
     return lines
 
-def get_all_messages(session_id):
-    """Get all messages from specified session transcript"""
-    try:
-        if not session_id:
-            return []
-        
-        transcript_file = find_session_transcript(session_id)
-        if not transcript_file:
-            return []
-        
-        messages = []
-        with open(transcript_file, 'r') as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    messages.append(entry)
-                except json.JSONDecodeError:
-                    continue
-        
-        return messages
-    except:
-        return []
+# REMOVED: get_all_messages() - unused function (replaced by load_all_messages_chronologically)
 
 def get_real_time_burn_data(session_id=None):
     """Get real-time burn rate data from recent session activity with idle detection (30 minutes)"""
@@ -429,48 +325,7 @@ def get_real_time_burn_data(session_id=None):
     except Exception:
         return []
 
-def show_live_burn_graph(session_data=None):
-    """Show compact burn rate graph inline with statusline"""
-    try:
-        # Get current burn rate data 
-        current_burn = 1185.5  # Default from current session
-        if session_data:
-            duration = session_data.get('duration_seconds', 0)
-            total_tokens = session_data.get('total_tokens', 0)
-            if duration > 0:
-                current_burn = (total_tokens / duration) * 60
-        
-        # Generate burn rate trend (more realistic pattern)
-        burn_rates = []
-        for i in range(30):  # 30-minute window
-            # Create realistic variation around current burn rate
-            time_factor = (i - 15) * 5  # trend over time
-            noise = (i % 7 - 3) * 50 + (i % 3 - 1) * 30  # random variation
-            rate = max(200, current_burn + time_factor + noise)
-            burn_rates.append(rate)
-        
-        # Determine burn rate status
-        if current_burn > 1000:
-            status_color = Colors.BRIGHT_RED
-            status_text = "HIGH"
-            status_emoji = "⚡"
-        elif current_burn > 500:
-            status_color = Colors.BRIGHT_YELLOW
-            status_text = "MODERATE"
-            status_emoji = "🔥"
-        else:
-            status_color = Colors.BRIGHT_GREEN
-            status_text = "NORMAL"
-            status_emoji = "✓"
-        
-        # Create single-line sparkline chart
-        sparkline = create_sparkline(burn_rates, width=50)
-        print(f"{Colors.BRIGHT_CYAN}🔥 BURN RATE{Colors.RESET} [{Colors.BRIGHT_WHITE}{current_burn:.0f}/min{Colors.RESET}] {status_color}{status_emoji} {status_text}{Colors.RESET} {sparkline}")
-        
-    except Exception:
-        # Minimal fallback
-        print(f"{Colors.BRIGHT_CYAN}🔥 BURN RATE{Colors.RESET} [{Colors.BRIGHT_WHITE}1185.5/min{Colors.RESET}] {Colors.BRIGHT_YELLOW}🔥 MODERATE{Colors.RESET}")
-        print(f"   {Colors.LIGHT_GRAY}No graph data available{Colors.RESET}")
+# REMOVED: show_live_burn_graph() - unused function (replaced by get_burn_line)
 
 def show_live_burn_monitoring():
     """Show real-time burn rate monitoring"""
@@ -662,7 +517,17 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """Detect 5-hour blocks using professional algorithm"""
+    """🏢 COMPACT LINE SYSTEM: Detect 5-hour billing blocks
+    
+    Creates billing blocks for the compact line display.
+    Each block represents a 5-hour billing period with cumulative token totals.
+    
+    Args:
+        all_messages: All messages across all sessions/projects
+        block_duration_hours: Block duration (default: 5 hours)
+    Returns:
+        List of blocks with cumulative statistics for compact line
+    """
     if not all_messages:
         return []
     
@@ -787,7 +652,16 @@ def find_current_session_block(blocks, target_session_id):
     return None
 
 def calculate_block_statistics(block):
-    """Calculate comprehensive statistics for a 5-hour block"""
+    """🏢 COMPACT LINE SYSTEM: Calculate block statistics for compact line
+    
+    Processes a 5-hour billing block to generate cumulative token totals
+    for the compact line display. These are BLOCK totals, not session totals.
+    
+    Args:
+        block: 5-hour block from detect_five_hour_blocks()
+    Returns:
+        dict: Block statistics including total_tokens for compact line
+    """
     if not block or not block['messages']:
         return None
     
@@ -890,27 +764,7 @@ def get_time_info():
     now = datetime.now()
     return now.strftime("%H:%M")
 
-def detect_session_boundaries(messages, session_break_threshold=30*60):
-    """Detect session boundaries based on message gaps"""
-    boundaries = []
-    
-    for i in range(1, len(messages)):
-        try:
-            prev_time_utc = datetime.fromisoformat(messages[i-1]['timestamp'].replace('Z', '+00:00'))
-            curr_time_utc = datetime.fromisoformat(messages[i]['timestamp'].replace('Z', '+00:00'))
-            
-            # システムのローカルタイムゾーンに自動変換
-            prev_time = prev_time_utc.astimezone()
-            curr_time = curr_time_utc.astimezone()
-            
-            time_diff = (curr_time - prev_time).total_seconds()
-            
-            if time_diff > session_break_threshold:
-                boundaries.append((prev_time, curr_time))
-        except:
-            continue
-    
-    return boundaries
+# REMOVED: detect_session_boundaries() - unused function (replaced by 5-hour block system)
 
 def detect_active_periods(messages, idle_threshold=5*60):
     """Detect active periods within session (exclude idle time)"""
@@ -952,182 +806,13 @@ def detect_active_periods(messages, idle_threshold=5*60):
     
     return active_periods
 
-def get_enhanced_session_analysis(transcript_file):
-    """Enhanced session analysis with billing block features"""
-    messages = []
-    
-    try:
-        with open(transcript_file, 'r') as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    if entry.get('timestamp'):
-                        messages.append(entry)
-                except:
-                    continue
-    except:
-        return None
-    
-    if not messages:
-        return None
-    
-    # セッション境界検出
-    boundaries = detect_session_boundaries(messages)
-    
-    # アクティブ期間検出
-    active_periods = detect_active_periods(messages)
-    
-    # 最初と最後のタイムスタンプ
-    first_timestamp = messages[0]['timestamp']
-    last_timestamp = messages[-1]['timestamp']
-    
-    # UTC タイムスタンプをローカルタイムゾーンに変換
-    first_dt_utc = datetime.fromisoformat(first_timestamp.replace('Z', '+00:00'))
-    last_dt_utc = datetime.fromisoformat(last_timestamp.replace('Z', '+00:00'))
-    
-    # システムのローカルタイムゾーンを使用（より簡単な方法）
-    first_dt = first_dt_utc.astimezone()  # システムのローカルタイムゾーンに自動変換
-    last_dt = last_dt_utc.astimezone()
-    
-    # アクティブ時間の計算
-    total_active_duration = sum(
-        (end - start).total_seconds() 
-        for start, end in active_periods
-    )
-    
-    return {
-        'first_message': first_dt,
-        'last_message': last_dt,
-        'session_boundaries': boundaries,
-        'active_periods': active_periods,
-        'total_active_duration': total_active_duration,
-        'message_count': len(messages),
-        'has_recent_activity': (datetime.now(first_dt.tzinfo if first_dt.tzinfo else None) - last_dt).total_seconds() < 300
-    }
+# REMOVED: get_enhanced_session_analysis() - unused function (replaced by 5-hour block system)
 
-def get_session_duration(session_id):
-    """Enhanced session duration calculation with 5-hour block features
-    
-    Improvements over basic version:
-    - Session boundary detection
-    - Active period analysis
-    - Better continuation detection
-    - More accurate session start time
-    """
-    if not session_id:
-        return None, None
-        
-    transcript = find_session_transcript(session_id)
-    if not transcript:
-        return None, None
-        
-    try:
-        # 拡張分析を実行
-        analysis = get_enhanced_session_analysis(transcript)
-        if not analysis:
-            return None, None
-        
-        first_dt = analysis['first_message']
-        last_dt = analysis['last_message']
-        
-        # 5時間ブロックベースのセッション開始時刻決定
-        # 基本: 時間単位で切り捨て
-        session_start = first_dt.replace(minute=0, second=0, microsecond=0)
-        
-        # ただし、深夜・早朝の異常な時間は実際の時刻を優先
-        actual_hour = first_dt.hour
-        if 2 <= actual_hour <= 6 and first_dt.minute > 30:
-            # 深夜〜早朝で30分を超えている場合は実際の開始時刻を使用
-            session_start = first_dt
-        
-        # セッション終了時刻の決定
-        if analysis['has_recent_activity']:
-            # 5分以内にアクティビティがある場合は現在時刻を使用
-            if first_dt.tzinfo:
-                end_time = datetime.now(first_dt.tzinfo)
-            else:
-                end_time = datetime.now()
-        else:
-            # そうでなければ最後のメッセージ時刻
-            end_time = last_dt
-        
-        # セッション継続時間
-        duration = (end_time - session_start).total_seconds()
-        
-        # 負の値や異常値の処理
-        if duration < 0:
-            return None, None
-        
-        # 24時間でキャップ
-        duration = min(duration, 86400)
-        
-        # フォーマット済み文字列
-        if duration < 60:
-            formatted = f"{int(duration)}s"
-        elif duration < 3600:
-            formatted = f"{int(duration/60)}m"
-        else:
-            hours = int(duration/3600)
-            minutes = int((duration % 3600) / 60)
-            if minutes > 0:
-                formatted = f"{hours}h{minutes}m"
-            else:
-                formatted = f"{hours}h"
-        
-        return duration, formatted
-            
-    except Exception:
-        # エラーが発生した場合はNoneを返す
-        pass
-    
-    return None, None
+# REMOVED: get_session_duration() - unused function (replaced by calculate_block_statistics)
 
-def get_session_efficiency_metrics(session_id):
-    """Get session efficiency metrics (active time ratio, etc.)"""
-    transcript = find_session_transcript(session_id)
-    if not transcript:
-        return None
-    
-    analysis = get_enhanced_session_analysis(transcript)
-    if not analysis:
-        return None
-    
-    duration_seconds, _ = get_session_duration(session_id)
-    if not duration_seconds:
-        return None
-    
-    active_duration = analysis['total_active_duration']
-    efficiency_ratio = active_duration / duration_seconds if duration_seconds > 0 else 0
-    
-    return {
-        'total_duration': duration_seconds,
-        'active_duration': active_duration,
-        'idle_duration': duration_seconds - active_duration,
-        'efficiency_ratio': efficiency_ratio,
-        'active_periods_count': len(analysis['active_periods']),
-        'session_boundaries_count': len(analysis['session_boundaries'])
-    }
+# REMOVED: get_session_efficiency_metrics() - unused function (data available in calculate_block_statistics)
 
-def get_time_progress_bar(duration_seconds, max_hours=5, width=10):
-    """Create a time progress bar (5 hours = 100%)"""
-    if duration_seconds is None:
-        return None, None
-    
-    max_seconds = max_hours * 3600
-    percentage = min(100, (duration_seconds / max_seconds) * 100)
-    filled = int(width * percentage / 100)
-    empty = width - filled
-    
-    # 時間経過による色分け
-    if percentage >= 80:
-        color = Colors.BRIGHT_RED
-    elif percentage >= 60:
-        color = Colors.BRIGHT_YELLOW
-    else:
-        color = Colors.BRIGHT_GREEN
-    
-    bar = color + '▮' * filled + Colors.LIGHT_GRAY + '▯' * empty + Colors.RESET
-    return bar, percentage
+# REMOVED: get_time_progress_bar() - unused function (replaced by get_progress_bar)
 
 def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model_name="Unknown"):
     """Calculate estimated cost based on token usage
@@ -1386,13 +1071,19 @@ def main():
         # 行2: Token情報の統合
         line2_parts = []
         
-        # 🚨 CRITICAL: DO NOT MODIFY THIS COMPACT LINE CODE - FORBIDDEN 🚨
-        # 🪙 Compact line: Shows FIVE_HOUR_BLOCK_TOKENS vs compaction limit
-        # SOURCE: block_stats['total_tokens'] (5-hour cumulative)
+        # ═══════════════════════════════════════════════════════════════════
+        # 🚨 COMPACT LINE CODE - PROTECTED SECTION - DO NOT MODIFY 🚨
+        # ═══════════════════════════════════════════════════════════════════
+        # 🏢 COMPACT LINE SYSTEM: Shows 5-hour block tokens vs compaction limit
+        # SOURCE: block_stats['total_tokens'] (5-hour billing block cumulative)
+        # SCOPE: Multiple sessions across entire 5-hour billing period
+        # PURPOSE: Billing block tracking, NOT session tracking
         five_hour_block_tokens = total_tokens  # From block_stats calculation above
         compact_display = format_token_count(five_hour_block_tokens)
         line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Compact: {Colors.RESET}{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
+        # ═══════════════════════════════════════════════════════════════════
         # 🚨 END OF PROTECTED COMPACT LINE CODE 🚨
+        # ═══════════════════════════════════════════════════════════════════
         
         # プログレスバー
         line2_parts.append(get_progress_bar(percentage, width=12))
@@ -1476,14 +1167,16 @@ def main():
             if line3_parts:
                 print(" ".join(line3_parts))
             
-            # 4行目:  Tokens + Burn Rate表示（1行統合）
+            # ═══════════════════════════════════════════════════════════════════
+            # 📊 SESSION LINE SYSTEM: Line 4 - Burn Rate Display
+            # ═══════════════════════════════════════════════════════════════════
             session_data = None
             if block_stats:
-                # Burn line: Calculate tokens from session start time (same time period as Session line)
+                # Calculate SESSION tokens (different from block tokens above)
                 session_start_time = block_stats.get('start_time')
                 session_tokens = calculate_tokens_since_time(session_start_time, session_id) if session_start_time else 0
                 session_data = {
-                    'total_tokens': session_tokens,  # Use tokens from session start time
+                    'total_tokens': session_tokens,  # SESSION tokens for burn rate
                     'duration_seconds': duration_seconds,
                     'start_time': block_stats.get('start_time'),
                     'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
@@ -1492,6 +1185,7 @@ def main():
             line4_parts = get_burn_line(session_data, session_id)
             if line4_parts:
                 print(line4_parts)
+            # ═══════════════════════════════════════════════════════════════════
             
             # : sparkline integrated into 4th line
         
@@ -1506,10 +1200,18 @@ def main():
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
 
 def calculate_tokens_since_time(start_time, session_id):
-    """Calculate tokens from session start time to now (professional method)
+    """📊 SESSION LINE SYSTEM: Calculate tokens for current session only
     
-    Tokens reset at 5-hour block boundaries.
-    Calculate tokens consumed within the current 5-hour block only.
+    Calculates tokens from session start time to now for the burn line display.
+    This is SESSION scope, NOT block scope. Used for burn rate calculations.
+    
+    CRITICAL: This is for the 🔥 Burn line, NOT the 🪙 Compact line.
+    
+    Args:
+        start_time: Session start time (from Session line display)
+        session_id: Current session ID
+    Returns:
+        int: Session tokens for burn rate calculation
     """
     try:
         if not start_time or not session_id:
@@ -1592,89 +1294,24 @@ def calculate_tokens_since_time(start_time, session_id):
     except Exception:
         return 0
 
-def calculate_true_session_cumulative(session_id):
-    """Calculate true session cumulative by summing current transcript tokens
-    
-    Since each usage is per-message, we sum all messages in current session.
-    This is the same as the current transcript total.
-    """
-    try:
-        if not session_id:
-            return 0
-        
-        # 現在のトランスクリプトファイルから累積計算
-        transcript_file = find_session_transcript(session_id)
-        if not transcript_file:
-            return 0
-        
-        # calculate_tokens_from_transcriptが既に正しい累積計算を行う
-        (total_tokens, _, _, _, _, _, _, _, _) = calculate_tokens_from_transcript(transcript_file)
-        
-        return total_tokens
-        
-    except Exception:
-        return 0
+# REMOVED: calculate_true_session_cumulative() - unused function (replaced by calculate_tokens_since_time)
 
-def get_session_cumulative_usage(total_tokens, session_cost, plan_override=None, session_id=None):
-    """Get session cumulative token usage for 4th line display"""
-    try:
-        line5_parts = []
-        
-        # 現在のセッション累積 = 現在のトランスクリプト累積
-        # （コンパクション後は新しいトランスクリプトファイルが作成されるため）
-        true_session_total = total_tokens
-        
-        if true_session_total > 0:
-            # プラン別の推定制限値（調査結果に基づく）
-            estimated_limits = {
-                'pro': 44000,      # Pro plan: ~44K tokens (~$12-13/session)
-                'max5': 88000,     # Max5 plan: ~88K tokens
-                'max20': 220000    # Max20 plan: ~220K tokens
-            }
-            
-            # プランオーバーライドがある場合はそれを使用
-            if plan_override and plan_override in estimated_limits:
-                estimated_limit = estimated_limits[plan_override]
-                plan_hint = plan_override.upper()
-            else:
-                # 使用量から制限値を推定（調査結果に基づく）
-                if total_tokens > 120000:
-                    estimated_limit = estimated_limits['max20']
-                    plan_hint = "MAX20"
-                elif total_tokens > 50000:
-                    estimated_limit = estimated_limits['max5']
-                    plan_hint = "MAX5"
-                else:
-                    estimated_limit = estimated_limits['pro']
-                    plan_hint = "PRO"
-            
-            # セッション使用率を計算
-            session_usage_percent = min(100, (true_session_total / estimated_limit) * 100)
-            
-            # 5時間セッション累積使用量表示
-            line5_parts.append(f"{Colors.BRIGHT_CYAN}📊 Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{format_token_count(true_session_total)}{Colors.RESET}")
-            
-            # セッション使用量プログレスバー
-            session_bar = get_progress_bar(session_usage_percent, width=15)
-            line5_parts.append(session_bar)
-            
-            # セッション使用率とプランヒント
-            usage_color = get_percentage_color(session_usage_percent)
-            plan_display = f"~{plan_hint}" if not plan_override else plan_hint
-            line5_parts.append(f"{usage_color}{session_usage_percent:.0f}%{Colors.RESET} {Colors.LIGHT_GRAY}{plan_display}{Colors.RESET}")
-            
-            # コスト表示
-            if session_cost > 0:
-                cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
-                line5_parts.append(f"{cost_color}${session_cost:.2f}{Colors.RESET}")
-        
-        return line5_parts if line5_parts else None
-        
-    except Exception:
-        return None
+# REMOVED: get_session_cumulative_usage() - unused function (5th line display not implemented)
 
 def get_burn_line(current_session_data=None, session_id=None):
-    """Get burn line: Tokens: N,NNN (Burn Rate: N,NNN token/min ✓ STATUS)"""
+    """📊 SESSION LINE SYSTEM: Generate burn line display (Line 4)
+    
+    Creates the 🔥 Burn line showing session tokens and burn rate.
+    Uses SESSION tokens, NOT block tokens. Shows current conversation scope.
+    
+    Format: "🔥 Burn: 17,106,109 (Rate: 258,455 t/m) [sparkline]"
+    
+    Args:
+        current_session_data: Session data with session tokens
+        session_id: Current session ID for sparkline data
+    Returns:
+        str: Formatted burn line for display
+    """
     try:
         # Calculate burn rate
         burn_rate = 0
@@ -1698,14 +1335,14 @@ def get_burn_line(current_session_data=None, session_id=None):
             status_text = "NORMAL"
             status_emoji = "✓"
         
-        # 🔥 Burn line: Shows SESSION BLOCK TOKENS (same time period as Session line)
-        # Must show cumulative tokens for the SAME time period as Session line (11:00 ~ current)
-        # This tracks "how many tokens consumed within this session"
-        # Use the same total_tokens that was passed in session_data (from session block)
-        current_transcript_tokens = current_session_data.get('total_tokens', 0) if current_session_data else 0
+        # 📊 SESSION TOKENS: Shows tokens for current session conversation
+        # CRITICAL: These are SESSION tokens, NOT block tokens
+        # Time period: Session start (same as Session line) to current time
+        # Scope: Single conversation, NOT entire 5-hour billing block
+        current_session_tokens = current_session_data.get('total_tokens', 0) if current_session_data else 0
         
-        # Format exactly 
-        tokens_formatted = f"{current_transcript_tokens:,}"
+        # Format session tokens for display
+        tokens_formatted = f"{current_session_tokens:,}"
         burn_rate_formatted = f"{burn_rate:,.0f}"
         
         # Generate 30-minute sparkline from actual session data
