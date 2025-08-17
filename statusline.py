@@ -6,7 +6,7 @@ import os
 import subprocess
 import argparse
 from pathlib import Path
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, timezone, date
 import time
 from collections import defaultdict
 
@@ -30,6 +30,10 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 #    - Usage: 🪙 Compact line display
 #
 # CRITICAL: Never swap these values - see docs/TOKEN_CALCULATION_GUIDE.md
+#
+# 🚨 ABSOLUTE RULE: DO NOT MODIFY COMPACT LINE CODE 🚨
+# The 🪙 Compact line implementation must remain exactly as is.
+# Any changes to Compact line display logic are FORBIDDEN.
 
 # ANSI color codes optimized for black backgrounds - 全て明るいバージョン
 class Colors:
@@ -658,126 +662,109 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """Detect 5-hour blocks from all messages for billing analysis (ccusage-compatible)"""
+    """Detect 5-hour blocks using ccusage's identical algorithm"""
     if not all_messages:
         return []
     
+    # Step 1: Sort ALL entries by timestamp (ccusage identifySessionBlocks line 100)
+    sorted_messages = sorted(all_messages, key=lambda x: x['timestamp'])
+    
     blocks = []
-    block_duration_seconds = block_duration_hours * 3600
+    block_duration_ms = block_duration_hours * 60 * 60 * 1000
+    current_block_start = None
+    current_block_entries = []
+    now = datetime.utcnow()
     
-    # ccusage-compatible: Use UTC time and floor to hour (like ccusage floorToHour)
-    # Find today's session start (not overall first message which might be from days ago)
-    
-    # Get today's date
-    today = datetime.now().date()
-    
-    # ccusage-compatible: Find first message from current active session (not just today)
-    # Look for session boundary - significant time gap indicates new session
-    
-    current_time = datetime.now()
-    session_messages = []
-    
-    # Work backwards from recent messages to find session start
-    # Session starts after a gap of > 2 hours
-    recent_messages = all_messages[-500:]  # Look at last 500 messages for broader search
-    
-    session_start_found = False
-    for i in range(len(recent_messages) - 1, 0, -1):
-        current_msg = recent_messages[i]
-        prev_msg = recent_messages[i-1]
+    # Step 2: Process entries in chronological order (ccusage algorithm)
+    for entry in sorted_messages:
+        entry_time = entry['timestamp']
         
-        # Convert to naive datetime for comparison
-        current_time_naive = current_msg['timestamp']
-        if hasattr(current_time_naive, 'tzinfo') and current_time_naive.tzinfo:
-            current_time_naive = current_time_naive.replace(tzinfo=None)
+        # Ensure all timestamps are timezone-naive for consistent comparison
+        if hasattr(entry_time, 'tzinfo') and entry_time.tzinfo:
+            entry_time = entry_time.astimezone(timezone.utc).replace(tzinfo=None)
+        
+        if current_block_start is None:
+            # First entry - start a new block (floored to the hour) - ccusage line 111
+            current_block_start = floor_to_hour(entry_time)
+            current_block_entries = [entry]
+        else:
+            # Check if we need to close current block - ccusage line 123
+            time_since_block_start_ms = (entry_time - current_block_start).total_seconds() * 1000
             
-        prev_time_naive = prev_msg['timestamp']
-        if hasattr(prev_time_naive, 'tzinfo') and prev_time_naive.tzinfo:
-            prev_time_naive = prev_time_naive.replace(tzinfo=None)
-        
-        # Check for session gap (>2 hours for major session boundary)
-        gap_minutes = (current_time_naive - prev_time_naive).total_seconds() / 60
-        if gap_minutes > 120:  # 2 hours gap indicates new session
-            # Found session start
-            first_message = current_msg
-            session_start_found = True
-            break
-    
-    if not session_start_found:
-        # Fallback: use first of recent messages
-        first_message = recent_messages[0] if recent_messages else all_messages[0]
-    
-    # ccusage-compatible: Use UTC timestamp and floor to hour (floorToHour equivalent)
-    first_utc = first_message.get('timestamp_utc')
-    if not first_utc:
-        # Fallback if UTC timestamp not available
-        first_utc = first_message['timestamp']
-    
-    # ccusage floorToHour: setUTCMinutes(0, 0, 0) equivalent
-    session_start_utc = first_utc.replace(minute=0, second=0, microsecond=0)
-    
-    # Convert to local time for display but keep UTC basis for calculation
-    if hasattr(session_start_utc, 'tzinfo') and session_start_utc.tzinfo:
-        # Has timezone info - convert to local and make naive
-        session_start = session_start_utc.astimezone().replace(tzinfo=None)
-    else:
-        # Already naive - use as is (already local time from load_all_messages)
-        session_start = session_start_utc
-    
-    # 時間ベースでブロックを生成
-    current_time = datetime.now(session_start.tzinfo) if session_start.tzinfo else datetime.now()
-    total_elapsed = (current_time - session_start).total_seconds()
-    
-    # 必要なブロック数を計算
-    num_blocks = int(total_elapsed / block_duration_seconds) + 1
-    
-    for block_num in range(num_blocks):
-        block_start = session_start + timedelta(seconds=block_num * block_duration_seconds)
-        block_end = session_start + timedelta(seconds=(block_num + 1) * block_duration_seconds)
-        
-        # このブロックに属するメッセージを収集
-        # タイムゾーン情報を統一してから比較
-        block_messages = []
-        for msg in all_messages:
-            msg_time = msg['timestamp']
-            # タイムゾーン情報があれば削除してナイーブにする
-            if hasattr(msg_time, 'tzinfo') and msg_time.tzinfo:
-                msg_time = msg_time.replace(tzinfo=None)
-            
-            if block_start <= msg_time < block_end:
-                block_messages.append(msg)
-        
-        # 最後のブロック（現在アクティブ）は常に作成
-        if block_messages or block_num == num_blocks - 1:
-            # 実際の終了時刻（タイムゾーン情報を統一）
-            if block_num == num_blocks - 1:  # 最後のブロック
-                actual_end_time = current_time
-                is_active = True
+            if len(current_block_entries) > 0:
+                last_entry_time = current_block_entries[-1]['timestamp']
+                # Ensure timezone consistency
+                if hasattr(last_entry_time, 'tzinfo') and last_entry_time.tzinfo:
+                    last_entry_time = last_entry_time.astimezone(timezone.utc).replace(tzinfo=None)
+                time_since_last_entry_ms = (entry_time - last_entry_time).total_seconds() * 1000
             else:
-                if block_messages:
-                    last_msg_time = block_messages[-1]['timestamp']
-                    # タイムゾーン情報があれば削除してナイーブにする
-                    if hasattr(last_msg_time, 'tzinfo') and last_msg_time.tzinfo:
-                        actual_end_time = last_msg_time.replace(tzinfo=None)
-                    else:
-                        actual_end_time = last_msg_time
-                else:
-                    actual_end_time = block_end
-                is_active = False
+                time_since_last_entry_ms = 0
             
-            # actual_end_timeもナイーブにする
-            if hasattr(actual_end_time, 'tzinfo') and actual_end_time.tzinfo:
-                actual_end_time = actual_end_time.replace(tzinfo=None)
-            
-            blocks.append({
-                'start_time': block_start,
-                'end_time': actual_end_time,
-                'messages': block_messages,
-                'duration_seconds': (actual_end_time - block_start).total_seconds(),
-                'is_active': is_active
-            })
+            if time_since_block_start_ms > block_duration_ms or time_since_last_entry_ms > block_duration_ms:
+                # Close current block - ccusage line 125
+                block = create_session_block(current_block_start, current_block_entries, now, block_duration_ms)
+                blocks.append(block)
+                
+                # TODO: Add gap block creation if needed (ccusage line 129-134)
+                
+                # Start new block (floored to the hour) - ccusage line 137
+                current_block_start = floor_to_hour(entry_time)
+                current_block_entries = [entry]
+            else:
+                # Add to current block - ccusage line 142
+                current_block_entries.append(entry)
+    
+    # Close the last block - ccusage line 148
+    if current_block_start is not None and len(current_block_entries) > 0:
+        block = create_session_block(current_block_start, current_block_entries, now, block_duration_ms)
+        blocks.append(block)
     
     return blocks
+
+
+def floor_to_hour(timestamp):
+    """ccusage floorToHour function equivalent"""
+    # Convert to UTC if timezone-aware
+    if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo:
+        utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        utc_timestamp = timestamp
+    
+    # setUTCMinutes(0, 0, 0) equivalent
+    floored = utc_timestamp.replace(minute=0, second=0, microsecond=0)
+    return floored
+
+
+def create_session_block(start_time, entries, now, session_duration_ms):
+    """ccusage createBlock function equivalent"""
+    end_time = start_time + timedelta(milliseconds=session_duration_ms)
+    
+    if entries:
+        last_entry = entries[-1]
+        actual_end_time = last_entry['timestamp']
+        if hasattr(actual_end_time, 'tzinfo') and actual_end_time.tzinfo:
+            actual_end_time = actual_end_time.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        actual_end_time = start_time
+    
+    # ccusage isActive logic - line 168
+    time_since_last_activity = (now - actual_end_time).total_seconds() * 1000
+    is_active = time_since_last_activity < session_duration_ms and now < end_time
+    
+    # Calculate duration: for active blocks use current time, for completed blocks use actual_end_time
+    if is_active:
+        duration_seconds = (now - start_time).total_seconds()
+    else:
+        duration_seconds = (actual_end_time - start_time).total_seconds()
+    
+    return {
+        'start_time': start_time,
+        'end_time': end_time,
+        'actual_end_time': actual_end_time,
+        'messages': entries,
+        'duration_seconds': duration_seconds,
+        'is_active': is_active
+    }
 
 def find_current_session_block(blocks, target_session_id):
     """Find the most recent active block containing the target session"""
@@ -785,14 +772,16 @@ def find_current_session_block(blocks, target_session_id):
     for block in reversed(blocks):  # 新しいブロックから探す
         if block.get('is_active', False):  # アクティブブロックのみ
             for message in block['messages']:
-                if message['session_id'] == target_session_id:
+                msg_session_id = message.get('session_id') or message.get('sessionId')
+                if msg_session_id == target_session_id:
                     return block
     
     # フォールバック: アクティブブロックにセッションが見つからない場合
     # セッションIDが含まれる最後のブロックを返す
     for block in reversed(blocks):
         for message in block['messages']:
-            if message['session_id'] == target_session_id:
+            msg_session_id = message.get('session_id') or message.get('sessionId')
+            if msg_session_id == target_session_id:
                 return block
     
     return None
@@ -839,12 +828,8 @@ def calculate_block_statistics(block):
     active_periods = detect_active_periods(block['messages'])
     total_active_duration = sum((end - start).total_seconds() for start, end in active_periods)
     
-    # 現在時刻の考慮（アクティブブロックの場合）
-    if block.get('is_active', False):
-        current_time = datetime.now(block['start_time'].tzinfo)
-        actual_duration = (current_time - block['start_time']).total_seconds()
-    else:
-        actual_duration = block['duration_seconds']
+    # Use duration already calculated in create_session_block
+    actual_duration = block['duration_seconds']
     
     return {
         'start_time': block['start_time'],
@@ -1257,7 +1242,7 @@ def main():
         plan_override = getattr(args, 'plan', None) if hasattr(args, 'plan') else None
         workspace = data.get('workspace', {})
         current_dir = os.path.basename(workspace.get('current_dir', data.get('cwd', '.')))
-        session_id = data.get('session_id')
+        session_id = data.get('session_id') or data.get('sessionId')
         
         # Get git info
         git_branch, modified_files, untracked_files = get_git_info(
@@ -1283,20 +1268,33 @@ def main():
                 all_messages = load_all_messages_chronologically()
                 
                 # 5時間ブロックを検出
-                blocks = detect_five_hour_blocks(all_messages)
+                try:
+                    blocks = detect_five_hour_blocks(all_messages)
+                except Exception as e:
+                    print(f"DEBUG: Error in detect_five_hour_blocks: {e}", file=sys.stderr)
+                    blocks = []
                 
                 # 現在のセッションが含まれるブロックを特定
                 current_block = find_current_session_block(blocks, session_id)
                 
                 if current_block:
                     # ブロック全体の統計を計算
-                    block_stats = calculate_block_statistics(current_block)
+                    try:
+                        block_stats = calculate_block_statistics(current_block)
+                        print(f"DEBUG: block_stats created: {block_stats is not None}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"DEBUG: Error in calculate_block_statistics: {e}", file=sys.stderr)
+                        block_stats = None
                 elif blocks:
                     # セッションが見つからない場合は最新のアクティブブロックを使用
                     active_blocks = [b for b in blocks if b.get('is_active', False)]
                     if active_blocks:
                         current_block = active_blocks[-1]  # 最新のアクティブブロック
-                        block_stats = calculate_block_statistics(current_block)
+                        try:
+                            block_stats = calculate_block_statistics(current_block)
+                        except Exception as e:
+                            print(f"DEBUG: Error in calculate_block_statistics: {e}", file=sys.stderr)
+                            block_stats = None
                 
                 # 統計データを既存の変数名に設定（互換性のため）
                 if block_stats:
@@ -1391,11 +1389,13 @@ def main():
         # 行2: Token情報の統合
         line2_parts = []
         
+        # 🚨 CRITICAL: DO NOT MODIFY THIS COMPACT LINE CODE - FORBIDDEN 🚨
         # 🪙 Compact line: Shows FIVE_HOUR_BLOCK_TOKENS vs compaction limit
         # SOURCE: block_stats['total_tokens'] (5-hour cumulative)
         five_hour_block_tokens = total_tokens  # From block_stats calculation above
         compact_display = format_token_count(five_hour_block_tokens)
         line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Compact: {Colors.RESET}{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
+        # 🚨 END OF PROTECTED COMPACT LINE CODE 🚨
         
         # プログレスバー
         line2_parts.append(get_progress_bar(percentage, width=12))
@@ -1423,10 +1423,23 @@ def main():
             hours_elapsed = duration_seconds / 3600
             block_progress = (hours_elapsed % 5) / 5 * 100  # 5時間内の進捗
             
-            # セッション開始時間を取得
+            # セッション開始時間を取得 (ccusage way: convert UTC to local for display)
             session_start_time = None
             if block_stats:
-                session_start_time = block_stats['start_time'].strftime("%H:%M")
+                try:
+                    start_time_utc = block_stats['start_time']
+                    # Convert UTC to local time for display (like ccusage)
+                    if hasattr(start_time_utc, 'tzinfo') and start_time_utc.tzinfo:
+                        start_time_local = start_time_utc.astimezone()
+                    else:
+                        # start_time_utc is timezone-naive UTC, convert to local for display
+                        # Add UTC timezone info then convert to local
+                        start_time_with_tz = start_time_utc.replace(tzinfo=timezone.utc)
+                        start_time_local = start_time_with_tz.astimezone()
+                    session_start_time = start_time_local.strftime("%H:%M")
+                except Exception as e:
+                    # Fallback: use UTC time directly
+                    session_start_time = block_stats['start_time'].strftime("%H:%M")
             
             # Session情報（開始時間付き）
             if session_start_time:
