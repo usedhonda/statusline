@@ -1506,7 +1506,11 @@ def main():
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
 
 def calculate_tokens_since_time(start_time, session_id):
-    """Calculate tokens from session start time to now (ccusage compatible)"""
+    """Calculate tokens from session start time to now (ccusage compatible)
+    
+    ccusage resets tokens at 5-hour block boundaries.
+    We need to calculate tokens consumed WITHIN the current 5-hour block only.
+    """
     try:
         if not start_time or not session_id:
             return 0
@@ -1522,6 +1526,7 @@ def calculate_tokens_since_time(start_time, session_id):
             start_time_utc = start_time.replace(tzinfo=timezone.utc)
         
         session_messages = []
+        processed_hashes = set()  # For deduplication like ccusage
         
         with open(transcript_file, 'r') as f:
             for line in f:
@@ -1529,6 +1534,15 @@ def calculate_tokens_since_time(start_time, session_id):
                     data = json.loads(line.strip())
                     if not data:
                         continue
+                    
+                    # ccusage-style deduplication: messageId + requestId
+                    message_id = data.get('message', {}).get('id')
+                    request_id = data.get('requestId')
+                    if message_id and request_id:
+                        unique_hash = f"{message_id}:{request_id}"
+                        if unique_hash in processed_hashes:
+                            continue  # Skip duplicate
+                        processed_hashes.add(unique_hash)
                     
                     # Get message timestamp
                     msg_timestamp = data.get('timestamp')
@@ -1546,15 +1560,14 @@ def calculate_tokens_since_time(start_time, session_id):
                     
                     # Only include messages from session start time onwards
                     if msg_time_utc >= start_time_utc:
-                        # Check for assistant messages with usage data
-                        if (data.get('type') == 'assistant' and 
-                            data.get('message', {}).get('usage')):
+                        # Check for any messages with usage data (not just assistant)
+                        if data.get('message', {}).get('usage'):
                             session_messages.append(data)
                 
                 except (json.JSONDecodeError, ValueError, TypeError):
                     continue
         
-        # Sum all usage from session messages (not cumulative, each message is individual usage)
+        # Sum all usage from session messages (each message is individual usage)
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_creation = 0
@@ -1568,10 +1581,13 @@ def calculate_tokens_since_time(start_time, session_id):
                 total_cache_creation += usage.get('cache_creation_input_tokens', 0)
                 total_cache_read += usage.get('cache_read_input_tokens', 0)
         
-        # ccusage-style: exclude cache tokens for burn rate calculation (tokensPerMinuteForIndicator)
+        # ccusage uses nonCacheTokens for display (like burn rate indicator)
         non_cache_tokens = total_input_tokens + total_output_tokens
+        cache_tokens = total_cache_creation + total_cache_read
+        total_with_cache = non_cache_tokens + cache_tokens
         
-        return non_cache_tokens
+        # Return cache-included tokens (like ccusage getTotalTokens)
+        return total_with_cache  # ccusage includes cache tokens in display
         
     except Exception:
         return 0
