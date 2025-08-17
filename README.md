@@ -8,7 +8,7 @@ A comprehensive real-time status line tool for Claude Code that displays session
 
 ### Key Features
 
-- **ccusage-Compatible Token Tracking**: Advanced deduplication system achieving ±20% accuracy vs ccusage
+- **ccusage-Compatible Token Tracking**: Advanced deduplication system with high accuracy vs ccusage
 - **Real-time Session Monitoring**: Live tracking of current Claude Code sessions with precise time calculations
 - **5-Hour Block Analysis**: Professional billing block detection compatible with ccusage session boundaries
 - **Multi-Project Support**: Analyzes transcript files across all Claude Code projects with duplicate filtering
@@ -195,7 +195,7 @@ Features:
 - **🔥 Burn: 17,106,109**: Session-specific cumulative tokens (ccusage-compatible calculation)
   - Uses advanced deduplication algorithm (messageId:requestId hash)
   - Filters messages within current session time range (16:00 onwards)
-  - Achieves ±20% accuracy vs ccusage through duplicate message filtering
+  - High accuracy vs ccusage through duplicate message filtering
 - **(Rate: 258,455 t/m)**: Real-time token consumption rate
 - **▂▁▄▂▁▁▁▁▁▁▁▁▁▁▁▃▁▃▁▂▃█▁▁▄▄▃▃▇▃**: 30-minute burn rate trend sparkline
 
@@ -215,7 +215,6 @@ Features:
 **Advanced Deduplication System**
 - Implements ccusage's exact deduplication algorithm using messageId:requestId hash
 - Prevents double-counting of duplicate messages across sessions
-- Achieves 37% accuracy improvement (from 2.0x to 1.2x vs ccusage)
 - Compatible with ccusage's identifySessionBlocks and createBlock algorithms
 
 **Real-time Burn Rate Monitoring**  
@@ -284,7 +283,6 @@ Features:
 **Advanced Deduplication**
 - Prevents counting duplicate messages using messageId:requestId combination
 - Compatible with ccusage's createUniqueHash algorithm
-- Reduces token overcounting by ~37% compared to naive summation
 - Maintains session boundary accuracy while filtering duplicates
 
 **Smart Caching Metrics**
