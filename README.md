@@ -243,10 +243,11 @@ Features:
 - **17:06**: Current time (from 16:00)
 
 #### Line 4: 📊 Burn Rate (Individual Session System)
-- **🔥 Burn: 17,106,109**: **Session-specific** tokens (current conversation only)
+- **🔥 Burn: 17,106,109**: **Session cumulative** tokens (from Claude Code JSONL)
   - ⚠️ **CRITICAL**: Different scope from Line 2 (conversation vs billing window)
-  - Uses messageId:requestId deduplication for accuracy
-  - Tracks single conversation thread, NOT entire billing period
+  - **Native tracking**: Direct from Claude Code's session transcript data
+  - **Cumulative usage**: Each message usage represents total session consumption
+  - **Cache aware**: Distinguishes between fresh processing vs cache reuse
 - **(Rate: 258,455 t/m)**: Real-time token consumption rate
 - **▂▁▄▂▁▁▁▁▁▁▁▁▁▁▁▃▁▃▁▂▃█▁▁▄▄▃▃▇▃**: 30-minute burn rate sparkline
 
@@ -276,6 +277,12 @@ Features:
 - **Data Source**: Messages from current session start to now
 - **Range**: 50K-200K tokens (single conversation)
 - **Reset**: Each new conversation thread
+
+**Claude Code Native Integration**
+- **Session-level tracking**: Each conversation maintains its own token pool
+- **Cumulative usage**: Message-level usage represents session totals up to that point
+- **Cache optimization**: Automatic detection of cache_read vs new token processing
+- **Live session monitoring**: Real-time parsing of active JSONL transcripts
 
 **Professional Deduplication**
 - messageId:requestId hash-based duplicate removal
@@ -346,18 +353,18 @@ Includes: Single session messages with deduplication
 Usage: Line 4 - "🔥 Burn: 17,106,109"
 ```
 
-**Universal Token Types**
-- **Input tokens**: User message content
-- **Output tokens**: Assistant responses  
-- **Cache creation**: New context caching tokens
-- **Cache read**: Cached context reuse tokens
-- **Total**: Sum of all types for comprehensive tracking
+**Claude Code Token Architecture**
+- **Input tokens**: User message content processed fresh
+- **Output tokens**: Assistant responses generated new
+- **Cache creation**: New context tokens written to cache (1.25x input cost)
+- **Cache read**: Existing context reused from cache (0.10x input cost)
+- **Session cumulative**: Each message contains total session usage to that point
 
-**Deduplication Algorithm**
-- messageId:requestId hash-based identification
-- Cross-session duplicate prevention
-- 37% accuracy improvement in practice
-- Maintains boundary integrity between systems
+**JSONL Data Structure**
+- **Native format**: Direct parsing of Claude Code's transcript files
+- **Message-level usage**: Contains cumulative session totals, not individual message costs
+- **Real-time updates**: Live monitoring as conversations progress
+- **Token efficiency**: Automatic cache optimization reduces costs dramatically
 
 ### Cost Calculation
 
@@ -434,9 +441,16 @@ Check this file for detailed error information if issues occur.
 
 ### Data Sources
 
-- **Transcript files**: `~/.claude/projects/*/session-id.jsonl`
+**Claude Code JSONL Integration**
+- **Session transcripts**: `~/.claude/projects/*/session-id.jsonl` - Claude Code's native transcript format
+- **Usage tracking**: Each message contains cumulative session usage data
+- **Token pools**: Individual sessions maintain separate token accounting
+- **Real-time updates**: Live parsing of active session data as conversations progress
+
+**Additional Sources**
 - **Git repositories**: `.git/` directories for project status
 - **System time**: Local timezone for accurate session timing
+- **Cache efficiency**: Automatic detection of Claude Code's caching performance
 
 ### Compatibility
 

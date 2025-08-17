@@ -1089,22 +1089,22 @@ def main():
         # 🚨 END OF PROTECTED COMPACT LINE CODE 🚨
         # ═══════════════════════════════════════════════════════════════════
         
-        # プログレスバー
-        line2_parts.append(get_progress_bar(percentage, width=12))
+        # プログレスバー（3行目と幅を統一）
+        line2_parts.append(get_progress_bar(percentage, width=15))
         
         # パーセンテージ（色付き）
         line2_parts.append(f"{percentage_color}{Colors.BOLD}{percentage}%{Colors.RESET}")
+        
+        # キャッシュ情報（説明付き簡潔版）- コストより先に表示
+        if cache_read > 0 or cache_creation > 0:
+            cache_ratio = (cache_read / total_tokens * 100) if total_tokens > 0 else 0
+            if cache_ratio >= 50:  # 50%以上の場合のみ表示
+                line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️  {int(cache_ratio)}% cached{Colors.RESET}")
         
         # コスト表示
         if session_cost > 0:
             cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
             line2_parts.append(f"{cost_color}💰 Cost: {format_cost(session_cost)}{Colors.RESET}")
-        
-        # キャッシュ情報（説明付き簡潔版）
-        if cache_read > 0 or cache_creation > 0:
-            cache_ratio = (cache_read / total_tokens * 100) if total_tokens > 0 else 0
-            if cache_ratio >= 50:  # 50%以上の場合のみ表示
-                line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️  {int(cache_ratio)}% cached{Colors.RESET}")
         
         # 警告表示を削除（ユーザーリクエスト）
         
@@ -1133,11 +1133,11 @@ def main():
                     # Fallback: use UTC time directly
                     session_start_time = block_stats['start_time'].strftime("%H:%M")
             
-            # Session情報（開始時間付き）
+            # Session情報（開始時間付き、2行目と位置揃え用にパディング追加）
             if session_start_time:
-                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h    {Colors.RESET}")
             else:
-                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h     {Colors.RESET}")
             
             # 統一されたプログレスバー（同じ文字を使用）
             session_bar = get_progress_bar(block_progress, width=15)
