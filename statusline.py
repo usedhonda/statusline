@@ -1568,7 +1568,10 @@ def calculate_tokens_since_time(start_time, session_id):
                 total_cache_creation += usage.get('cache_creation_input_tokens', 0)
                 total_cache_read += usage.get('cache_read_input_tokens', 0)
         
-        return total_input_tokens + total_output_tokens + total_cache_creation + total_cache_read
+        # ccusage-style: exclude cache tokens for burn rate calculation (tokensPerMinuteForIndicator)
+        non_cache_tokens = total_input_tokens + total_output_tokens
+        
+        return non_cache_tokens
         
     except Exception:
         return 0
