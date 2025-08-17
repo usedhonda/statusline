@@ -72,15 +72,20 @@ def configure_claude_settings():
     if settings_path.exists():
         print_colored("📝 Updating existing Claude Code settings...", Colors.YELLOW)
         
+        # Create backup first (before any file operations)
+        backup_path = settings_path.with_suffix('.json.backup')
+        try:
+            shutil.copy2(settings_path, backup_path)
+            print_colored(f"💾 Backup created: {backup_path}", Colors.BLUE)
+        except Exception as e:
+            print_colored(f"❌ Error creating backup: {e}", Colors.RED)
+            print_colored("   Installation aborted for safety", Colors.YELLOW)
+            sys.exit(1)
+        
         try:
             # Read existing settings
             with open(settings_path, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
-            
-            # Create backup
-            backup_path = settings_path.with_suffix('.json.backup')
-            shutil.copy2(settings_path, backup_path)
-            print_colored(f"💾 Backup created: {backup_path}", Colors.BLUE)
             
             # Check if statusLine already exists
             if 'statusLine' in settings:
