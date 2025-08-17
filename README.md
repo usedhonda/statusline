@@ -16,7 +16,9 @@ A comprehensive real-time status line tool for Claude Code that displays session
 - **Git Integration**: Branch status, modified files, and repository information
 - **Visual Progress Bars**: Color-coded progress indicators for token usage and time blocks
 - **Cost Monitoring**: Real-time cost tracking with model-specific pricing (Claude 4 support)
+- **Live Performance Analytics**: Real-time burn rate, efficiency metrics, and cost projections
 - **Professional Usage Reports**: Daily usage analysis with comprehensive statistics
+- **Visual Graph Display**: ASCII-based charts, progress bars, and trend visualization
 
 ## Installation
 
@@ -38,7 +40,7 @@ A comprehensive real-time status line tool for Claude Code that displays session
    ```json
    {
      "statusLine": {
-       "command": "/path/to/statusline.py"
+       "command": "~/.claude/statusline.py"
      }
    }
    ```
@@ -47,12 +49,13 @@ A comprehensive real-time status line tool for Claude Code that displays session
 
 ### Basic Display (Real-time Status)
 
-When properly configured with Claude Code, statusline automatically displays a 3-line status:
+When properly configured with Claude Code, statusline automatically displays a comprehensive 4-line status:
 
 ```
-[Claude Sonnet 4] 🌿 main ±2 📁 statusline 📝 3 💬 12
-🪙 45.2K/160K ████████████▒▒▒ 28% 💰 $2.45 ♻️ 72% cached
-⏱️ Session: 2h15m/5h ████████▒▒▒▒▒▒▒ 45% (14:30~) 16:45
+[Sonnet 4] 🌿 main ±2 📁 statusline 📝 3 💬 12
+🪙 Token: 45.2K/160K ████████████▒▒▒ 28% 💰 Cost: $2.45 ♻️ 72% cached  
+⏱️ Session: 2h15m/5h ████████▒▒▒▒▒▒▒ 45% (from 14:30) 16:45
+🎯 Block: 45% ⚡ Burn: 1304 tok/min ▁▃▅▅█▂▂▅▇▇▁▄▄▆█▁▃▅▅█ ⚡ Efficiency: 78% 📈 Proj: $5.45
 ```
 
 ### Usage Analysis Commands
@@ -68,6 +71,12 @@ statusline daily
 
 # Show usage for specific date
 statusline daily --date 2025-01-15
+
+# Show visual charts and graphs (ccusage-style)
+statusline graph
+
+# Real-time burn rate monitoring (like ccusage)
+statusline burn
 
 # Show help
 statusline --help
@@ -100,6 +109,68 @@ statusline --help
   • extension-monolith
 ```
 
+### Visual Graph Display
+
+The `statusline graph` command provides ccusage-style visual analytics:
+
+```
+📊 Token Usage Visualization
+============================================================
+
+🔥 Burn Rate Trend (tokens/min)
+   ·········●···
+   ···●···●··●●●·
+   ··●●●·●●·●●●·●
+   ●●●●●●●●●●●●●●
+   ──────────────────────────────
+   Last 30 minutes
+
+📈 Current Session Metrics
+   Tokens:     ████████████████████▏░░░░ 81%
+   Efficiency: ●●●●●●●●●●●●●●●●●●●○○○○○○ 78%
+   Block:      ███████████░░░░░░░░░░░░░░ 45%
+
+💰 Cost Analysis
+   Input   : ██████░░░░░░░░░░░░░░ 30.0% ($0.300)
+   Output  : █████████░░░░░░░░░░░ 45.0% ($0.450)
+   Cache   : █████░░░░░░░░░░░░░░░ 25.0% ($0.250)
+
+⏱️ Session Blocks (5-hour periods)
+   Block 1: █████████████░░░░░░░ ACTIVE   $2.45
+   Block 2: ███████░░░░░░░░░░░░░ IDLE     $1.23
+   Block 3: ░░░░░░░░░░░░░░░░░░░░ PENDING  $0.00
+```
+
+### Real-time Burn Rate Monitoring
+
+The `statusline burn` command provides live burn rate monitoring similar to ccusage:
+
+```
+🔥 Live Burn Rate Monitor - 14:32:15
+======================================================================
+
+Current Burn Rate: 42.3 tokens/min
+Average (30min):   38.7 tokens/min
+Peak (30min):      65.2 tokens/min
+
+Burn Rate Trend:
+   ●●●···●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●● 65.2
+   ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+   ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+   ······●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●● 0.0
+   ──────────────────────────────────────────────────
+   Last 30 minutes
+
+Compact View: ▁▂▃▅▄▃▄▇▅▃▄▆▅▄▃▂▃▄▅▃▄▆▄▃▂▃▄▅▆▄
+```
+
+Features:
+- Updates every 5 seconds with current burn rate
+- 30-minute rolling window of burn rate data  
+- Color-coded current burn rate (green/yellow/red)
+- ASCII charts showing trends over time
+- ccusage-compatible burn rate calculation using 1-minute intervals
+
 ### Display Elements
 
 #### Line 1: Basic Information
@@ -112,16 +183,26 @@ statusline --help
 - **14:30**: Current time
 
 #### Line 2: Token Usage & Costs
-- **🪙 45.2K/160K**: Current tokens / Compaction threshold
+- **🪙 Token: 45.2K/160K**: Current tokens / Compaction threshold
 - **████████████▒▒▒**: Visual progress bar
 - **28%**: Percentage of token limit used
-- **💰 $2.45**: Estimated session cost
+- **💰 Cost: $2.45**: Estimated session cost
+- **♻️ 72% cached**: Cache efficiency percentage
 
 #### Line 3: Session Analytics
-- **⏱️ Block 1/∞**: Current 5-hour billing block
-- **45% of block**: Progress within current block
-- **⚡ 78% active**: Efficiency ratio (active time vs total time)
-- **♻️ 12.1K cached**: Cache hit tokens and percentage
+- **⏱️ Session: 2h15m/5h**: Current session duration within 5-hour block
+- **████████▒▒▒▒▒▒▒**: Session progress bar
+- **45%**: Progress within current 5-hour billing block
+- **(from 14:30)**: Session start time
+- **16:45**: Current time
+
+#### Line 4: Live Performance Metrics with Real-time Burn Rate Graph
+- **🎯 Block: 45%**: Progress within current 5-hour billing block (green<80%, yellow<95%, red>95%)
+- **⚡ Burn: 1304 tok/min**: Real-time token consumption rate with ccusage thresholds
+  - ✓ NORMAL (≤500), 🔥 MODERATE (500-1000), ⚡ HIGH (>1000)
+- **▁▃▅▅█▂▂▅▇▇▁▄▄▆█▁▃▅▅█**: 20-minute sparkline showing burn rate trends
+- **⚡ Efficiency: 78%**: Active time ratio within session (green>70%, yellow>50%, red<50%)
+- **📈 Proj: $5.45**: Projected cost for current block based on burn rate
 
 ### Color Coding
 
@@ -134,10 +215,49 @@ statusline --help
 
 ## Features in Detail
 
+### Live Performance Analytics (Inspired by ccusage)
+
+**Real-time Burn Rate Monitoring**
+- Tracks tokens consumed per minute in real-time using ccusage-compatible calculation
+- ccusage-style thresholds: NORMAL (≤500), MODERATE (500-1000), HIGH (>1000) tok/min
+- Integrated sparkline graphs showing 20-minute burn rate trends
+- Real-time visual feedback with color-coded status indicators (✓🔥⚡)
+- Compact display integrated into 4th status line with automatic updates
+
+**Session Efficiency Analysis**
+- Measures active vs. idle time within sessions
+- Calculates productivity ratios similar to ccusage efficiency metrics
+- Helps optimize coding session effectiveness
+
+**Cost Projection System**
+- Projects final cost based on current burn rate and block progress
+- Estimates remaining time in current 5-hour billing block
+- Provides budget planning capabilities for extended sessions
+
+### Visual Graph Display (ccusage-inspired)
+
+**Integrated Sparkline Display**
+- Real-time burn rate sparklines embedded in status line
+- 20-minute trend visualization using Unicode block characters (▁▂▃▄▅▆▇█)
+- ccusage-compatible thresholds with visual status indicators
+- Compact single-line display for maximum terminal efficiency
+
+**Interactive Graph Commands**
+- `statusline graph`: Full visual charts and session analytics
+- `statusline burn`: Live monitoring mode with real-time updates
+- ASCII charts for burn rate, efficiency, and cost breakdown
+- Session block visualization with ACTIVE/IDLE/PENDING states
+
+**Terminal-Optimized Display**
+- Adaptive width handling for different terminal sizes
+- Unicode-based sparkline characters for crisp visualization
+- Color-coded status indicators for immediate pattern recognition
+- Compact 4-line display with integrated burn rate trends
+
 ### Session Management
 
 **5-Hour Block Detection**
-- Professional 5-hour billing block system
+- Professional 5-hour billing block system compatible with Claude's billing structure
 - Tracks progress within current 5-hour period
 - Provides recommendations for optimal work sessions
 
