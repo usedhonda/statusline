@@ -774,7 +774,6 @@ def generate_real_burn_timeline(block_stats, current_block):
             except (ValueError, KeyError, TypeError):
                 continue
         
-        
         # リアルタイム対応：現在進行中のセグメントに部分的な値を設定
         # （実際のメッセージがない場合でも、時間経過を視覚的に示す）
         if 0 <= current_segment_index < 20:
@@ -1028,6 +1027,7 @@ def main():
         
         # 5時間ブロック検出システム
         block_stats = None
+        current_block = None  # 初期化して変数スコープ問題を回避
         if session_id:
             try:
                 # 全メッセージを時系列で読み込み
