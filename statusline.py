@@ -1173,9 +1173,25 @@ def main():
             # パーセンテージのみ（残り時間削除）
             line3_parts.append(f"{Colors.BRIGHT_WHITE}{int(block_progress)}%{Colors.RESET}")
             
-            # 現在時刻をSession行に追加（開始時刻付き）
+            # 現在時刻をSession行に追加（開始時刻と終了時刻付き）
             if session_start_time:
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}(from {session_start_time}){Colors.RESET}")
+                # 5時間ブロックの終了時刻を計算
+                try:
+                    start_time_utc = block_stats['start_time']
+                    if hasattr(start_time_utc, 'tzinfo') and start_time_utc.tzinfo:
+                        start_time_local = start_time_utc.astimezone()
+                    else:
+                        start_time_with_tz = start_time_utc.replace(tzinfo=timezone.utc)
+                        start_time_local = start_time_with_tz.astimezone()
+                    
+                    # 5時間後の終了時刻を計算
+                    end_time_local = start_time_local + timedelta(hours=5)
+                    session_end_time = end_time_local.strftime("%H:%M")
+                    
+                    line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}({session_start_time} to {session_end_time}){Colors.RESET}")
+                except Exception:
+                    # フォールバック: 開始時刻のみ表示
+                    line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}(from {session_start_time}){Colors.RESET}")
             else:
                 line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}")
         
