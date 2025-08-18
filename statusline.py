@@ -1,5 +1,24 @@
 #!/usr/bin/env python3
 
+################################################################################
+# OUTPUT CONFIGURATION - CHOOSE WHICH LINES TO DISPLAY
+################################################################################
+
+# Set which lines to display (True = show, False = hide)
+SHOW_LINE1 = True   # [Sonnet 4] | 🌿 main M2 +1 | 📁 statusline | 💬 254
+SHOW_LINE2 = True   # 🪙  Compact: 91.8K/160.0K ████████▒▒▒▒▒▒▒ 58% ♻️  99% cached 💰 Cost: $0.031
+SHOW_LINE3 = True   # ⏱️  Session: 1h15m/5h    ███▒▒▒▒▒▒▒▒▒▒▒▒ 25% 09:15 (08:00 to 13:00)
+SHOW_LINE4 = True   # 🔥 Burn:    0 (Rate: 0 t/m) ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+
+# Alternative quick configurations (uncomment one to use):
+# SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = True, True, False, False   # Only lines 1-2
+# SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = False, True, True, True    # Skip line 1
+# SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = False, False, True, True   # Only lines 3-4
+
+################################################################################
+# IMPORTS AND SYSTEM CODE - DO NOT MODIFY BELOW THIS LINE
+################################################################################
+
 import json
 import sys
 import os
@@ -10,7 +29,11 @@ from datetime import datetime, timedelta, timezone, date
 import time
 from collections import defaultdict
 
-# Constants
+################################################################################
+# CONSTANTS - ADVANCED CONFIGURATION
+################################################################################
+
+# Token compaction threshold (when Claude Code compresses conversation history)
 COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 
 ################################################################################
@@ -209,90 +232,7 @@ def create_sparkline(values, width=30):
     
     return sparkline
 
-def create_horizontal_chart(percentage, width=30, style="blocks"):
-    """Create horizontal charts for various metrics"""
-    if style == "blocks":
-        # Block style progress bar
-        filled = int(width * percentage / 100)
-        empty = width - filled
-        color = get_percentage_color(percentage)
-        
-        blocks = "█" * filled + "░" * empty
-        return f"{color}{blocks}{Colors.RESET}"
-    
-    elif style == "smooth":
-        # Smooth gradient style
-        filled = int(width * percentage / 100)
-        partial = (width * percentage / 100) - filled
-        
-        color = get_percentage_color(percentage)
-        
-        full_blocks = "█" * filled
-        partial_block = ""
-        if partial > 0.75:
-            partial_block = "▊"
-        elif partial > 0.5:
-            partial_block = "▌"
-        elif partial > 0.25:
-            partial_block = "▎"
-        elif partial > 0:
-            partial_block = "▏"
-        
-        empty_blocks = "░" * (width - filled - (1 if partial_block else 0))
-        
-        return f"{color}{full_blocks}{partial_block}{Colors.LIGHT_GRAY}{empty_blocks}{Colors.RESET}"
-    
-    elif style == "dots":
-        # Dot style for efficiency visualization
-        filled = int(width * percentage / 100)
-        color = get_percentage_color(percentage)
-        
-        dots = "●" * filled + "○" * (width - filled)
-        return f"{color}{dots}{Colors.RESET}"
-    
-    return ""
 
-def create_mini_chart(values, width=30, height=4):
-    """Create a mini ASCII chart for burn rate trends"""
-    if not values or width <= 0 or height <= 0:
-        return ['─' * width] * height
-    
-    min_val = min(values)
-    max_val = max(values)
-    
-    if max_val == min_val:
-        return ['·' * width] * height
-    
-    range_val = max_val - min_val
-    lines = []
-    
-    # Create chart from top to bottom
-    for row in range(height):
-        line = ''
-        # Calculate threshold for this row (from top)
-        threshold = max_val - (row * range_val / (height - 1))
-        
-        # Sample values across width
-        step = len(values) / width if len(values) > width else 1
-        
-        for col in range(width):
-            if len(values) <= width:
-                # Direct mapping
-                value_index = min(col, len(values) - 1)
-            else:
-                # Sample values
-                value_index = int(col * step)
-            
-            value = values[value_index] if value_index < len(values) else min_val
-            
-            if value >= threshold:
-                line += '●'
-            else:
-                line += '·'
-        
-        lines.append(line)
-    
-    return lines
 
 # REMOVED: get_all_messages() - unused function (replaced by load_all_messages_chronologically)
 
@@ -366,71 +306,6 @@ def get_real_time_burn_data(session_id=None):
 
 # REMOVED: show_live_burn_graph() - unused function (replaced by get_burn_line)
 
-def show_live_burn_monitoring():
-    """Show real-time burn rate monitoring"""
-    import time
-    import os
-    
-    print(f"{Colors.BRIGHT_CYAN}🔥 Live Burn Rate Monitor (press Ctrl+C to exit){Colors.RESET}")
-    print("=" * 70)
-    print()
-    
-    try:
-        while True:
-            # Clear screen (ANSI escape sequence)
-            os.system('clear' if os.name == 'posix' else 'cls')
-            
-            print(f"{Colors.BRIGHT_CYAN}🔥 Live Burn Rate Monitor - {datetime.now().strftime('%H:%M:%S')}{Colors.RESET}")
-            print("=" * 70)
-            print()
-            
-            # Get current burn rate data
-            burn_data = get_real_time_burn_data()
-            
-            if burn_data:
-                current_burn = burn_data[-1] if burn_data else 0
-                avg_burn = sum(burn_data) / len(burn_data) if burn_data else 0
-                max_burn = max(burn_data) if burn_data else 0
-                
-                # Display current metrics
-                burn_color = Colors.BRIGHT_GREEN if current_burn < 50 else Colors.BRIGHT_YELLOW if current_burn < 100 else Colors.BRIGHT_RED
-                print(f"Current Burn Rate: {burn_color}{current_burn:.1f} tokens/min{Colors.RESET}")
-                print(f"Average (30min):   {Colors.BRIGHT_WHITE}{avg_burn:.1f} tokens/min{Colors.RESET}")
-                print(f"Peak (30min):      {Colors.BRIGHT_CYAN}{max_burn:.1f} tokens/min{Colors.RESET}")
-                print()
-                
-                # Show mini chart
-                print(f"{Colors.BRIGHT_WHITE}Burn Rate Trend:{Colors.RESET}")
-                chart_lines = create_mini_chart(burn_data, width=50, height=8)
-                for i, line in enumerate(chart_lines):
-                    if i == 0:
-                        print(f"   {Colors.BRIGHT_RED}{line}{Colors.RESET} {Colors.BRIGHT_WHITE}{max_burn:.1f}{Colors.RESET}")
-                    elif i == len(chart_lines) - 1:
-                        print(f"   {Colors.LIGHT_GRAY}{line}{Colors.RESET} {Colors.BRIGHT_WHITE}0.0{Colors.RESET}")
-                    else:
-                        print(f"   {line}")
-                
-                print(f"   {Colors.LIGHT_GRAY}{'─' * 50}{Colors.RESET}")
-                print(f"   {Colors.LIGHT_GRAY}Last 30 minutes{Colors.RESET}")
-                print()
-                
-                # Show sparkline for compact view
-                sparkline = create_sparkline(burn_data, width=50)
-                print(f"Compact View: {sparkline}")
-                
-            else:
-                print(f"{Colors.BRIGHT_YELLOW}No session data available{Colors.RESET}")
-            
-            print()
-            print(f"{Colors.LIGHT_GRAY}Updating every 5 seconds... (Ctrl+C to exit){Colors.RESET}")
-            
-            # Wait 5 seconds before next update
-            time.sleep(5)
-            
-    except KeyboardInterrupt:
-        print(f"\n{Colors.BRIGHT_GREEN}Live monitoring stopped.{Colors.RESET}")
-    except Exception as e:
-        print(f"\n{Colors.BRIGHT_RED}Error in live monitoring: {e}{Colors.RESET}")
 
 def calculate_tokens_from_transcript(file_path):
     """Calculate total tokens from transcript file by summing all message usage data"""
@@ -922,52 +797,68 @@ def format_cost(cost):
     else:
         return f"${cost:.2f}"
 
-def print_help():
-    """Print help information"""
-    print("statusline.py - Enhanced Claude Code Status Line")
-    print()
-    print("USAGE:")
-    print("  echo '{\"session_id\":\"...\"}' | statusline")
-    print("  statusline --help")
-    print()
-    print("FEATURES:")
-    print("  • Real-time token usage and cost tracking")
-    print("  • 5-hour block session management for billing analysis")
-    print("  • Git integration with branch and file status")
-    print("  • Multi-project transcript analysis")
-    print("  • Cache efficiency monitoring")
-    print()
-    print("CONFIGURATION:")
-    print("  Add to .claude/settings.json:")
-    print('  {"statusLine": {"command": "statusline"}}')
-
-def print_version():
-    """Print version information"""
-    print("statusline.py v2.0 - enhanced status display with usage analytics")
 
 def main():
-    # Handle command line arguments
-    if len(sys.argv) > 1:
-        if sys.argv[1] in ['--help', '-h', 'help']:
-            print_help()
-            return
-        elif sys.argv[1] in ['--version', '-v']:
-            print_version()
-            return
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
+    parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
+    parser.add_argument('--help', action='store_true', help='Show help')
+    
+    # Parse arguments, but don't exit on failure (for stdin compatibility)
+    try:
+        args, unknown = parser.parse_known_args()
+    except:
+        args = argparse.Namespace(show=None, help=False)
+    
+    # Handle help
+    if args.help:
+        print("statusline.py - Claude Code Status Line")
+        print("Usage:")
+        print("  echo '{\"session_id\":\"...\"}' | statusline.py")
+        print("  echo '{\"session_id\":\"...\"}' | statusline.py --show 1,2")
+        print("  echo '{\"session_id\":\"...\"}' | statusline.py --show simple")
+        print("  echo '{\"session_id\":\"...\"}' | statusline.py --show all")
+        print()
+        print("Options:")
+        print("  --show 1,2,3,4    Show specific lines (comma-separated)")
+        print("  --show simple     Show compact and session lines (2,3)")
+        print("  --show all        Show all lines")
+        print("  --help            Show this help")
+        return
+    
+    # Override display settings based on --show argument
+    global SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4
+    if args.show:
+        # Reset all to False first
+        SHOW_LINE1 = SHOW_LINE2 = SHOW_LINE3 = SHOW_LINE4 = False
+        
+        if args.show.lower() == 'all':
+            SHOW_LINE1 = SHOW_LINE2 = SHOW_LINE3 = SHOW_LINE4 = True
+        elif args.show.lower() == 'simple':
+            SHOW_LINE2 = SHOW_LINE3 = True  # Show lines 2,3 (compact and session)
+        else:
+            # Parse comma-separated line numbers
+            try:
+                lines = [int(x.strip()) for x in args.show.split(',')]
+                if 1 in lines: SHOW_LINE1 = True
+                if 2 in lines: SHOW_LINE2 = True
+                if 3 in lines: SHOW_LINE3 = True
+                if 4 in lines: SHOW_LINE4 = True
+            except ValueError:
+                print("Error: Invalid --show format. Use: 1,2,3,4, simple, or all", file=sys.stderr)
+                return
     
     try:
         # Read JSON from stdin
         input_data = sys.stdin.read()
         if not input_data.strip():
-            print_help()
+            # No input provided - just exit silently
             return
         data = json.loads(input_data)
         
         # Extract basic values
         model = data.get('model', {}).get('display_name', 'Unknown')
         
-        # Store plan override for later use
-        plan_override = getattr(args, 'plan', None) if hasattr(args, 'plan') else None
         workspace = data.get('workspace', {})
         current_dir = os.path.basename(workspace.get('current_dir', data.get('cwd', '.')))
         session_id = data.get('session_id') or data.get('sessionId')
@@ -977,9 +868,8 @@ def main():
             workspace.get('current_dir', data.get('cwd', '.'))
         )
         
-        # Get token usage and message counts
+        # Get token usage
         total_tokens = 0
-        message_count = 0
         error_count = 0
         user_messages = 0
         assistant_messages = 0
@@ -1026,7 +916,6 @@ def main():
                     total_tokens = block_stats['total_tokens']
                     user_messages = block_stats['user_messages']
                     assistant_messages = block_stats['assistant_messages']
-                    message_count = user_messages + assistant_messages
                     error_count = block_stats['error_count']
                     input_tokens = block_stats['input_tokens']
                     output_tokens = block_stats['output_tokens']
@@ -1037,9 +926,8 @@ def main():
                 # フォールバック: 従来の単一ファイル方式
                 transcript_file = find_session_transcript(session_id)
                 if transcript_file:
-                    (total_tokens, msg_count_unused, error_count, user_messages, assistant_messages,
+                    (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
-                    message_count = user_messages + assistant_messages
         
         # Calculate percentage for Compact display (use conversation compaction tokens)
         percentage = min(100, round((total_tokens / COMPACTION_THRESHOLD) * 100))
@@ -1227,33 +1115,37 @@ def main():
                 single_line.append(f"⏱️ Time: {session_duration}")
             print(" | ".join(single_line))
         else:
-            # 複数行版（デフォルト、より詳細）
+            # 複数行版（設定に基づいて表示）
             # より強力な色リセット + 明るい色設定
-            print(f"\033[0m\033[1;97m" + " | ".join(line1_parts) + f"\033[0m")
-            print(f"\033[0m\033[1;97m" + " ".join(line2_parts) + f"\033[0m") 
+            if SHOW_LINE1:
+                print(f"\033[0m\033[1;97m" + " | ".join(line1_parts) + f"\033[0m")
+            
+            if SHOW_LINE2:
+                print(f"\033[0m\033[1;97m" + " ".join(line2_parts) + f"\033[0m") 
             
             # 3行目（セッション時間の詳細）を表示する場合
-            if line3_parts:
+            if SHOW_LINE3 and line3_parts:
                 print(f"\033[0m\033[1;97m" + " ".join(line3_parts) + f"\033[0m")
             
             # ═══════════════════════════════════════════════════════════════════
             # 📊 SESSION LINE SYSTEM: Line 4 - Burn Rate Display
             # ═══════════════════════════════════════════════════════════════════
-            session_data = None
-            if block_stats:
-                # Calculate SESSION tokens (different from block tokens above)
-                session_start_time = block_stats.get('start_time')
-                session_tokens = calculate_tokens_since_time(session_start_time, session_id) if session_start_time else 0
-                session_data = {
-                    'total_tokens': session_tokens,  # SESSION tokens for burn rate
-                    'duration_seconds': duration_seconds,
-                    'start_time': block_stats.get('start_time'),
-                    'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
-                    'current_cost': session_cost
-                }
-            line4_parts = get_burn_line(session_data, session_id)
-            if line4_parts:
-                print(f"\033[0m\033[1;97m{line4_parts}\033[0m")
+            if SHOW_LINE4:
+                session_data = None
+                if block_stats:
+                    # Calculate SESSION tokens (different from block tokens above)
+                    session_start_time = block_stats.get('start_time')
+                    session_tokens = calculate_tokens_since_time(session_start_time, session_id) if session_start_time else 0
+                    session_data = {
+                        'total_tokens': session_tokens,  # SESSION tokens for burn rate
+                        'duration_seconds': duration_seconds,
+                        'start_time': block_stats.get('start_time'),
+                        'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
+                        'current_cost': session_cost
+                    }
+                line4_parts = get_burn_line(session_data, session_id)
+                if line4_parts:
+                    print(f"\033[0m\033[1;97m{line4_parts}\033[0m")
             # ═══════════════════════════════════════════════════════════════════
             
             # : sparkline integrated into 4th line
@@ -1390,19 +1282,6 @@ def get_burn_line(current_session_data=None, session_id=None):
             if duration > 0:
                 burn_rate = (recent_tokens / duration) * 60
         
-        # Determine burn status ()
-        if burn_rate > 1000:
-            status_color = Colors.BRIGHT_RED
-            status_text = "HIGH"
-            status_emoji = "⚡"
-        elif burn_rate > 500:
-            status_color = Colors.BRIGHT_YELLOW
-            status_text = "MODERATE"
-            status_emoji = "🔥"
-        else:
-            status_color = Colors.BRIGHT_GREEN
-            status_text = "NORMAL"
-            status_emoji = "✓"
         
         # 📊 SESSION TOKENS: Shows tokens for current session conversation
         # CRITICAL: These are SESSION tokens, NOT block tokens
@@ -1417,9 +1296,6 @@ def get_burn_line(current_session_data=None, session_id=None):
         # Generate 30-minute sparkline from actual session data
         burn_rates = get_real_time_burn_data(session_id)
         
-        # Debug info (can be removed later)
-        total_activity = sum(burn_rates) if burn_rates else 0
-        # print(f"DEBUG: burn_rates length={len(burn_rates) if burn_rates else 0}, total={total_activity}", file=sys.stderr)
         
         if not burn_rates:
             # No data available - show flat line
@@ -1434,307 +1310,8 @@ def get_burn_line(current_session_data=None, session_id=None):
         print(f"DEBUG: Burn line error: {e}", file=sys.stderr)
         return f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}   {Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
 
-def analyze_daily_usage(target_date=None):
-    """Analyze daily usage with comprehensive reporting"""
-    if target_date is None:
-        target_date = date.today()
-    
-    # Find all transcript files
-    projects_dir = Path.home() / '.claude' / 'projects'
-    if not projects_dir.exists():
-        print(f"{Colors.BRIGHT_RED}No Claude projects found{Colors.RESET}")
-        return
-    
-    daily_stats = defaultdict(lambda: {
-        'input_tokens': 0,
-        'output_tokens': 0,
-        'cache_creation': 0,
-        'cache_read': 0,
-        'total_cost': 0.0,
-        'sessions': 0,
-        'projects': set(),
-        'models': set()
-    })
-    
-    # Scan all transcript files
-    for project_dir in projects_dir.iterdir():
-        if not project_dir.is_dir():
-            continue
-            
-        for transcript_file in project_dir.glob('*.jsonl'):
-            try:
-                with open(transcript_file, 'r') as f:
-                    session_data = defaultdict(lambda: {
-                        'input_tokens': 0,
-                        'output_tokens': 0,
-                        'cache_creation': 0,
-                        'cache_read': 0,
-                        'model': None,
-                        'start_time': None
-                    })
-                    
-                    for line in f:
-                        try:
-                            entry = json.loads(line.strip())
-                            timestamp_str = entry.get('timestamp')
-                            if not timestamp_str:
-                                continue
-                                
-                            # Parse timestamp and check if it's from target date
-                            try:
-                                entry_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                                entry_date = entry_time.date()
-                            except:
-                                continue
-                                
-                            if entry_date != target_date:
-                                continue
-                            
-                            # Track session start time
-                            if session_data[transcript_file.name]['start_time'] is None:
-                                session_data[transcript_file.name]['start_time'] = entry_time
-                            
-                            # Extract usage data
-                            if entry.get('type') == 'assistant' and entry.get('message', {}).get('usage'):
-                                usage = entry['message']['usage']
-                                model = entry['message'].get('model', 'unknown')
-                                
-                                session_data[transcript_file.name]['input_tokens'] = usage.get('input_tokens', 0)
-                                session_data[transcript_file.name]['output_tokens'] = usage.get('output_tokens', 0)
-                                session_data[transcript_file.name]['cache_creation'] = usage.get('cache_creation_input_tokens', 0)
-                                session_data[transcript_file.name]['cache_read'] = usage.get('cache_read_input_tokens', 0)
-                                session_data[transcript_file.name]['model'] = model
-                                
-                        except json.JSONDecodeError:
-                            continue
-                    
-                    # Aggregate session data to daily stats
-                    for data in session_data.values():
-                        if data['start_time'] is not None:
-                            daily_stats[target_date]['input_tokens'] += data['input_tokens']
-                            daily_stats[target_date]['output_tokens'] += data['output_tokens']
-                            daily_stats[target_date]['cache_creation'] += data['cache_creation']
-                            daily_stats[target_date]['cache_read'] += data['cache_read']
-                            daily_stats[target_date]['sessions'] += 1
-                            daily_stats[target_date]['projects'].add(project_dir.name)
-                            if data['model']:
-                                daily_stats[target_date]['models'].add(data['model'])
-                            
-                            # Calculate cost
-                            cost = calculate_cost(
-                                data['input_tokens'],
-                                data['output_tokens'],
-                                data['cache_creation'],
-                                data['cache_read'],
-                                data['model'] or 'claude-3-5-sonnet-20241022'
-                            )
-                            daily_stats[target_date]['total_cost'] += cost
-                            
-            except Exception:
-                continue
-    
-    # Display results
-    print(f"{Colors.BRIGHT_CYAN}📊 Daily Usage Report - {target_date.strftime('%Y-%m-%d')}{Colors.RESET}")
-    print("=" * 60)
-    
-    if not daily_stats:
-        print(f"{Colors.BRIGHT_YELLOW}No usage data found for {target_date}{Colors.RESET}")
-        return
-    
-    stats = daily_stats[target_date]
-    total_tokens = stats['input_tokens'] + stats['output_tokens']
-    cache_total = stats['cache_creation'] + stats['cache_read']
-    
-    # Summary stats
-    print(f"{Colors.BRIGHT_WHITE}📈 Summary{Colors.RESET}")
-    print(f"  Sessions: {Colors.BRIGHT_GREEN}{stats['sessions']}{Colors.RESET}")
-    print(f"  Projects: {Colors.BRIGHT_BLUE}{len(stats['projects'])}{Colors.RESET}")
-    print(f"  Models: {Colors.BRIGHT_MAGENTA}{', '.join(stats['models'])}{Colors.RESET}")
-    print()
-    
-    # Token breakdown
-    print(f"{Colors.BRIGHT_WHITE}🪙 Token Usage{Colors.RESET}")
-    print(f"  Input:       {Colors.BRIGHT_CYAN}{format_token_count(stats['input_tokens']):>8}{Colors.RESET}")
-    print(f"  Output:      {Colors.BRIGHT_GREEN}{format_token_count(stats['output_tokens']):>8}{Colors.RESET}")
-    print(f"  Cache Write: {Colors.BRIGHT_YELLOW}{format_token_count(stats['cache_creation']):>8}{Colors.RESET}")
-    print(f"  Cache Read:  {Colors.BRIGHT_MAGENTA}{format_token_count(stats['cache_read']):>8}{Colors.RESET}")
-    print(f"  {Colors.BOLD}Total:       {Colors.BRIGHT_WHITE}{format_token_count(total_tokens):>8}{Colors.RESET}")
-    if cache_total > 0:
-        cache_ratio = (stats['cache_read'] / total_tokens * 100) if total_tokens > 0 else 0
-        print(f"  Cache Efficiency: {Colors.BRIGHT_GREEN}{cache_ratio:.1f}%{Colors.RESET}")
-    print()
-    
-    # Cost breakdown
-    print(f"{Colors.BRIGHT_WHITE}💰 Cost Analysis{Colors.RESET}")
-    print(f"  Total Cost:  {Colors.BRIGHT_YELLOW}${stats['total_cost']:.3f}{Colors.RESET}")
-    if stats['sessions'] > 0:
-        avg_cost = stats['total_cost'] / stats['sessions']
-        print(f"  Avg/Session: {Colors.BRIGHT_WHITE}${avg_cost:.3f}{Colors.RESET}")
-    print()
-    
-    # Projects breakdown
-    if len(stats['projects']) > 1:
-        print(f"{Colors.BRIGHT_WHITE}📁 Projects{Colors.RESET}")
-        for project in sorted(stats['projects']):
-            print(f"  • {Colors.BRIGHT_BLUE}{project}{Colors.RESET}")
-        print()
 
-def show_graph_display():
-    """Show visual graph display similar to  visualization"""
-    print(f"{Colors.BRIGHT_CYAN}📊 Token Usage Visualization{Colors.RESET}")
-    print("=" * 60)
-    print()
-    
-    # Generate burn rate trend using  calculation
-    try:
-        # Get all messages and calculate burn rate 
-        all_messages = load_all_messages_chronologically()
-        blocks = detect_five_hour_blocks(all_messages) if all_messages else []
-        
-        # Use current session burn rate (matching the 4th line display)
-        current_burn = 1024.5  # Use actual session burn rate
-        
-        if blocks:
-            # Use block data to estimate current burn 
-            active_block = [b for b in blocks if b.get('is_active', False)]
-            if active_block:
-                block_stats = calculate_block_statistics(active_block[0])
-                if block_stats and block_stats['duration_seconds'] > 0:
-                    #  uses total cumulative tokens divided by very recent time window
-                    recent_minutes = min(5, block_stats['duration_seconds'] / 60)  # Last 5 minutes or less
-                    if recent_minutes > 0:
-                        current_burn = block_stats['total_tokens'] / recent_minutes
-        
-        # Generate realistic trend around current session burn rate
-        burn_rates = []
-        for i in range(30):
-            # Create variation that simulates real coding session patterns
-            variation = (i % 7 - 3) * 200 + (i % 3 - 1) * 150 + (i % 11 - 5) * 100
-            rate = max(200, current_burn + variation)  # Realistic baseline
-            burn_rates.append(rate)
-            
-    except:
-        # Fallback to realistic sample data based on actual session
-        current_burn = 1024.5  # Match actual session value
-        burn_rates = []
-        for i in range(30):
-            variation = (i % 7 - 3) * 300 + (i % 3 - 1) * 200
-            rate = max(500, current_burn + variation)
-            burn_rates.append(rate)
-    
-    # Create mini burn rate chart
-    print(f"{Colors.BRIGHT_WHITE}🔥 Burn Rate Trend (tokens/min) - Current: {current_burn:.1f}{Colors.RESET}")
-    chart_lines = create_mini_chart(burn_rates, width=50, height=6)
-    max_val = max(burn_rates) if burn_rates else 100
-    for i, line in enumerate(chart_lines):
-        if i == 0:
-            print(f"   {Colors.BRIGHT_RED}{line}{Colors.RESET} {max_val:.0f}")
-        elif i == len(chart_lines) - 1:
-            print(f"   {Colors.LIGHT_GRAY}{line}{Colors.RESET} {min(burn_rates):.0f}")
-        else:
-            print(f"   {line}")
-    print(f"   {Colors.LIGHT_GRAY}{'─' * 50}{Colors.RESET}")
-    print(f"   {Colors.LIGHT_GRAY}Last 30 minutes{Colors.RESET}")
-    print()
-    
-    # Token usage progress bars with different styles
-    print(f"{Colors.BRIGHT_WHITE}📈 Current Session Metrics{Colors.RESET}")
-    
-    # Token usage (blocks style)
-    token_usage = 81
-    print(f"   Tokens:     {create_horizontal_chart(token_usage, width=25, style='smooth')} {token_usage}%")
-    
-    # Efficiency (dots style)
-    efficiency = 78
-    print(f"   Efficiency: {create_horizontal_chart(efficiency, width=25, style='dots')} {efficiency}%")
-    
-    # Block progress (blocks style)
-    block_progress = 45
-    print(f"   Block:      {create_horizontal_chart(block_progress, width=25, style='blocks')} {block_progress}%")
-    print()
-    
-    # Cost breakdown visualization
-    print(f"{Colors.BRIGHT_WHITE}💰 Cost Analysis{Colors.RESET}")
-    costs = {"Input": 30, "Output": 45, "Cache": 25}
-    total_cost = sum(costs.values())
-    
-    for label, cost in costs.items():
-        percentage = (cost / total_cost) * 100
-        color = Colors.BRIGHT_GREEN if label == "Cache" else Colors.BRIGHT_YELLOW if label == "Input" else Colors.BRIGHT_CYAN
-        bar = create_horizontal_chart(percentage, width=20, style="blocks")
-        print(f"   {label:8}: {bar} {percentage:.1f}% (${cost/100:.3f})")
-    print()
-    
-    # Session blocks visualization
-    print(f"{Colors.BRIGHT_WHITE}⏱️ Session Blocks (5-hour periods){Colors.RESET}")
-    blocks_data = [
-        {"name": "Block 1", "usage": 65, "status": "ACTIVE", "cost": 2.45},
-        {"name": "Block 2", "usage": 35, "status": "IDLE", "cost": 1.23},
-        {"name": "Block 3", "usage": 0, "status": "PENDING", "cost": 0.00}
-    ]
-    
-    for block in blocks_data:
-        status_color = Colors.BRIGHT_GREEN if block["status"] == "ACTIVE" else Colors.BRIGHT_YELLOW if block["status"] == "IDLE" else Colors.LIGHT_GRAY
-        usage_bar = create_horizontal_chart(block["usage"], width=20, style="smooth")
-        print(f"   {block['name']}: {usage_bar} {status_color}{block['status']:8}{Colors.RESET} ${block['cost']:.2f}")
-    print()
 
-def show_usage_help():
-    """Show usage help and available commands"""
-    print(f"{Colors.BRIGHT_CYAN}statusline - Claude Code Usage Analysis{Colors.RESET}")
-    print("=" * 40)
-    print()
-    print("Usage:")
-    print(f"  {Colors.BRIGHT_WHITE}statusline{Colors.RESET}                    # Show current status (default)")
-    print(f"  {Colors.BRIGHT_WHITE}statusline daily{Colors.RESET}              # Show today's usage")
-    print(f"  {Colors.BRIGHT_WHITE}statusline daily --date YYYY-MM-DD{Colors.RESET}  # Show specific date")
-    print(f"  {Colors.BRIGHT_WHITE}statusline graph{Colors.RESET}              # Show visual charts and graphs")
-    print(f"  {Colors.BRIGHT_WHITE}statusline burn{Colors.RESET}               # Real-time burn rate monitor")
-    print(f"  {Colors.BRIGHT_WHITE}statusline --plan pro{Colors.RESET}        # Override Claude subscription plan")
-    print(f"  {Colors.BRIGHT_WHITE}statusline --help{Colors.RESET}             # Show this help")
-    print()
-    print("Examples:")
-    print(f"  {Colors.LIGHT_GRAY}statusline daily{Colors.RESET}")
-    print(f"  {Colors.LIGHT_GRAY}statusline daily --date 2025-01-15{Colors.RESET}")
-    print(f"  {Colors.LIGHT_GRAY}statusline graph{Colors.RESET}")
-    print(f"  {Colors.LIGHT_GRAY}statusline burn{Colors.RESET}")
-    print(f"  {Colors.LIGHT_GRAY}statusline --plan pro{Colors.RESET}")
-    print(f"  {Colors.LIGHT_GRAY}statusline --plan max20{Colors.RESET}")
-    print()
 
 if __name__ == "__main__":
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Claude Code statusline and usage analysis', add_help=False)
-    parser.add_argument('command', nargs='?', choices=['daily', 'graph', 'burn'], help='Usage analysis command')
-    parser.add_argument('--date', type=str, help='Date for analysis (YYYY-MM-DD)')
-    parser.add_argument('--plan', type=str, choices=['pro', 'max5', 'max20'], help='Override Claude subscription plan for limit calculation')
-    parser.add_argument('--help', action='store_true', help='Show help')
-    
-    try:
-        args = parser.parse_args()
-    except SystemExit:
-        # If parsing fails, assume it's being called as statusline (no args)
-        args = argparse.Namespace(command=None, date=None, plan=None, help=False)
-    
-    # Handle help
-    if args.help:
-        show_usage_help()
-        sys.exit(0)
-    
-    # Handle commands
-    if args.command == 'daily':
-        target_date = None
-        if args.date:
-            try:
-                target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
-            except ValueError:
-                print(f"{Colors.BRIGHT_RED}Invalid date format. Use YYYY-MM-DD{Colors.RESET}")
-                sys.exit(1)
-        analyze_daily_usage(target_date)
-    elif args.command == 'graph':
-        show_graph_display()
-    elif args.command == 'burn':
-        show_live_burn_monitoring()
-    else:
-        # Default: show current status line
-        main()
+    main()
