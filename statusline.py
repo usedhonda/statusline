@@ -45,10 +45,6 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 # 3. These track DIFFERENT concepts: compression vs billing periods
 # 4. Compact = compression timing, Session = official billing window
 
-# 🚨 ABSOLUTE RULE: DO NOT MODIFY COMPACT LINE CODE 🚨
-# The 🪙 Compact line implementation must remain exactly as is.
-# Any changes to Compact line display logic are FORBIDDEN.
-
 # ANSI color codes optimized for black backgrounds - 全て明るいバージョン
 class Colors:
     BRIGHT_CYAN = '\033[1;96m'     # 最も明るいシアン
@@ -112,6 +108,31 @@ def get_percentage_color(percentage):
     elif percentage >= 70:
         return Colors.BRIGHT_YELLOW
     return Colors.BRIGHT_GREEN
+
+def calculate_dynamic_padding(compact_text, session_text):
+    """Calculate dynamic padding to align progress bars
+    
+    Args:
+        compact_text: Text part of compact line (e.g., "🪙  Compact: 111.6K/160.0K")
+        session_text: Text part of session line (e.g., "⏱️  Session: 3h26m/5h")
+    
+    Returns:
+        str: Padding spaces for session line
+    """
+    # Remove ANSI color codes for accurate length calculation
+    import re
+    clean_compact = re.sub(r'\x1b\[[0-9;]*m', '', compact_text)
+    clean_session = re.sub(r'\x1b\[[0-9;]*m', '', session_text)
+    
+    compact_len = len(clean_compact)
+    session_len = len(clean_session)
+    
+    
+    
+    if session_len < compact_len:
+        return ' ' * (compact_len - session_len + 1)  # +1 for visual adjustment
+    else:
+        return ' '
 
 def get_progress_bar(percentage, width=20):
     """Create a visual progress bar"""
@@ -1133,11 +1154,17 @@ def main():
                     # Fallback: use UTC time directly
                     session_start_time = block_stats['start_time'].strftime("%H:%M")
             
-            # Session情報（開始時間付き、2行目と位置揃え用にパディング追加）
+            # Session情報（動的パディングでプログレスバー位置を2行目と揃える）
+            compact_text = f"🪙  Compact: {compact_display}/{format_token_count(COMPACTION_THRESHOLD)}"
+            
             if session_start_time:
-                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h    {Colors.RESET}")
+                session_text = f"⏱️  Session: {session_duration}/5h"
+                padding = calculate_dynamic_padding(compact_text, session_text)
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{padding}{Colors.RESET}")
             else:
-                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h     {Colors.RESET}")
+                session_text = f"⏱️ Session: {session_duration}/5h"
+                padding = calculate_dynamic_padding(compact_text, session_text)
+                line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️ Session: {Colors.RESET}{Colors.BRIGHT_WHITE}{session_duration}/5h{padding}{Colors.RESET}")
             
             # 統一されたプログレスバー（同じ文字を使用）
             session_bar = get_progress_bar(block_progress, width=15)
@@ -1311,7 +1338,7 @@ def get_burn_line(current_session_data=None, session_id=None):
     Creates the 🔥 Burn line showing session tokens and burn rate.
     Uses SESSION tokens, NOT block tokens. Shows current conversation scope.
     
-    Format: "🔥 Burn: 17,106,109 (Rate: 258,455 t/m) [sparkline]"
+    Format: "🔥 Burn:    17,106,109 (Rate: 258,455 t/m) [sparkline]"
     
     Args:
         current_session_data: Session data with session tokens
@@ -1365,12 +1392,12 @@ def get_burn_line(current_session_data=None, session_id=None):
         
         sparkline = create_sparkline(burn_rates, width=30)
         
-        return (f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}{Colors.BRIGHT_WHITE}{tokens_formatted}{Colors.RESET} "
+        return (f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}   {Colors.BRIGHT_WHITE}{tokens_formatted}{Colors.RESET} "
                 f"(Rate: {burn_rate_formatted} t/m) {sparkline}")
         
     except Exception as e:
         print(f"DEBUG: Burn line error: {e}", file=sys.stderr)
-        return f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}{Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
+        return f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}   {Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
 
 def analyze_daily_usage(target_date=None):
     """Analyze daily usage with comprehensive reporting"""

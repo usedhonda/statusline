@@ -104,10 +104,10 @@ After installation, verify it works:
 When properly configured with Claude Code, statusline automatically displays a comprehensive 4-line status:
 
 ```
-[claude-sonnet-4] | 🌿 main M1 | 📁 statusline | 💬 583
-🪙  Compact: 118.1K/160.0K ████████▒▒▒▒ 74% 💰 Cost: $0.214 ♻️  98% cached
-⏱️  Session: 1h6m/5h (from 16:00) ███▒▒▒▒▒▒▒▒▒▒▒▒ 22% 17:06
-🔥 Burn: 17,106,109 (Rate: 258,455 t/m) ▂▁▄▂▁▁▁▁▁▁▁▁▁▁▁▃▁▃▁▂▃█▁▁▄▄▃▃▇▃
+[Sonnet 4] | 🌿 main M1 +1 | 📁 statusline | 💬 1572
+🪙  Compact: 140.5K/160.0K █████████████▒▒ 88% ♻️  99% cached 💰 Cost: $0.049
+⏱️  Session: 3h33m/5h     ██████████▒▒▒▒▒ 71% 19:33 (from 16:00)
+🔥 Burn:    55,823,011 (Rate: 261,309 t/m) ▁▁▁▁▁▁▁▁▁▁▄▂▁▇█▂▁█▂▇█▅██▆▆▅█▅█
 ```
 
 ### Usage Analysis Commands
@@ -226,30 +226,30 @@ Features:
 ### Display Elements
 
 #### Line 1: Basic Information
-- **[claude-sonnet-4]**: Current AI model
-- **🌿 main M1**: Git branch with M1 indicating modified files
+- **[Sonnet 4]**: Current AI model
+- **🌿 main M1 +1**: Git branch with M1 indicating modified files, +1 untracked files
 - **📁 statusline**: Current project directory
-- **💬 583**: Total message count in current session
+- **💬 1572**: Total message count in current session
 
 #### Line 2: 🗜️ Compact (Conversation Compaction System)
-- **🪙 Compact: 118.1K/160.0K**: Current conversation tokens / Compaction threshold (160K)
-- **████████▒▒▒▒**: Progress toward conversation compaction limit (74%)
-- **💰 Cost: $0.214**: Cost for current conversation
-- **♻️ 98% cached**: Cache efficiency for current conversation
+- **🪙 Compact: 140.5K/160.0K**: Current conversation tokens / Compaction threshold (160K)
+- **█████████████▒▒**: Progress toward conversation compaction limit (88%)
+- **♻️ 99% cached**: Cache efficiency for current conversation
+- **💰 Cost: $0.049**: Cost for current conversation
 
 #### Line 3: ⏱️ Session Time (Billing Block Context)
-- **⏱️ Session: 1h6m/5h**: Time elapsed in current 5-hour billing period
-- **███▒▒▒▒▒▒▒▒▒▒▒▒**: Progress bar through 5-hour period (22%)
-- **17:06**: Current time (from 16:00)
+- **⏱️ Session: 3h33m/5h**: Time elapsed in current 5-hour billing period
+- **██████████▒▒▒▒▒**: Progress bar through 5-hour period (71%)
+- **19:33**: Current time (from 16:00)
 
 #### Line 4: 📊 Burn Rate (Individual Session System)
-- **🔥 Burn: 17,106,109**: **Session cumulative** tokens (from Claude Code JSONL)
+- **🔥 Burn: 55,823,011**: **Session cumulative** tokens (from Claude Code JSONL)
   - ⚠️ **CRITICAL**: Different scope from Line 2 (conversation vs billing window)
   - **Native tracking**: Direct from Claude Code's session transcript data
   - **Cumulative usage**: Each message usage represents total session consumption
   - **Cache aware**: Distinguishes between fresh processing vs cache reuse
-- **(Rate: 258,455 t/m)**: Real-time token consumption rate
-- **▂▁▄▂▁▁▁▁▁▁▁▁▁▁▁▃▁▃▁▂▃█▁▁▄▄▃▃▇▃**: 30-minute burn rate sparkline
+- **(Rate: 261,309 t/m)**: Real-time token consumption rate
+- **▁▁▁▁▁▁▁▁▁▁▄▂▁▇█▂▁█▂▇█▅██▆▆▅█▅█**: 30-minute burn rate sparkline
 
 ### Color Coding
 
@@ -342,7 +342,7 @@ Features:
 Source: calculate_tokens_since_time() with session start
 Scope: Current conversation only
 Includes: Single conversation messages with deduplication
-Usage: Line 2 - "🪙 Compact: 118.1K/160.0K"
+Usage: Line 2 - "🪙 Compact: 140.5K/160.0K"
 ```
 
 **📊 Session Tokens (Burn Line)**  
@@ -350,7 +350,7 @@ Usage: Line 2 - "🪙 Compact: 118.1K/160.0K"
 Source: calculate_tokens_since_time() with session start
 Scope: Current conversation only
 Includes: Single session messages with deduplication
-Usage: Line 4 - "🔥 Burn: 17,106,109"
+Usage: Line 4 - "🔥 Burn:    55,823,011"
 ```
 
 **Claude Code Token Architecture**
