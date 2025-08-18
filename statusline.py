@@ -1151,6 +1151,11 @@ def main():
         if task_status != 'idle':
             line1_parts.append(f"{Colors.BRIGHT_YELLOW}⚡ {task_status}{Colors.RESET}")
         
+        # Cost display (moved from line 2)
+        if session_cost > 0:
+            cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
+            line1_parts.append(f"{cost_color}💰 {format_cost(session_cost)}{Colors.RESET}")
+        
         # Current time moved to Session line
         
         # 行2: Token情報の統合
@@ -1176,16 +1181,11 @@ def main():
         line2_parts.append(percentage_display)
         line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
         
-        # キャッシュ情報（説明付き簡潔版）- コストより先に表示
+        # キャッシュ情報（説明付き簡潔版）
         if cache_read > 0 or cache_creation > 0:
             cache_ratio = (cache_read / total_tokens * 100) if total_tokens > 0 else 0
             if cache_ratio >= 50:  # 50%以上の場合のみ表示
                 line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️  {int(cache_ratio)}% cached{Colors.RESET}")
-        
-        # コスト表示
-        if session_cost > 0:
-            cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
-            line2_parts.append(f"{cost_color}💰 Cost: {format_cost(session_cost)}{Colors.RESET}")
         
         # 警告表示を削除（ユーザーリクエスト）
         
@@ -1423,32 +1423,15 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None):
         tokens_formatted = f"{current_session_tokens:,}"
         burn_rate_formatted = f"{burn_rate:,.0f}"
         
-        # Generate 5-hour timeline sparkline - use same progress as Session
-        if block_stats and 'duration_seconds' in block_stats:
-            duration_seconds = block_stats['duration_seconds']
-            hours_elapsed = duration_seconds / 3600
-            block_progress = (hours_elapsed % 5) / 5 * 100  # Same as Session calculation
-            
-            # Get total tokens (already available)
-            total_session_tokens = current_session_tokens or 0
-            
-            # Calculate how many segments should show data
-            completed_segments = int((block_progress / 100) * 20)
-            burn_timeline = [0] * 20
-            
-            # Distribute actual token data across completed segments
-            if total_session_tokens > 0 and completed_segments > 0:
-                tokens_per_segment = total_session_tokens / completed_segments
-                for i in range(completed_segments):
-                    # Add some variation for realistic pattern
-                    variation = 0.8 + (i % 3) * 0.2  # 0.8, 1.0, 1.2 pattern
-                    burn_timeline[i] = int(tokens_per_segment * variation)
+        # Generate 5-hour timeline sparkline from REAL message data ONLY
+        if block_stats and 'start_time' in block_stats:
+            burn_timeline = generate_real_burn_timeline(block_stats, session_id)
         else:
             burn_timeline = [0] * 20
         
         sparkline = create_sparkline(burn_timeline, width=20)
         
-        return (f"{Colors.BRIGHT_CYAN}🔥 Burn:   {Colors.RESET} {sparkline} "
+        return (f"{Colors.BRIGHT_CYAN}🔥 Burn:    {Colors.RESET}{sparkline} "
                 f"{Colors.BRIGHT_WHITE}{tokens_formatted} token(w/cache){Colors.RESET}, Rate: {burn_rate_formatted} t/m")
         
     except Exception as e:

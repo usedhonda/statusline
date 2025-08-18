@@ -5,16 +5,35 @@ Enhanced status line for Claude Code showing token usage, session time, and burn
 ## What it does
 
 ```
-[Sonnet 4] | 🌿 main M1 +1 | 📁 statusline | 💬 170
-🪙  Compact: 140.5K/160.0K █████████████▒▒ 88% ♻️  99% cached 💰 Cost: $0.049
-⏱️  Session: 3h33m/5h     ██████████▒▒▒▒▒ 71% 19:33 (16:00 to 21:00)
-🔥 Burn:    55,823,011 (Rate: 261,309 t/m) ▁▁▁▁▁▁▁▁▁▁▄▂▁▇█▂▁█▂▇█▅██▆▆▅█▅█
+[Sonnet 4] | 🌿 main M1 +1 | 📁 statusline | 💬 170 | 💰 $0.044
+🚨  Compact: █████████████████▒▒▒ [89%] ⚠️ 142.6K/160.0K ♻️  99% cached
+⏱️  Session: ███████▒▒▒▒▒▒▒▒▒▒▒▒▒ [37%] 1h51m/5h 14:51 (13:00 to 18:00)
+🔥 Burn:    ▁▁█▂▁▁▅▄▁▁▁▁▁▁▁▁▁▁▁▁ 8,387,710 token(w/cache), Rate: 75,515 t/m
 ```
 
-- **Line 1**: Model, git status, directory, message count
-- **Line 2**: Conversation tokens vs compaction limit (160K)
-- **Line 3**: Session time within usage window  
-- **Line 4**: Session tokens and real-time burn rate
+- **Line 1**: Model, git status, directory, message count, cost
+- **Line 2**: Conversation tokens vs compaction limit (160K) with 85%+ warning
+- **Line 3**: Session time within 5-hour usage window  
+- **Line 4**: Real-time burn rate with 15-minute segment sparkline
+
+## Key Features
+
+### 🚨 85% Warning System
+When conversation tokens reach 85% of the compaction threshold (136K/160K):
+- Icon changes from 🪙 to 🚨
+- Red background warning appears
+- Percentage display includes ⚠️ symbol
+
+### 🔥 Real-Time Burn Sparkline
+- Each character represents a 15-minute time segment
+- Height shows actual token usage during that period
+- Based on real message timestamps from transcript files
+- Empty segments (▁) indicate periods with no activity
+
+### ⏱️ UTC Time Handling
+- All internal calculations use UTC for consistency
+- Display times automatically convert to local timezone
+- Prevents timezone-related calculation errors
 
 ## Installation
 
@@ -42,10 +61,10 @@ You can customize which lines to display in two ways:
 Edit the top of `statusline.py`:
 ```python
 # Set which lines to display (True = show, False = hide)
-SHOW_LINE1 = True   # [Sonnet 4] | 🌿 main M2 +1 | 📁 statusline | 💬 254
-SHOW_LINE2 = True   # 🪙  Compact: 91.8K/160.0K ████████▒▒▒▒▒▒▒ 58% ♻️  99% cached 💰 Cost: $0.031
-SHOW_LINE3 = True   # ⏱️  Session: 1h15m/5h    ███▒▒▒▒▒▒▒▒▒▒▒▒ 25% 09:15 (08:00 to 13:00)
-SHOW_LINE4 = True   # 🔥 Burn:    0 (Rate: 0 t/m) ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+SHOW_LINE1 = True   # [Sonnet 4] | 🌿 main M2 +1 | 📁 statusline | 💬 254 | 💰 $0.031
+SHOW_LINE2 = True   # 🪙  Compact: ████████▒▒▒▒▒▒▒ [58%] 91.8K/160.0K ♻️  99% cached
+SHOW_LINE3 = True   # ⏱️  Session: ███▒▒▒▒▒▒▒▒▒▒▒▒ [25%] 1h15m/5h 09:15 (08:00 to 13:00)
+SHOW_LINE4 = True   # 🔥 Burn:    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 0 token(w/cache), Rate: 0 t/m
 ```
 
 #### 2. Claude Code Settings (Runtime Override)
