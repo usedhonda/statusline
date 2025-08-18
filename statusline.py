@@ -716,19 +716,14 @@ def generate_realtime_burn_timeline(block_start_time, duration_seconds):
     
     return timeline
 
-def generate_real_burn_timeline(block_stats, session_id):
-    """実際のメッセージデータからBurnスパークラインを生成（リアルタイム対応）"""
+def generate_real_burn_timeline(block_stats, current_block):
+    """実際のメッセージデータからBurnスパークラインを生成（5時間ウィンドウ全体対応）"""
     timeline = [0] * 20  # 20セグメント（各15分）
     
-    if not block_stats or not session_id:
+    if not block_stats or not current_block or 'messages' not in current_block:
         return timeline
     
     try:
-        # 現在のセッションのtranscriptファイルを取得
-        transcript_file = find_session_transcript(session_id)
-        if not transcript_file:
-            return timeline
-        
         block_start = block_stats['start_time']
         current_time = datetime.now(timezone.utc).replace(tzinfo=None)  # UTC統一
         
@@ -743,42 +738,41 @@ def generate_real_burn_timeline(block_stats, session_id):
         current_segment_index = int(current_elapsed_minutes / 15)
         segment_progress = (current_elapsed_minutes % 15) / 15.0  # セグメント内の進捗率
         
-        # transcriptファイルから実際のメッセージを読み込み
-        with open(transcript_file, 'r') as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    
-                    # assistantメッセージのusageデータのみ処理
-                    if entry.get('type') != 'assistant' or not entry.get('message', {}).get('usage'):
-                        continue
-                    
-                    # タイムスタンプ取得
-                    timestamp_str = entry.get('timestamp')
-                    if not timestamp_str:
-                        continue
-                    
-                    # タイムスタンプをUTCに統一
-                    msg_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                    msg_time_utc = msg_time.astimezone(timezone.utc).replace(tzinfo=None)
-                    
-                    # ブロック開始からの経過時間（分）
-                    elapsed_minutes = (msg_time_utc - block_start_utc).total_seconds() / 60
-                    
-                    # 負の値（ブロック開始前）や5時間超過はスキップ
-                    if elapsed_minutes < 0 or elapsed_minutes >= 300:  # 5時間 = 300分
-                        continue
-                    
-                    # 15分セグメントのインデックス（0-19）
-                    segment_index = int(elapsed_minutes / 15)
-                    if 0 <= segment_index < 20:
-                        # 実際のトークン使用量を取得
-                        usage = entry['message']['usage']
-                        tokens = get_total_tokens(usage)
-                        timeline[segment_index] += tokens
-                
-                except (json.JSONDecodeError, ValueError, KeyError):
+        # 5時間ウィンドウ内の全メッセージを処理（Sessionと同じデータソース）
+        for message in current_block['messages']:
+            try:
+                # assistantメッセージのusageデータのみ処理
+                if message.get('type') != 'assistant' or not message.get('usage'):
                     continue
+                
+                # タイムスタンプ取得
+                msg_time = message.get('timestamp')
+                if not msg_time:
+                    continue
+                
+                # タイムスタンプをUTCに統一
+                if hasattr(msg_time, 'tzinfo') and msg_time.tzinfo:
+                    msg_time_utc = msg_time.astimezone(timezone.utc).replace(tzinfo=None)
+                else:
+                    msg_time_utc = msg_time  # 既にUTC前提
+                
+                # ブロック開始からの経過時間（分）
+                elapsed_minutes = (msg_time_utc - block_start_utc).total_seconds() / 60
+                
+                # 負の値（ブロック開始前）や5時間超過はスキップ
+                if elapsed_minutes < 0 or elapsed_minutes >= 300:  # 5時間 = 300分
+                    continue
+                
+                # 15分セグメントのインデックス（0-19）
+                segment_index = int(elapsed_minutes / 15)
+                if 0 <= segment_index < 20:
+                    # 実際のトークン使用量を取得
+                    usage = message['usage']
+                    tokens = get_total_tokens(usage)
+                    timeline[segment_index] += tokens
+            
+            except (ValueError, KeyError, TypeError):
+                continue
         
         
         # リアルタイム対応：現在進行中のセグメントに部分的な値を設定
@@ -1278,7 +1272,7 @@ def main():
                         'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
                         'current_cost': session_cost
                     }
-                line4_parts = get_burn_line(session_data, session_id, block_stats)
+                line4_parts = get_burn_line(session_data, session_id, block_stats, current_block)
                 if line4_parts:
                     print(f"\033[0m\033[1;97m{line4_parts}\033[0m")
         
@@ -1388,7 +1382,7 @@ def calculate_tokens_since_time(start_time, session_id):
 
 # REMOVED: get_session_cumulative_usage() - unused function (5th line display not implemented)
 
-def get_burn_line(current_session_data=None, session_id=None, block_stats=None):
+def get_burn_line(current_session_data=None, session_id=None, block_stats=None, current_block=None):
     """📊 SESSION LINE SYSTEM: Generate burn line display (Line 4)
     
     Creates the 🔥 Burn line showing session tokens and burn rate.
@@ -1424,8 +1418,8 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None):
         burn_rate_formatted = f"{burn_rate:,.0f}"
         
         # Generate 5-hour timeline sparkline from REAL message data ONLY
-        if block_stats and 'start_time' in block_stats:
-            burn_timeline = generate_real_burn_timeline(block_stats, session_id)
+        if block_stats and 'start_time' in block_stats and current_block:
+            burn_timeline = generate_real_burn_timeline(block_stats, current_block)
         else:
             burn_timeline = [0] * 20
         
