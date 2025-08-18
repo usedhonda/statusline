@@ -13,7 +13,7 @@ Enhanced status line for Claude Code showing token usage, session time, and burn
 
 - **Line 1**: Model, git status, directory, message count
 - **Line 2**: Conversation tokens vs compaction limit (160K)
-- **Line 3**: Session time within 5-hour billing window  
+- **Line 3**: Session time within usage window  
 - **Line 4**: Session tokens and real-time burn rate
 
 ## Installation

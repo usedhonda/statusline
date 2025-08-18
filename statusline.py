@@ -52,21 +52,21 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 # Range: 0-200K tokens (until conversation gets compressed)
 # Reset Point: When conversation gets compacted/compressed
 
-# 🕐 5-HOUR BILLING WINDOW SYSTEM (Claude Code Official)
+# 🕐 SESSION WINDOW SYSTEM (Session Management)
 # ===================================================
-# Purpose: Tracks Claude Code's official 5-hour billing periods (Pro/Max plans)
-# Data Source: Messages within 5-hour billing windows
-# Scope: Official Claude Code billing period tracking
+# Purpose: Tracks usage periods
+# Data Source: Messages within usage windows
+# Scope: Usage period tracking
 # Calculation: calculate_tokens_since_time() with 5-hour window start
 # Display: ⏱️ Session line (Line 3) + 🔥 Burn line (Line 4)
-# Range: 5-hour billing window scope with real-time burn rate
-# Reset Point: Every 5 hours per Claude Code's official usage limits
+# Range: usage window scope with real-time burn rate
+# Reset Point: Every 5 hours per usage limits
 
 # ⚠️  CRITICAL RULES:
 # 1. COMPACT = conversation compaction monitoring (160K threshold)
-# 2. SESSION/BURN = Claude Code's 5-hour billing window tracking
-# 3. These track DIFFERENT concepts: compression vs billing periods
-# 4. Compact = compression timing, Session = official billing window
+# 2. SESSION/BURN = usage window tracking
+# 3. These track DIFFERENT concepts: compression vs usage periods
+# 4. Compact = compression timing, Session = official usage window
 
 # ANSI color codes optimized for black backgrounds - 全て明るいバージョン
 class Colors:
@@ -103,7 +103,7 @@ class Colors:
 def get_total_tokens(usage_data):
     """Calculate total tokens from usage data (UNIVERSAL HELPER)
     
-    Used by session/burn line systems for 5-hour billing window tracking.
+    Used by session/burn line systems for usage window tracking.
     Sums all token types: input + output + cache_creation + cache_read
     
     Args:
@@ -431,19 +431,19 @@ def load_all_messages_chronologically():
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
-    """🕐 5-HOUR BILLING WINDOW: Detect Claude Code's official billing periods
+    """🕐 SESSION WINDOW: Detect usage periods
     
-    Creates 5-hour billing windows as per Claude Code's official usage limits.
-    These blocks track the official Pro/Max plan 5-hour reset periods.
+    Creates usage windows as per usage limits.
+    These blocks track the 5-hour reset periods.
     
-    Primarily used by session/burn lines for Claude Code's 5-hour billing window tracking.
+    Primarily used by session/burn lines for usage window tracking.
     Compact line uses different logic for conversation compaction monitoring.
     
     Args:
         all_messages: All messages across all sessions/projects
-        block_duration_hours: Block duration (default: 5 hours per Claude Code spec)
+        block_duration_hours: Block duration (default: 5 hours per usage spec)
     Returns:
-        List of 5-hour billing blocks with statistics
+        List of usage tracking blocks with statistics
     """
     if not all_messages:
         return []
@@ -569,14 +569,14 @@ def find_current_session_block(blocks, target_session_id):
     return None
 
 def calculate_block_statistics(block):
-    """🕐 5-HOUR BILLING WINDOW: Calculate statistics for billing window
+    """🕐 SESSION WINDOW: Calculate statistics for usage window
     
-    Processes a 5-hour billing window to generate cumulative statistics.
-    Used by session/burn lines for 5-hour billing window statistics.
+    Processes a usage window to generate cumulative statistics.
+    Used by session/burn lines for usage window statistics.
     Compact line uses separate conversation compaction logic.
     
     Args:
-        block: 5-hour billing window from detect_five_hour_blocks()
+        block: usage window from detect_five_hour_blocks()
     Returns:
         dict: Window statistics including total_tokens (used differently by each system)
     """
@@ -1008,7 +1008,7 @@ def main():
         # 🗜️ COMPACT LINE SYSTEM: Shows conversation tokens vs 160K compaction limit
         # SOURCE: calculate_tokens_since_time() with session start (current conversation)
         # SCOPE: Single conversation, monitors compression timing
-        # PURPOSE: Conversation compaction monitoring, NOT billing tracking
+        # PURPOSE: Conversation compaction monitoring, NOT usage tracking
         conversation_tokens = total_tokens  # Should track current conversation for compaction monitoring
         compact_display = format_token_count(conversation_tokens)
         line2_parts.append(f"{Colors.BRIGHT_CYAN}🪙  Compact: {Colors.RESET}{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
@@ -1286,7 +1286,7 @@ def get_burn_line(current_session_data=None, session_id=None):
         # 📊 SESSION TOKENS: Shows tokens for current session conversation
         # CRITICAL: These are SESSION tokens, NOT block tokens
         # Time period: Session start (same as Session line) to current time
-        # Scope: Single conversation, NOT entire 5-hour billing block
+        # Scope: Single conversation, NOT entire usage tracking block
         current_session_tokens = current_session_data.get('total_tokens', 0) if current_session_data else 0
         
         # Format session tokens for display
