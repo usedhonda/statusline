@@ -47,17 +47,35 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
 
 # ANSI color codes optimized for black backgrounds - 全て明るいバージョン
 class Colors:
-    BRIGHT_CYAN = '\033[1;96m'     # 最も明るいシアン
-    BRIGHT_BLUE = '\033[1;94m'      # 最も明るい青
-    BRIGHT_MAGENTA = '\033[1;95m'   # 最も明るいマゼンタ
-    BRIGHT_GREEN = '\033[1;92m'     # 最も明るい緑
-    BRIGHT_YELLOW = '\033[1;93m'    # 最も明るい黄色
-    BRIGHT_RED = '\033[1;95m'       # ピンク（マゼンタ）
-    BRIGHT_WHITE = '\033[1;97m'     # 最も明るい白
-    LIGHT_GRAY = '\033[1;97m'       # 明るいグレー（最明白）
-    DIM = '\033[1;97m'              # DIMも最明白
-    BOLD = '\033[1m'                # 太字
-    RESET = '\033[0m'               # リセット
+    # 環境変数でカラー無効化をチェック
+    NO_COLOR = os.environ.get('NO_COLOR') or os.environ.get('STATUSLINE_NO_COLOR')
+    
+    if NO_COLOR:
+        # カラー無効モード
+        BRIGHT_CYAN = ''
+        BRIGHT_BLUE = ''
+        BRIGHT_MAGENTA = ''
+        BRIGHT_GREEN = ''
+        BRIGHT_YELLOW = ''
+        BRIGHT_RED = ''
+        BRIGHT_WHITE = ''
+        LIGHT_GRAY = ''
+        DIM = ''
+        BOLD = ''
+        RESET = ''
+    else:
+        # 通常のカラーモード
+        BRIGHT_CYAN = '\033[1;96m'     # 最も明るいシアン
+        BRIGHT_BLUE = '\033[1;94m'      # 最も明るい青
+        BRIGHT_MAGENTA = '\033[1;95m'   # 最も明るいマゼンタ
+        BRIGHT_GREEN = '\033[1;92m'     # 最も明るい緑
+        BRIGHT_YELLOW = '\033[1;93m'    # 最も明るい黄色
+        BRIGHT_RED = '\033[1;95m'       # ピンク（マゼンタ）
+        BRIGHT_WHITE = '\033[1;97m'     # 最も明るい白
+        LIGHT_GRAY = '\033[1;97m'       # 明るいグレー（最明白）
+        DIM = '\033[1;97m'              # DIMも最明白
+        BOLD = '\033[1m'                # 太字
+        RESET = '\033[0m'               # リセット
 
 def get_total_tokens(usage_data):
     """Calculate total tokens from usage data (UNIVERSAL HELPER)
@@ -386,9 +404,9 @@ def show_live_burn_monitoring():
                 chart_lines = create_mini_chart(burn_data, width=50, height=8)
                 for i, line in enumerate(chart_lines):
                     if i == 0:
-                        print(f"   {Colors.BRIGHT_RED}{line}{Colors.RESET} {max_burn:.1f}")
+                        print(f"   {Colors.BRIGHT_RED}{line}{Colors.RESET} {Colors.BRIGHT_WHITE}{max_burn:.1f}{Colors.RESET}")
                     elif i == len(chart_lines) - 1:
-                        print(f"   {Colors.LIGHT_GRAY}{line}{Colors.RESET} 0.0")
+                        print(f"   {Colors.LIGHT_GRAY}{line}{Colors.RESET} {Colors.BRIGHT_WHITE}0.0{Colors.RESET}")
                     else:
                         print(f"   {line}")
                 
@@ -1058,8 +1076,8 @@ def main():
         # 行1: 基本情報とトークン状況
         line1_parts = []
         
-        # Model - 正式名称を表示
-        line1_parts.append(f"{Colors.BRIGHT_WHITE}[{model}]{Colors.RESET}")
+        # Model - 正式名称を表示（最も明るく）
+        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{model}]{Colors.RESET}")
         
         # Git
         if git_branch:
@@ -1071,8 +1089,8 @@ def main():
             git_display += Colors.RESET
             line1_parts.append(git_display)
         
-        # Directory
-        line1_parts.append(f"{Colors.BRIGHT_BLUE}📁 {current_dir}{Colors.RESET}")
+        # Directory（より明るく）
+        line1_parts.append(f"{Colors.BRIGHT_CYAN}📁 {current_dir}{Colors.RESET}")
         
         # Files - 明るい色で表示（0の場合は非表示）
         if active_files > 0:
@@ -1210,12 +1228,13 @@ def main():
             print(" | ".join(single_line))
         else:
             # 複数行版（デフォルト、より詳細）
-            print(" | ".join(line1_parts))
-            print(" ".join(line2_parts))
+            # より強力な色リセット + 明るい色設定
+            print(f"\033[0m\033[1;97m" + " | ".join(line1_parts) + f"\033[0m")
+            print(f"\033[0m\033[1;97m" + " ".join(line2_parts) + f"\033[0m") 
             
             # 3行目（セッション時間の詳細）を表示する場合
             if line3_parts:
-                print(" ".join(line3_parts))
+                print(f"\033[0m\033[1;97m" + " ".join(line3_parts) + f"\033[0m")
             
             # ═══════════════════════════════════════════════════════════════════
             # 📊 SESSION LINE SYSTEM: Line 4 - Burn Rate Display
@@ -1234,7 +1253,7 @@ def main():
                 }
             line4_parts = get_burn_line(session_data, session_id)
             if line4_parts:
-                print(line4_parts)
+                print(f"\033[0m\033[1;97m{line4_parts}\033[0m")
             # ═══════════════════════════════════════════════════════════════════
             
             # : sparkline integrated into 4th line
