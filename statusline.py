@@ -1416,10 +1416,22 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None, 
                 burn_rate = (recent_tokens / duration) * 60
         
         
-        # 📊 SESSION TOKENS: Shows tokens for current session conversation
-        # CRITICAL: These are SESSION tokens, NOT block tokens
-        # Time period: Session start (same as Session line) to current time
-        # Scope: Single conversation, NOT entire usage tracking block
+        # 📊 CRITICAL DESIGN: INTENTIONAL DATA SOURCE SEPARATION
+        # =======================================================
+        # 
+        # ✅ CORRECT IMPLEMENTATION (DO NOT CHANGE):
+        # - Sparkline: 5-hour window data (context visualization)  
+        # - Token value: Current session data (work unit tracking)
+        #
+        # ❌ FORBIDDEN "CONSISTENCY" FIX:
+        # - DO NOT unify data sources to block_stats['total_tokens']
+        # - This separation is INTENTIONAL, not an inconsistency
+        #
+        # 📊 DESIGN INTENT:
+        # - Sparkline shows 5-hour activity pattern (timeline context)
+        # - Token value shows current session consumption (actual work)
+        # - Different purposes require different data scopes
+        #
         current_session_tokens = current_session_data.get('total_tokens', 0) if current_session_data else 0
         
         # Format session tokens for display
