@@ -179,14 +179,23 @@ def calculate_dynamic_padding(compact_text, session_text):
     else:
         return ' '
 
-def get_progress_bar(percentage, width=20):
-    """Create a visual progress bar"""
+def get_progress_bar(percentage, width=20, show_current_segment=False):
+    """Create a visual progress bar with optional current segment highlighting"""
     filled = int(width * percentage / 100)
     empty = width - filled
     
     color = get_percentage_color(percentage)
-    # 明るい文字を使用
-    bar = color + '█' * filled + Colors.LIGHT_GRAY + '▒' * empty + Colors.RESET
+    
+    if show_current_segment and filled < width:
+        # 完了済みは元の色を保持、現在進行中のセグメントのみ特別表示
+        completed_bar = color + '█' * filled if filled > 0 else ''
+        current_bar = Colors.BRIGHT_WHITE + '▓' + Colors.RESET  # 白く点滅風
+        remaining_bar = Colors.LIGHT_GRAY + '▒' * (empty - 1) + Colors.RESET if empty > 1 else ''
+        
+        bar = completed_bar + current_bar + remaining_bar
+    else:
+        # 従来の表示
+        bar = color + '█' * filled + Colors.LIGHT_GRAY + '▒' * empty + Colors.RESET
     
     return bar
 
@@ -1207,7 +1216,7 @@ def main():
             
             # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
             line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session:{Colors.RESET}")
-            session_bar = get_progress_bar(block_progress, width=20)
+            session_bar = get_progress_bar(block_progress, width=20, show_current_segment=True)
             line3_parts.append(session_bar)
             line3_parts.append(f"{Colors.BRIGHT_WHITE}[{int(block_progress)}%]{Colors.RESET}")
             line3_parts.append(f"{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
