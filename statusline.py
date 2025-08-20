@@ -466,6 +466,23 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
     # Step 1: Sort ALL entries by timestamp
     sorted_messages = sorted(all_messages, key=lambda x: x['timestamp'])
     
+    # Step 1.5: Filter to recent messages only (for accurate block detection)
+    # Only consider messages from the last 6 hours to improve accuracy
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoff_time = now - timedelta(hours=6)  # Last 6 hours only
+    
+    recent_messages = []
+    for msg in sorted_messages:
+        msg_time = msg['timestamp']
+        if hasattr(msg_time, 'tzinfo') and msg_time.tzinfo:
+            msg_time = msg_time.astimezone(timezone.utc).replace(tzinfo=None)
+        
+        if msg_time >= cutoff_time:
+            recent_messages.append(msg)
+    
+    # Use recent messages instead of all messages
+    sorted_messages = recent_messages
+    
     blocks = []
     block_duration_ms = block_duration_hours * 60 * 60 * 1000
     current_block_start = None
@@ -481,8 +498,11 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
             entry_time = entry_time.astimezone(timezone.utc).replace(tzinfo=None)
         
         if current_block_start is None:
-            # First entry - start a new block (floored to the hour) -  111
+            # First entry - start a new block (floored to the hour)
             current_block_start = floor_to_hour(entry_time)
+            # DEBUG: Show first entry timing
+            import sys
+            print(f"DEBUG: First entry time: {entry_time}, floored to: {current_block_start}, session: {entry.get('session_id')}", file=sys.stderr)
             current_block_entries = [entry]
         else:
             # Check if we need to close current block -  123
@@ -507,6 +527,9 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
                 # Start new block (floored to the hour) -  137
                 current_block_start = floor_to_hour(entry_time)
                 current_block_entries = [entry]
+                # DEBUG: Show new block creation
+                import sys
+                print(f"DEBUG: New block created at: {current_block_start}", file=sys.stderr)
             else:
                 # Add to current block -  142
                 current_block_entries.append(entry)
@@ -525,7 +548,7 @@ def floor_to_hour(timestamp):
     else:
         utc_timestamp = timestamp
     
-    # Set minutes, seconds, microseconds to 0
+    # UTC-based flooring: Use UTC time and floor to hour
     floored = utc_timestamp.replace(minute=0, second=0, microsecond=0)
     return floored
 def create_session_block(start_time, entries, now, session_duration_ms):
@@ -561,16 +584,21 @@ def create_session_block(start_time, entries, now, session_duration_ms):
 
 def find_current_session_block(blocks, target_session_id):
     """Find the most recent active block containing the target session"""
-    # 現在のセッションは最新のアクティブブロックにあるべき
-    for block in reversed(blocks):  # 新しいブロックから探す
-        if block.get('is_active', False):  # アクティブブロックのみ
-            for message in block['messages']:
-                msg_session_id = message.get('session_id') or message.get('sessionId')
-                if msg_session_id == target_session_id:
-                    return block
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     
-    # フォールバック: アクティブブロックにセッションが見つからない場合
-    # セッションIDが含まれる最後のブロックを返す
+    # First priority: Find currently active block (current time within block duration)
+    for block in reversed(blocks):  # 新しいブロックから探す
+        block_start = block['start_time']
+        block_end = block['end_time']
+        
+        # Check if current time is within this block's 5-hour window
+        if block_start <= now <= block_end:
+            # DEBUG: Show which block is currently active
+            import sys
+            print(f"DEBUG: Found current active block: {block_start} to {block_end}", file=sys.stderr)
+            return block
+    
+    # Fallback: Find block containing target session
     for block in reversed(blocks):
         for message in block['messages']:
             msg_session_id = message.get('session_id') or message.get('sessionId')
