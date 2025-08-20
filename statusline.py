@@ -88,10 +88,12 @@ class Colors:
 Colors = Colors()
 
 def get_total_tokens(usage_data):
-    """Calculate total tokens from usage data (UNIVERSAL HELPER)
+    """Calculate total tokens from usage data (UNIVERSAL HELPER) - external tool compatible
     
     Used by session/burn line systems for usage window tracking.
     Sums all token types: input + output + cache_creation + cache_read
+    
+    CRITICAL FIX: Implements external tool compatible logic to avoid double-counting
     
     Args:
         usage_data: Token usage dictionary from assistant message
@@ -105,19 +107,28 @@ def get_total_tokens(usage_data):
     input_tokens = usage_data.get('input_tokens', 0)
     output_tokens = usage_data.get('output_tokens', 0)
     
-    # Cache creation tokens (multiple possible field names)
-    cache_creation = (
-        usage_data.get('cache_creation_input_tokens', 0) or
-        usage_data.get('cacheCreationInputTokens', 0) or
-        usage_data.get('cacheCreationTokens', 0)
-    )
+    # Cache creation tokens - external tool compatible logic
+    # Use direct field first, fallback to nested if not present
+    if 'cache_creation_input_tokens' in usage_data:
+        cache_creation = usage_data['cache_creation_input_tokens']
+    elif 'cache_creation' in usage_data and isinstance(usage_data['cache_creation'], dict):
+        cache_creation = usage_data['cache_creation'].get('ephemeral_5m_input_tokens', 0)
+    else:
+        cache_creation = (
+            usage_data.get('cacheCreationInputTokens', 0) or
+            usage_data.get('cacheCreationTokens', 0)
+        )
     
-    # Cache read tokens (multiple possible field names)  
-    cache_read = (
-        usage_data.get('cache_read_input_tokens', 0) or
-        usage_data.get('cacheReadInputTokens', 0) or
-        usage_data.get('cacheReadTokens', 0)
-    )
+    # Cache read tokens - external tool compatible logic  
+    if 'cache_read_input_tokens' in usage_data:
+        cache_read = usage_data['cache_read_input_tokens']
+    elif 'cache_read' in usage_data and isinstance(usage_data['cache_read'], dict):
+        cache_read = usage_data['cache_read'].get('ephemeral_5m_input_tokens', 0)
+    else:
+        cache_read = (
+            usage_data.get('cacheReadInputTokens', 0) or
+            usage_data.get('cacheReadTokens', 0)
+        )
     
     return input_tokens + output_tokens + cache_creation + cache_read
 
@@ -417,6 +428,14 @@ def load_all_messages_chronologically():
     all_messages = []
     transcript_files = find_all_transcript_files()
     
+    # DEBUG: Show transcript file count and locations
+    import sys
+    print(f"DEBUG: Found {len(transcript_files)} transcript files", file=sys.stderr)
+    for i, f in enumerate(transcript_files[:5]):  # Show first 5 files
+        print(f"DEBUG: File {i+1}: {f}", file=sys.stderr)
+    if len(transcript_files) > 5:
+        print(f"DEBUG: ... and {len(transcript_files) - 5} more files", file=sys.stderr)
+    
     for transcript_file in transcript_files:
         try:
             with open(transcript_file, 'r') as f:
@@ -433,7 +452,9 @@ def load_all_messages_chronologically():
                                 'timestamp_utc': timestamp_utc,  # compatibility
                                 'session_id': entry.get('sessionId'),
                                 'type': entry.get('type'),
-                                'usage': entry.get('message', {}).get('usage') if entry.get('message') else None,
+                                'usage': entry.get('message', {}).get('usage') if entry.get('message') else entry.get('usage'),
+                                'uuid': entry.get('uuid'),  # For deduplication
+                                'requestId': entry.get('requestId'),  # For deduplication
                                 'file_path': transcript_file
                             })
                     except (json.JSONDecodeError, ValueError):
@@ -443,6 +464,10 @@ def load_all_messages_chronologically():
     
     # 時系列でソート
     all_messages.sort(key=lambda x: x['timestamp'])
+    
+    # DEBUG: Show total message count before filtering
+    print(f"DEBUG: Loaded {len(all_messages)} total messages from all projects", file=sys.stderr)
+    
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
@@ -482,6 +507,10 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
     
     # Use recent messages instead of all messages
     sorted_messages = recent_messages
+    
+    # DEBUG: Show filtering results  
+    import sys
+    print(f"DEBUG: After 6-hour filter: {len(sorted_messages)} messages (filtered out {len(all_messages) - len(sorted_messages)})", file=sys.stderr)
     
     blocks = []
     block_duration_ms = block_duration_hours * 60 * 60 * 1000
@@ -612,12 +641,134 @@ def calculate_block_statistics_with_deduplication(block, session_id):
     if not block:
         return None
     
-    # 元のJSONLファイルから直接読み取って重複除去
-    transcript_file = find_session_transcript(session_id)
-    if not transcript_file:
-        return calculate_block_statistics_fallback(block)
+    # ⚠️ BUG: This reads ONLY current session file, not ALL projects in the block
+    # Should use block['messages'] which contains all projects' messages
+    # 
+    # FIXED: Use block messages directly instead of single session file
+    return calculate_block_statistics_from_messages(block)
+
+def calculate_block_statistics_from_messages(block):
+    """Calculate statistics directly from block messages (all projects)"""
+    if not block or 'messages' not in block:
+        return None
     
-    return calculate_tokens_from_jsonl_with_dedup(transcript_file, block['start_time'], block.get('duration_seconds', 18000))
+    # FINAL APPROACH: Sum individual messages with enhanced deduplication
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cache_creation = 0
+    total_cache_read = 0
+    total_messages = 0
+    processed_hashes = set()
+    processed_session_messages = set()  # Additional session-level dedup
+    skipped_duplicates = 0
+    debug_samples = []
+    
+    # Process ALL messages in the block (from all projects) with enhanced deduplication
+    for i, message in enumerate(block['messages']):
+        if message.get('type') == 'assistant' and message.get('usage'):
+            # Primary deduplication: messageId + requestId
+            message_id = message.get('uuid') or message.get('message_id')
+            request_id = message.get('requestId') or message.get('request_id')
+            session_id = message.get('session_id')
+            
+            # Debug first few messages
+            if len(debug_samples) < 3:
+                import sys
+                print(f"DEBUG: Processing message: uuid={message_id}, requestId={request_id}, session={session_id}", file=sys.stderr)
+            
+            unique_hash = None
+            if message_id and request_id:
+                unique_hash = f"{message_id}:{request_id}"
+            
+            # Enhanced deduplication: Also check session+timestamp to catch cumulative duplicates
+            timestamp = message.get('timestamp')
+            session_message_key = f"{session_id}:{timestamp}" if session_id and timestamp else None
+            
+            skip_message = False
+            if unique_hash and unique_hash in processed_hashes:
+                skipped_duplicates += 1
+                skip_message = True
+            elif session_message_key and session_message_key in processed_session_messages:
+                skipped_duplicates += 1  
+                skip_message = True
+                
+            if skip_message:
+                continue  # Skip duplicate
+                
+            # Record this message as processed
+            if unique_hash:
+                processed_hashes.add(unique_hash)
+            if session_message_key:
+                processed_session_messages.add(session_message_key)
+            
+            total_messages += 1
+            
+            # Use individual token components (not cumulative)
+            usage = message['usage']
+            
+            # Get individual incremental tokens (not cumulative)
+            input_tokens = usage.get('input_tokens', 0)
+            output_tokens = usage.get('output_tokens', 0)
+            
+            # Cache tokens using external tool compatible logic
+            if 'cache_creation_input_tokens' in usage:
+                cache_creation = usage['cache_creation_input_tokens']
+            elif 'cache_creation' in usage and isinstance(usage['cache_creation'], dict):
+                cache_creation = usage['cache_creation'].get('ephemeral_5m_input_tokens', 0)
+            else:
+                cache_creation = 0
+                
+            if 'cache_read_input_tokens' in usage:
+                cache_read = usage['cache_read_input_tokens']
+            elif 'cache_read' in usage and isinstance(usage['cache_read'], dict):
+                cache_read = usage['cache_read'].get('ephemeral_5m_input_tokens', 0)
+            else:
+                cache_read = 0
+            
+            # Accumulate individual message tokens
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            total_cache_creation += cache_creation
+            total_cache_read += cache_read
+            
+            # Debug samples  
+            if len(debug_samples) < 3:
+                debug_samples.append({
+                    'idx': i,
+                    'session_id': session_id,
+                    'input': input_tokens,
+                    'cache_creation': cache_creation,
+                    'cache_read': cache_read,
+                    'total': input_tokens + output_tokens + cache_creation + cache_read
+                })
+    
+    # Final calculation - use actual accumulated values
+    total_tokens = total_input_tokens + total_output_tokens + total_cache_creation + total_cache_read
+    
+    # DEBUG: Show block statistics with enhanced deduplication analysis
+    import sys
+    dedup_rate = (skipped_duplicates / (total_messages + skipped_duplicates)) * 100 if (total_messages + skipped_duplicates) > 0 else 0
+    print(f"DEBUG: Final stats: {total_messages} messages, {total_tokens:,} tokens (dedup: {skipped_duplicates}, rate: {dedup_rate:.1f}%)", file=sys.stderr)
+    print(f"DEBUG: Components: input={total_input_tokens:,}, output={total_output_tokens:,}, cache_create={total_cache_creation:,}, cache_read={total_cache_read:,}", file=sys.stderr)
+    
+    # Show ratio to external reference for debugging
+    reference_estimate = 75000000  # Approximate reference value
+    ratio = total_tokens / reference_estimate if reference_estimate > 0 else 0
+    print(f"DEBUG: Ratio to reference: {ratio:.2f}x (statusline={total_tokens:,} vs reference≈{reference_estimate:,})", file=sys.stderr)
+    
+    for sample in debug_samples:
+        print(f"DEBUG: Sample {sample['idx']}: session={sample['session_id'][:8]}..., total={sample['total']}, cache_read={sample['cache_read']}", file=sys.stderr)
+    
+    return {
+        'start_time': block['start_time'],
+        'duration_seconds': block.get('duration_seconds', 0),
+        'total_tokens': total_tokens,
+        'input_tokens': total_input_tokens,
+        'output_tokens': total_output_tokens,
+        'cache_creation': total_cache_creation,
+        'cache_read': total_cache_read,
+        'total_messages': total_messages
+    }
 
 def calculate_tokens_from_jsonl_with_dedup(transcript_file, block_start_time, duration_seconds):
     """Calculate tokens with proper deduplication from JSONL file"""
@@ -669,16 +820,13 @@ def calculate_tokens_from_jsonl_with_dedup(transcript_file, block_start_time, du
                     
                     total_messages += 1
                     
-                    # 重複除去チェック（ccost互換）
+                    # External tool compatible deduplication (messageId + requestId only)
                     message_id = message_data.get('uuid')
                     request_id = message_data.get('requestId')
-                    session_id = message_data.get('sessionId')
                     
                     unique_hash = None
                     if message_id and request_id:
-                        unique_hash = f"req:{message_id}:{request_id}"
-                    elif message_id and session_id:
-                        unique_hash = f"session:{message_id}:{session_id}"
+                        unique_hash = f"{message_id}:{request_id}"
                     
                     if unique_hash:
                         if unique_hash in processed_hashes:
@@ -834,17 +982,13 @@ def calculate_block_statistics_fallback(block):
         #     import sys
         #     print(f"DEBUG: message structure check", file=sys.stderr)
         
-        # 重複除去チェック（ccost互換：requestId優先 + sessionId fallback）
-        # 実際のJSONL構造に基づく修正
+        # External tool compatible deduplication (messageId + requestId only)
         message_id = message_data.get('uuid')  # 実際のメッセージID
         request_id = message_data.get('requestId')  # requestIdは最上位
-        session_id = message_data.get('sessionId')  # sessionIdも最上位
         
         unique_hash = None
         if message_id and request_id:
-            unique_hash = f"req:{message_id}:{request_id}"  # Priority 1
-        elif message_id and session_id:
-            unique_hash = f"session:{message_id}:{session_id}"  # Fallback
+            unique_hash = f"{message_id}:{request_id}"
         
         if unique_hash:
             if unique_hash in processed_hashes:
@@ -860,7 +1004,7 @@ def calculate_block_statistics_fallback(block):
         elif message_data['type'] == 'error':
             error_count += 1
         
-        # トークン使用量の合計（assistantメッセージのusageのみ - ccusage互換）
+        # トークン使用量の合計（assistantメッセージのusageのみ - 外部ツール互換）
         if message_data['type'] == 'assistant' and message_data.get('usage'):
             total_input_tokens += message_data['usage'].get('input_tokens', 0)
             total_output_tokens += message_data['usage'].get('output_tokens', 0)
@@ -994,7 +1138,11 @@ def generate_realtime_burn_timeline(block_start_time, duration_seconds):
     return timeline
 
 def generate_real_burn_timeline(block_stats, current_block):
-    """実際のメッセージデータからBurnスパークラインを生成（5時間ウィンドウ全体対応）"""
+    """実際のメッセージデータからBurnスパークラインを生成（5時間ウィンドウ全体対応）
+    
+    CRITICAL: Uses REAL message timing data ONLY. NO fake patterns allowed.
+    Distributes tokens based on actual message timestamps across 15-minute segments.
+    """
     timeline = [0] * 20  # 20セグメント（各15分）
     
     if not block_stats or not current_block or 'messages' not in current_block:
@@ -1010,10 +1158,13 @@ def generate_real_burn_timeline(block_stats, current_block):
         else:
             block_start_utc = block_start  # 既にUTC前提
         
-        # 現在の経過時間を計算（現在進行中のセグメント特定用）
-        current_elapsed_minutes = (current_time - block_start_utc).total_seconds() / 60
-        current_segment_index = int(current_elapsed_minutes / 15)
-        segment_progress = (current_elapsed_minutes % 15) / 15.0  # セグメント内の進捗率
+        # デバッグ: メッセージの時間分散を確認 (デバッグ時のみ有効化)
+        # import sys
+        # print(f"DEBUG: Processing {len(current_block['messages'])} messages for burn timeline", file=sys.stderr)
+        
+        # 実際のメッセージ数を各セグメントで計算
+        message_count_per_segment = [0] * 20
+        total_processed = 0
         
         # 5時間ウィンドウ内の全メッセージを処理（Sessionと同じデータソース）
         for message in current_block['messages']:
@@ -1047,19 +1198,25 @@ def generate_real_burn_timeline(block_stats, current_block):
                     usage = message['usage']
                     tokens = get_total_tokens(usage)
                     timeline[segment_index] += tokens
+                    message_count_per_segment[segment_index] += 1
+                    total_processed += 1
             
             except (ValueError, KeyError, TypeError):
                 continue
         
-        # リアルタイム対応：現在進行中のセグメントに部分的な値を設定
-        # （実際のメッセージがない場合でも、時間経過を視覚的に示す）
-        if 0 <= current_segment_index < 20:
-            # 現在のセグメントにデータがない場合、最小限の値を設定
-            if timeline[current_segment_index] == 0 and segment_progress > 0.1:
-                # 10%以上進行している場合は最小値を設定
-                timeline[current_segment_index] = int(100 * segment_progress)
+        # デバッグ: 時間分散を確認 (デバッグ時のみ有効化)
+        # print(f"DEBUG: Processed {total_processed} messages across segments", file=sys.stderr)
+        # active_segments = sum(1 for count in message_count_per_segment if count > 0)
+        # print(f"DEBUG: Active segments: {active_segments}/20, timeline sum: {sum(timeline):,}", file=sys.stderr)
+        # 
+        # # デバッグ: 各セグメントのメッセージ数（最初の10セグメント）
+        # segment_info = [f"{i}:{message_count_per_segment[i]}" for i in range(min(10, len(message_count_per_segment))) if message_count_per_segment[i] > 0]
+        # if segment_info:
+        #     print(f"DEBUG: Segment message counts (first 10): {', '.join(segment_info)}", file=sys.stderr)
     
-    except Exception:
+    except Exception as e:
+        # import sys
+        # print(f"DEBUG: Error in generate_real_burn_timeline: {e}", file=sys.stderr)
         # エラー時は空のタイムラインを返す
         pass
     
@@ -1550,12 +1707,11 @@ def main():
             if SHOW_LINE4:
                 session_data = None
                 if block_stats:
-                    # Calculate SESSION tokens (different from block tokens above)
-                    session_start_time = block_stats.get('start_time')
-                    session_tokens = calculate_tokens_since_time(session_start_time, session_id) if session_start_time else 0
+                    # Use block tokens and duration for BOTH sparkline and rate calculation
+                    # This ensures consistency between the two displays
                     session_data = {
-                        'total_tokens': session_tokens,  # SESSION tokens for burn rate
-                        'duration_seconds': duration_seconds,
+                        'total_tokens': block_stats['total_tokens'],  # Block total for consistency
+                        'duration_seconds': duration_seconds if duration_seconds and duration_seconds > 0 else 1,  # Avoid division by zero
                         'start_time': block_stats.get('start_time'),
                         'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
                         'current_cost': session_cost
