@@ -143,11 +143,19 @@ def format_token_count(tokens):
     return str(tokens)
 
 def format_token_count_short(tokens):
-    """Format token count for display (compact, no decimals)"""
+    """Format token count for display (3 significant digits)"""
     if tokens >= 1000000:
-        return f"{round(tokens / 1000000)}M"
+        val = tokens / 1000000
+        if val >= 100:
+            return f"{round(val)}M"      # 100M, 200M
+        else:
+            return f"{val:.1f}M"         # 14.0M, 1.5M
     elif tokens >= 1000:
-        return f"{round(tokens / 1000)}K"
+        val = tokens / 1000
+        if val >= 100:
+            return f"{round(val)}K"      # 332K, 500K
+        else:
+            return f"{val:.1f}K"         # 14.0K, 99.5K
     return str(tokens)
 
 def convert_utc_to_local(utc_time):
