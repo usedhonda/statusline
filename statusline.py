@@ -446,38 +446,19 @@ def find_all_transcript_files():
     return transcript_files
 
 def load_all_messages_chronologically():
-    """Load all messages from all transcripts in chronological order (optimized)"""
+    """Load all messages from all transcripts in chronological order"""
     all_messages = []
     transcript_files = find_all_transcript_files()
 
-    # Performance optimization: Limit files to process
-    max_file_size = 50 * 1024 * 1024  # 50MB limit per file
-    max_files_to_process = 30  # Limit number of files
-    recent_files_only = True  # Only process recent files
-
-    # Sort files by modification time (newest first) and limit count
-    if recent_files_only and transcript_files:
-        try:
-            transcript_files = sorted(
-                transcript_files,
-                key=lambda p: Path(p).stat().st_mtime if Path(p).exists() else 0,
-                reverse=True
-            )[:max_files_to_process]
-        except:
-            # If sorting fails, just limit the count
-            transcript_files = transcript_files[:max_files_to_process]
-
-    # DEBUG: Show transcript file count and locations (commented out for production)
-    # import sys
-    # print(f"DEBUG: Processing {len(transcript_files)} transcript files", file=sys.stderr)
+    # DEBUG: Show transcript file count and locations
+    import sys
+    print(f"DEBUG: Found {len(transcript_files)} transcript files", file=sys.stderr)
+    for i, f in enumerate(transcript_files[:5]):  # Show first 5 files
+        print(f"DEBUG: File {i+1}: {f}", file=sys.stderr)
+    if len(transcript_files) > 5:
+        print(f"DEBUG: ... and {len(transcript_files) - 5} more files", file=sys.stderr)
 
     for transcript_file in transcript_files:
-        # Skip very large files
-        try:
-            if Path(transcript_file).stat().st_size > max_file_size:
-                continue
-        except:
-            pass
         try:
             with open(transcript_file, 'r') as f:
                 for line in f:
@@ -594,7 +575,7 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
                 
                 # TODO: Add gap block creation if needed ( 129-134)
                 
-                # Start new block (floored to the hour) -  137
+                # Start new block (floored to the hour)
                 current_block_start = floor_to_hour(entry_time)
                 current_block_entries = [entry]
                 # DEBUG: Show new block creation
