@@ -142,6 +142,14 @@ def format_token_count(tokens):
         return f"{tokens / 1000:.1f}K"
     return str(tokens)
 
+def format_token_count_short(tokens):
+    """Format token count for display (compact, no decimals)"""
+    if tokens >= 1000000:
+        return f"{round(tokens / 1000000)}M"
+    elif tokens >= 1000:
+        return f"{round(tokens / 1000)}K"
+    return str(tokens)
+
 def convert_utc_to_local(utc_time):
     """Convert UTC timestamp to local time (common utility)"""
     if hasattr(utc_time, 'tzinfo') and utc_time.tzinfo:
@@ -1937,9 +1945,9 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None, 
         #
         block_total_tokens = block_stats.get('total_tokens', 0) if block_stats else 0
         
-        # Format session tokens for display (K/M format for readability)
-        tokens_formatted = format_token_count(block_total_tokens)
-        burn_rate_formatted = format_token_count(int(burn_rate))
+        # Format session tokens for display (short format for Burn line)
+        tokens_formatted = format_token_count_short(block_total_tokens)
+        burn_rate_formatted = format_token_count_short(int(burn_rate))
         
         # Generate 5-hour timeline sparkline from REAL message data ONLY
         if block_stats and 'start_time' in block_stats and current_block:
