@@ -27,8 +27,10 @@ from collections import defaultdict
 
 # CONSTANTS
 
-# Token compaction threshold (when Claude Code compresses conversation history)
-COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens
+# Token compaction threshold - FALLBACK VALUE ONLY
+# Dynamic value is now calculated from API: context_window_size * 0.8
+# This constant is kept for backwards compatibility if API data is unavailable
+COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback)
 
 # TWO DISTINCT TOKEN CALCULATION SYSTEMS
 
@@ -376,7 +378,11 @@ def calculate_tokens_from_transcript(file_path):
                     continue
     except FileNotFoundError:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
-    except Exception:
+    except Exception as e:
+        # Log error for debugging
+        with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
+            f.write(f"\n{datetime.now()}: Error in calculate_tokens_from_transcript: {e}\n")
+            f.write(f"File path: {file_path}\n")
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
     
     # 総トークン数（professional calculation）
@@ -424,19 +430,38 @@ def find_all_transcript_files():
     return transcript_files
 
 def load_all_messages_chronologically():
-    """Load all messages from all transcripts in chronological order"""
+    """Load all messages from all transcripts in chronological order (optimized)"""
     all_messages = []
     transcript_files = find_all_transcript_files()
-    
-    # DEBUG: Show transcript file count and locations
-    import sys
-    print(f"DEBUG: Found {len(transcript_files)} transcript files", file=sys.stderr)
-    for i, f in enumerate(transcript_files[:5]):  # Show first 5 files
-        print(f"DEBUG: File {i+1}: {f}", file=sys.stderr)
-    if len(transcript_files) > 5:
-        print(f"DEBUG: ... and {len(transcript_files) - 5} more files", file=sys.stderr)
-    
+
+    # Performance optimization: Limit files to process
+    max_file_size = 50 * 1024 * 1024  # 50MB limit per file
+    max_files_to_process = 30  # Limit number of files
+    recent_files_only = True  # Only process recent files
+
+    # Sort files by modification time (newest first) and limit count
+    if recent_files_only and transcript_files:
+        try:
+            transcript_files = sorted(
+                transcript_files,
+                key=lambda p: Path(p).stat().st_mtime if Path(p).exists() else 0,
+                reverse=True
+            )[:max_files_to_process]
+        except:
+            # If sorting fails, just limit the count
+            transcript_files = transcript_files[:max_files_to_process]
+
+    # DEBUG: Show transcript file count and locations (commented out for production)
+    # import sys
+    # print(f"DEBUG: Processing {len(transcript_files)} transcript files", file=sys.stderr)
+
     for transcript_file in transcript_files:
+        # Skip very large files
+        try:
+            if Path(transcript_file).stat().st_size > max_file_size:
+                continue
+        except:
+            pass
         try:
             with open(transcript_file, 'r') as f:
                 for line in f:
@@ -1384,12 +1409,16 @@ def main():
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
     parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
     parser.add_argument('--help', action='store_true', help='Show help')
-    
+
+    # Initialize args with default values first
+    args = argparse.Namespace(show=None, help=False)
+
     # Parse arguments, but don't exit on failure (for stdin compatibility)
     try:
         args, _ = parser.parse_known_args()
     except:
-        args = argparse.Namespace(show=None, help=False)
+        # Keep the default args initialized above
+        pass
     
     # Handle help
     if args.help:
@@ -1436,7 +1465,22 @@ def main():
             # No input provided - just exit silently
             return
         data = json.loads(input_data)
-        
+
+        # ========================================
+        # API DATA EXTRACTION (Claude Code stdin)
+        # ========================================
+        api_cost = data.get('cost', {})
+        api_context = data.get('context_window', {})
+
+        # API provided values (use these instead of manual calculation where possible)
+        api_total_cost = api_cost.get('total_cost_usd', 0)
+        api_input_tokens = api_context.get('total_input_tokens', 0)
+        api_output_tokens = api_context.get('total_output_tokens', 0)
+        api_context_size = api_context.get('context_window_size', 200000)
+
+        # Dynamic compaction threshold (80% of context window)
+        compaction_threshold = api_context_size * 0.8
+
         # Extract basic values
         model = data.get('model', {}).get('display_name', 'Unknown')
         
@@ -1494,32 +1538,66 @@ def main():
                             block_stats = None
                 
                 # 統計データを設定 - Compact用は現在セッションのみ
-                if block_stats:
-                    # Compact line用: 現在セッションのトークンのみ
+                # Compact line用: 現在セッションのトークンのみ（block_statsの有無に関わらず計算）
+                # transcript_pathが提供されていればそれを使用、なければsession_idから探す
+                transcript_path_str = data.get('transcript_path')
+                if transcript_path_str:
+                    transcript_file = Path(transcript_path_str)
+                else:
                     transcript_file = find_session_transcript(session_id)
-                    if transcript_file:
+
+                if transcript_file and transcript_file.exists():
+                    try:
                         (total_tokens, _, error_count, user_messages, assistant_messages,
                          input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
-                    else:
-                        # フォールバック
+                    except Exception as e:
+                        # Log error for debugging Compact freeze issue
+                        with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
+                            f.write(f"\n{datetime.now()}: Error calculating Compact tokens: {e}\n")
+                            f.write(f"Transcript file: {transcript_file}\n")
+                        # Use block_stats as fallback if available
+                        if block_stats:
+                            total_tokens = 0
+                            user_messages = block_stats.get('user_messages', 0)
+                            assistant_messages = block_stats.get('assistant_messages', 0)
+                            error_count = block_stats.get('error_count', 0)
+                        else:
+                            total_tokens = 0
+                else:
+                    # フォールバック: block_statsがあればそれを使用
+                    if block_stats:
                         total_tokens = 0
-                        user_messages = block_stats['user_messages'] 
-                        assistant_messages = block_stats['assistant_messages']
-                        error_count = block_stats['error_count']
+                        user_messages = block_stats.get('user_messages', 0)
+                        assistant_messages = block_stats.get('assistant_messages', 0)
+                        error_count = block_stats.get('error_count', 0)
                         input_tokens = 0
                         output_tokens = 0
                         cache_creation = 0
                         cache_read = 0
             except Exception as e:
-                
+
                 # フォールバック: 従来の単一ファイル方式
-                transcript_file = find_session_transcript(session_id)
-                if transcript_file:
+                # transcript_pathが提供されていればそれを使用、なければsession_idから探す
+                transcript_path_str = data.get('transcript_path')
+                if transcript_path_str:
+                    transcript_file = Path(transcript_path_str)
+                else:
+                    transcript_file = find_session_transcript(session_id)
+
+                if transcript_file and transcript_file.exists():
                     (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
-        # Calculate percentage for Compact display (use conversation compaction tokens)
-        percentage = min(100, round((total_tokens / COMPACTION_THRESHOLD) * 100))
+        # Calculate percentage for Compact display using API tokens (dynamic threshold)
+        # API tokens are more accurate for context window tracking
+        api_total_tokens = api_input_tokens + api_output_tokens
+        if api_total_tokens > 0:
+            # Use API-provided tokens for Compact line (more accurate)
+            compact_tokens = api_total_tokens
+        else:
+            # Fallback to transcript-calculated tokens if API data unavailable
+            compact_tokens = total_tokens
+        percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
         
         # Get additional info
         active_files = len(workspace.get('active_files', []))
@@ -1542,11 +1620,15 @@ def main():
                 minutes = int((duration_seconds % 3600) / 60)
                 session_duration = f"{hours}h{minutes}m" if minutes > 0 else f"{hours}h"
         
-        # Calculate cost with model name
-        session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model)
+        # Calculate cost - prefer API value, fallback to manual calculation
+        if api_total_cost > 0:
+            session_cost = api_total_cost
+        else:
+            # Fallback to manual calculation if API cost unavailable
+            session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model)
         
-        # Format displays
-        token_display = format_token_count(total_tokens)
+        # Format displays - use API tokens for Compact line
+        token_display = format_token_count(compact_tokens)
         percentage_color = get_percentage_color(percentage)
         
         # === 複数行版 ===
@@ -1595,10 +1677,9 @@ def main():
         
         # 行2: Token情報の統合
         line2_parts = []
-        
-        # Compact line: Shows conversation tokens vs compaction threshold
-        conversation_tokens = total_tokens
-        compact_display = format_token_count(conversation_tokens)
+
+        # Compact line: Shows conversation tokens vs compaction threshold (using API data)
+        compact_display = format_token_count(compact_tokens)
         
         # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
         # 85%以上で警告表示
@@ -1618,11 +1699,13 @@ def main():
         line2_parts.append(compact_label)
         line2_parts.append(get_progress_bar(percentage, width=20))
         line2_parts.append(percentage_display)
-        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(COMPACTION_THRESHOLD)}{Colors.RESET}")
+        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(compaction_threshold)}{Colors.RESET}")
         
-        # キャッシュ情報（説明付き簡潔版）
+        # キャッシュ情報（説明付き簡潔版）- uses transcript data for cache details
         if cache_read > 0 or cache_creation > 0:
-            cache_ratio = (cache_read / total_tokens * 100) if total_tokens > 0 else 0
+            # Calculate cache ratio based on all tokens (API + cache)
+            all_tokens = compact_tokens + cache_read + cache_creation
+            cache_ratio = (cache_read / all_tokens * 100) if all_tokens > 0 else 0
             if cache_ratio >= 50:  # 50%以上の場合のみ表示
                 line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️  {int(cache_ratio)}% cached{Colors.RESET}")
         
@@ -1648,7 +1731,7 @@ def main():
                     session_start_time = block_stats['start_time'].strftime("%H:%M")
             
             # Session情報（動的パディングでプログレスバー位置を2行目と揃える）
-            compact_text = f"🪙  Compact: {compact_display}/{format_token_count(COMPACTION_THRESHOLD)}"
+            compact_text = f"🪙  Compact: {compact_display}/{format_token_count(compaction_threshold)}"
             
             # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
             line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session:{Colors.RESET}")
