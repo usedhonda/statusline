@@ -1937,9 +1937,9 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None, 
         #
         block_total_tokens = block_stats.get('total_tokens', 0) if block_stats else 0
         
-        # Format session tokens for display
-        tokens_formatted = f"{block_total_tokens:,}"
-        burn_rate_formatted = f"{burn_rate:,.0f}"
+        # Format session tokens for display (K/M format for readability)
+        tokens_formatted = format_token_count(block_total_tokens)
+        burn_rate_formatted = format_token_count(int(burn_rate))
         
         # Generate 5-hour timeline sparkline from REAL message data ONLY
         if block_stats and 'start_time' in block_stats and current_block:
