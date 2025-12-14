@@ -1588,15 +1588,10 @@ def main():
                     (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
-        # Calculate percentage for Compact display using API tokens (dynamic threshold)
-        # API tokens are more accurate for context window tracking
-        api_total_tokens = api_input_tokens + api_output_tokens
-        if api_total_tokens > 0:
-            # Use API-provided tokens for Compact line (more accurate)
-            compact_tokens = api_total_tokens
-        else:
-            # Fallback to transcript-calculated tokens if API data unavailable
-            compact_tokens = total_tokens
+        # Calculate percentage for Compact display (dynamic threshold)
+        # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
+        # NOT current context window usage. Must use transcript-calculated tokens.
+        compact_tokens = total_tokens
         percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
         
         # Get additional info
