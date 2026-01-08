@@ -4,9 +4,9 @@
 
 # Set which lines to display (True = show, False = hide)
 SHOW_LINE1 = True   # [Sonnet 4] | 🌿 main M2 +1 | 📁 statusline | 💬 254
-SHOW_LINE2 = True   # 🪙  Compact: 91.8K/160.0K ████████▒▒▒▒▒▒▒ 58% ♻️  99% cached 💰 Cost: $0.031
-SHOW_LINE3 = True   # ⏱️  Session: 1h15m/5h    ███▒▒▒▒▒▒▒▒▒▒▒▒ 25% 09:15 (08:00 to 13:00)
-SHOW_LINE4 = True   # 🔥 Burn:    0 (Rate: 0 t/m) ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+SHOW_LINE2 = True   # Compact: 91.8K/160.0K ████████▒▒▒▒▒▒▒ 58% ♻️ 99% cached 💰 $0.031
+SHOW_LINE3 = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒▒▒▒▒ 25% 09:15 (08:00 to 13:00)
+SHOW_LINE4 = True   # Burn: 14.0M (Rate: 321K t/m) ▁▁▂▃▄▅▆▇█▇▆▅▄▃▂▁▁▁▂▃
 
 # Alternative quick configurations (uncomment one to use):
 # SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = True, True, False, False   # Only lines 1-2
@@ -42,7 +42,7 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback)
 # Data Source: Current conversation tokens (until 160K compaction limit)
 # Scope: Single conversation, monitors compression timing
 # Calculation: block_stats['total_tokens'] from detect_five_hour_blocks()
-# Display: 🪙 Compact line (Line 2) - "118.1K/160.0K ████████▒▒▒▒ 74%"
+# Display: Compact line (Line 2) - "118.1K/160.0K ████████▒▒▒▒ 74%"
 # Range: 0-200K tokens (until conversation gets compressed)
 # Reset Point: When conversation gets compacted/compressed
 
@@ -52,7 +52,7 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback)
 # Data Source: Messages within usage windows
 # Scope: Usage period tracking
 # Calculation: calculate_tokens_since_time() with 5-hour window start
-# Display: ⏱️ Session line (Line 3) + 🔥 Burn line (Line 4)
+# Display: Session line (Line 3) + Burn line (Line 4)
 # Range: usage window scope with real-time burn rate
 # Reset Point: Every 5 hours per usage limits
 
@@ -187,8 +187,8 @@ def calculate_dynamic_padding(compact_text, session_text):
     """Calculate dynamic padding to align progress bars
     
     Args:
-        compact_text: Text part of compact line (e.g., "🪙  Compact: 111.6K/160.0K")
-        session_text: Text part of session line (e.g., "⏱️  Session: 3h26m/5h")
+        compact_text: Text part of compact line (e.g., "Compact: 111.6K/160.0K")
+        session_text: Text part of session line (e.g., "Session: 3h26m/5h")
     
     Returns:
         str: Padding spaces for session line
@@ -1682,11 +1682,9 @@ def main():
             # 🚨の表示幅調整でスペースを1つ減らす
             compact_label = f"{title_color}{warning_icon} Compact:{Colors.RESET}"
         else:
-            warning_icon = "🪙"
             title_color = Colors.BRIGHT_CYAN
             percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
-            # 通常の🪙では2スペース
-            compact_label = f"{title_color}{warning_icon}  Compact:{Colors.RESET}"
+            compact_label = f"{title_color}Compact:{Colors.RESET}"
         
         line2_parts.append(compact_label)
         line2_parts.append(get_progress_bar(percentage, width=20))
@@ -1699,7 +1697,7 @@ def main():
             all_tokens = compact_tokens + cache_read + cache_creation
             cache_ratio = (cache_read / all_tokens * 100) if all_tokens > 0 else 0
             if cache_ratio >= 50:  # 50%以上の場合のみ表示
-                line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️  {int(cache_ratio)}% cached{Colors.RESET}")
+                line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(cache_ratio)}% cached{Colors.RESET}")
         
         # 警告表示を削除（ユーザーリクエスト）
         
@@ -1723,10 +1721,10 @@ def main():
                     session_start_time = block_stats['start_time'].strftime("%H:%M")
             
             # Session情報（動的パディングでプログレスバー位置を2行目と揃える）
-            compact_text = f"🪙  Compact: {compact_display}/{format_token_count(compaction_threshold)}"
+            compact_text = f"Compact: {compact_display}/{format_token_count(compaction_threshold)}"
             
             # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
-            line3_parts.append(f"{Colors.BRIGHT_CYAN}⏱️  Session:{Colors.RESET}")
+            line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
             session_bar = get_progress_bar(block_progress, width=20, show_current_segment=True)
             line3_parts.append(session_bar)
             line3_parts.append(f"{Colors.BRIGHT_WHITE}[{int(block_progress)}%]{Colors.RESET}")
@@ -1765,9 +1763,9 @@ def main():
             if line1_parts:
                 single_line.extend(line1_parts[:3])  # モデル、Git、ディレクトリのみ
             if token_display and percentage:
-                single_line.append(f"🪙 Tokens: {token_display}({percentage}%)")
+                single_line.append(f"Tokens: {token_display}({percentage}%)")
             if session_duration:
-                single_line.append(f"⏱️ Time: {session_duration}")
+                single_line.append(f"Time: {session_duration}")
             print(" | ".join(single_line))
         else:
             # 複数行版（設定に基づいて表示）
@@ -1803,7 +1801,7 @@ def main():
         
     except Exception as e:
         # Fallback status line on error
-        print(f"{Colors.BRIGHT_RED}[Error]{Colors.RESET} 📁 . | 🪙 0 | 0%")
+        print(f"{Colors.BRIGHT_RED}[Error]{Colors.RESET} . | 0 | 0%")
         print(f"{Colors.LIGHT_GRAY}Check ~/.claude/statusline-error.log{Colors.RESET}")
         
         # Debug logging
@@ -1817,7 +1815,7 @@ def calculate_tokens_since_time(start_time, session_id):
     Calculates tokens from session start time to now for the burn line display.
     This is SESSION scope, NOT block scope. Used for burn rate calculations.
     
-    CRITICAL: This is for the 🔥 Burn line, NOT the 🪙 Compact line.
+    CRITICAL: This is for the Burn line, NOT the Compact line.
     
     Args:
         start_time: Session start time (from Session line display)
@@ -1908,12 +1906,12 @@ def calculate_tokens_since_time(start_time, session_id):
 # REMOVED: get_session_cumulative_usage() - unused function (5th line display not implemented)
 
 def get_burn_line(current_session_data=None, session_id=None, block_stats=None, current_block=None):
-    """📊 SESSION LINE SYSTEM: Generate burn line display (Line 4)
-    
-    Creates the 🔥 Burn line showing session tokens and burn rate.
+    """Generate burn line display (Line 4)
+
+    Creates the Burn line showing session tokens and burn rate.
     Uses 5-hour block timeline data with 15-minute intervals (20 segments).
-    
-    Format: "🔥 Burn:    17,106,109 (Rate: 258,455 t/m) [sparkline]"
+
+    Format: "Burn: 14.0M (Rate: 321.1K t/m) [sparkline]"
     
     Args:
         current_session_data: Session data with session tokens
@@ -1952,11 +1950,11 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None, 
         
         sparkline = create_sparkline(burn_timeline, width=20)
         
-        return (f"{Colors.BRIGHT_CYAN}🔥 Burn:    {Colors.RESET}{sparkline} "
+        return (f"{Colors.BRIGHT_CYAN}Burn:   {Colors.RESET} {sparkline} "
                 f"{Colors.BRIGHT_WHITE}{tokens_formatted} token(w/cache){Colors.RESET}, Rate: {burn_rate_formatted} t/m")
         
     except Exception as e:
         print(f"DEBUG: Burn line error: {e}", file=sys.stderr)
-        return f"{Colors.BRIGHT_CYAN}🔥 Burn: {Colors.RESET}   {Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
+        return f"{Colors.BRIGHT_CYAN}Burn:   {Colors.RESET} {Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
 if __name__ == "__main__":
     main()
