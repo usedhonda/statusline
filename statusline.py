@@ -1676,11 +1676,9 @@ def main():
         # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
         # 85%以上で警告表示
         if percentage >= 85:
-            warning_icon = "🚨"
             title_color = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}"
-            percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%] ⚠️{Colors.RESET}"
-            # 🚨の表示幅調整でスペースを1つ減らす
-            compact_label = f"{title_color}{warning_icon} Compact:{Colors.RESET}"
+            percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
+            compact_label = f"{title_color}Compact:{Colors.RESET}"
         else:
             title_color = Colors.BRIGHT_CYAN
             percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
