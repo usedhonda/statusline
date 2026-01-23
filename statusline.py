@@ -20,6 +20,9 @@ import sys
 import os
 import subprocess
 import argparse
+import shutil
+import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
 import time
@@ -88,6 +91,106 @@ class Colors:
 
 # Create single instance
 Colors = Colors()
+
+# ========================================
+# TERMINAL WIDTH UTILITIES
+# ========================================
+
+def strip_ansi(text):
+    """ANSIエスケープコードを除去"""
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+def get_display_width(text):
+    """表示幅を計算（絵文字/CJK対応）
+
+    ANSIコードを除去し、各文字の表示幅を計算。
+    East Asian Width が 'W' (Wide) または 'F' (Fullwidth) の文字は幅2、それ以外は幅1。
+    """
+    clean = strip_ansi(text)
+    width = 0
+    for char in clean:
+        ea = unicodedata.east_asian_width(char)
+        width += 2 if ea in ('W', 'F') else 1
+    return width
+
+def get_terminal_width():
+    """ターミナル幅を取得（安全なフォールバック付き）
+
+    優先順位:
+    1. COLUMNS環境変数（明示的指定）
+    2. tmux pane幅（tmux環境の場合）
+    3. tput cols（TTY不要）
+    4. shutil.get_terminal_size()（TTY必要）
+    5. デフォルト80
+
+    Returns:
+        int: ターミナル幅（右端1文字問題対策で-1）
+    """
+    try:
+        # 1. 環境変数COLUMNSを最優先（テスト用・明示的指定）
+        if 'COLUMNS' in os.environ:
+            try:
+                return int(os.environ['COLUMNS']) - 1
+            except ValueError:
+                pass
+
+        # 2. tmux環境の場合、pane幅を取得
+        if 'TMUX' in os.environ:
+            try:
+                result = subprocess.run(
+                    ['tmux', 'display-message', '-p', '#{pane_width}'],
+                    capture_output=True, text=True, timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip().isdigit():
+                    return int(result.stdout.strip()) - 1
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+
+        # 3. tput cols（TTY不要、$TERMから取得）
+        try:
+            result = subprocess.run(
+                ['tput', 'cols'],
+                capture_output=True, text=True, timeout=1
+            )
+            if result.returncode == 0 and result.stdout.strip().isdigit():
+                return int(result.stdout.strip()) - 1
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # 4. shutil.get_terminal_size()（TTY必要）
+        if sys.stdout.isatty():
+            size = shutil.get_terminal_size()
+            if size.columns > 0:
+                return size.columns - 1
+
+    except (OSError, AttributeError):
+        pass
+
+    return 80  # デフォルト
+
+def get_display_mode(width):
+    """ターミナル幅からモードを決定（ヒステリシス対応）
+
+    | モード | 幅 | 表示内容 |
+    |--------|-----|---------|
+    | full | >= 72 | 4行・全項目・装飾あり |
+    | compact | 55-71 | 4行・ラベル短縮・装飾削減 |
+    | tight | 45-54 | 2-3行・重要項目のみ |
+    | minimal | < 45 | 1行サマリ |
+
+    Args:
+        width: ターミナル幅
+    Returns:
+        str: 'full', 'compact', 'tight', or 'minimal'
+    """
+    if width >= 72:      # Full: 70 + 2（ヒステリシス）
+        return 'full'
+    elif width >= 55:
+        return 'compact'
+    elif width >= 45:
+        return 'tight'
+    else:
+        return 'minimal'
 
 def get_total_tokens(usage_data):
     """Calculate total tokens from usage data (UNIVERSAL HELPER) - external tool compatible
@@ -1401,6 +1504,240 @@ def format_cost(cost):
         return f"${cost:.3f}"
     else:
         return f"${cost:.2f}"
+
+# ========================================
+# RESPONSIVE DISPLAY MODE FORMATTERS
+# ========================================
+
+def shorten_model_name(model):
+    """モデル名を短縮形に変換"""
+    model_lower = model.lower()
+    if "opus" in model_lower:
+        if "4.1" in model or "4.5" in model_lower:
+            return "Op4.5" if "4.5" in model_lower else "Op4.1"
+        return "Op4"
+    elif "sonnet" in model_lower:
+        return "Son4"
+    elif "haiku" in model_lower:
+        return "Hai"
+    return model[:6]
+
+def format_output_full(ctx):
+    """Full mode (>= 72 chars): 4行・全項目・装飾あり
+
+    Example:
+    [Sonnet 4] | 🌿 main M2 +1 | 📁 statusline | 💬 254
+    Compact: ████████▒▒▒▒▒▒▒ [58%] 91.8K/160.0K ♻️ 99%
+    Session: ███▒▒▒▒▒▒▒▒▒▒▒▒ [25%] 1h15m/5h (08:00-13:00)
+    Burn:    ▁▂▃▄▅▆▇█▇▆▅▄▃▂▁ 14.0M tok
+    """
+    lines = []
+
+    # Line 1: Model/Git/Dir/Messages
+    if ctx['show_line1']:
+        line1_parts = []
+        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{ctx['model']}]{Colors.RESET}")
+
+        if ctx['git_branch']:
+            git_display = f"{Colors.BRIGHT_GREEN}🌿 {ctx['git_branch']}"
+            if ctx['modified_files'] > 0:
+                git_display += f" {Colors.BRIGHT_YELLOW}M{ctx['modified_files']}"
+            if ctx['untracked_files'] > 0:
+                git_display += f" {Colors.BRIGHT_CYAN}+{ctx['untracked_files']}"
+            git_display += Colors.RESET
+            line1_parts.append(git_display)
+
+        line1_parts.append(f"{Colors.BRIGHT_CYAN}📁 {ctx['current_dir']}{Colors.RESET}")
+
+        if ctx['active_files'] > 0:
+            line1_parts.append(f"{Colors.BRIGHT_WHITE}📝 {ctx['active_files']}{Colors.RESET}")
+
+        if ctx['total_messages'] > 0:
+            line1_parts.append(f"{Colors.BRIGHT_CYAN}💬 {ctx['total_messages']}{Colors.RESET}")
+
+        if ctx['lines_added'] > 0 or ctx['lines_removed'] > 0:
+            line1_parts.append(f"{Colors.BRIGHT_GREEN}+{ctx['lines_added']}{Colors.RESET}/{Colors.BRIGHT_RED}-{ctx['lines_removed']}{Colors.RESET}")
+
+        if ctx['error_count'] > 0:
+            line1_parts.append(f"{Colors.BRIGHT_RED}⚠️ {ctx['error_count']}{Colors.RESET}")
+
+        if ctx['task_status'] != 'idle':
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}⚡ {ctx['task_status']}{Colors.RESET}")
+
+        if ctx['session_cost'] > 0:
+            cost_color = Colors.BRIGHT_YELLOW if ctx['session_cost'] > 10 else Colors.BRIGHT_WHITE
+            line1_parts.append(f"{cost_color}💰 {format_cost(ctx['session_cost'])}{Colors.RESET}")
+
+        lines.append(" | ".join(line1_parts))
+
+    # Line 2: Compact tokens
+    if ctx['show_line2']:
+        line2_parts = []
+        percentage = ctx['percentage']
+        compact_display = format_token_count(ctx['compact_tokens'])
+        percentage_color = get_percentage_color(percentage)
+
+        if percentage >= 85:
+            title_color = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}"
+            percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
+            compact_label = f"{title_color}Compact:{Colors.RESET}"
+        else:
+            compact_label = f"{Colors.BRIGHT_CYAN}Compact:{Colors.RESET}"
+            percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
+
+        line2_parts.append(compact_label)
+        line2_parts.append(get_progress_bar(percentage, width=20))
+        line2_parts.append(percentage_display)
+        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(ctx['compaction_threshold'])}{Colors.RESET}")
+
+        if ctx['cache_ratio'] >= 50:
+            line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(ctx['cache_ratio'])}% cached{Colors.RESET}")
+
+        lines.append(" ".join(line2_parts))
+
+    # Line 3: Session time
+    if ctx['show_line3'] and ctx['session_duration']:
+        line3_parts = []
+        line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
+        line3_parts.append(get_progress_bar(ctx['block_progress'], width=20, show_current_segment=True))
+        line3_parts.append(f"{Colors.BRIGHT_WHITE}[{int(ctx['block_progress'])}%]{Colors.RESET}")
+        line3_parts.append(f"{Colors.BRIGHT_WHITE}{ctx['session_duration']}/5h{Colors.RESET}")
+
+        if ctx['session_time_info']:
+            line3_parts.append(ctx['session_time_info'])
+
+        lines.append(" ".join(line3_parts))
+
+    # Line 4: Burn rate
+    if ctx['show_line4'] and ctx['burn_line']:
+        lines.append(ctx['burn_line'])
+
+    return lines
+
+def format_output_compact(ctx):
+    """Compact mode (55-71 chars): 4行・ラベル短縮・装飾削減
+
+    Example:
+    [Son4] main M2+1 statusline 💬254
+    C: ████████▒▒▒ [58%] 91K/160K
+    S: ███▒▒▒▒▒▒▒▒ [25%] 1h15m/5h
+    B: ▁▂▃▄▅▆▇█▇▆▅ 14M
+    """
+    lines = []
+
+    # Line 1: Shortened model/git/dir
+    if ctx['show_line1']:
+        line1_parts = []
+        short_model = shorten_model_name(ctx['model'])
+        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
+
+        if ctx['git_branch']:
+            git_display = f"{Colors.BRIGHT_GREEN}{ctx['git_branch']}"
+            if ctx['modified_files'] > 0:
+                git_display += f" M{ctx['modified_files']}"
+            if ctx['untracked_files'] > 0:
+                git_display += f"+{ctx['untracked_files']}"
+            git_display += Colors.RESET
+            line1_parts.append(git_display)
+
+        line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
+
+        if ctx['total_messages'] > 0:
+            line1_parts.append(f"{Colors.BRIGHT_CYAN}💬{ctx['total_messages']}{Colors.RESET}")
+
+        lines.append(" ".join(line1_parts))
+
+    # Line 2: Compact tokens (shortened)
+    if ctx['show_line2']:
+        percentage = ctx['percentage']
+        compact_display = format_token_count_short(ctx['compact_tokens'])
+        threshold_display = format_token_count_short(ctx['compaction_threshold'])
+        percentage_color = get_percentage_color(percentage)
+
+        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=12)} "
+        line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} "
+        line2 += f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}"
+        lines.append(line2)
+
+    # Line 3: Session (shortened)
+    if ctx['show_line3'] and ctx['session_duration']:
+        line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
+        line3 += f"{Colors.BRIGHT_WHITE}[{int(ctx['block_progress'])}%]{Colors.RESET} "
+        line3 += f"{Colors.BRIGHT_WHITE}{ctx['session_duration']}/5h{Colors.RESET}"
+        lines.append(line3)
+
+    # Line 4: Burn (shortened)
+    if ctx['show_line4'] and ctx['burn_timeline']:
+        sparkline = create_sparkline(ctx['burn_timeline'], width=12)
+        tokens_display = format_token_count_short(ctx['block_tokens'])
+        line4 = f"{Colors.BRIGHT_CYAN}B:{Colors.RESET} {sparkline} {Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}"
+        lines.append(line4)
+
+    return lines
+
+def format_output_tight(ctx):
+    """Tight mode (45-54 chars): 2-3行・重要項目のみ
+
+    Example:
+    Son4 main 58%ctx 25%ses
+    ▁▂▃▄▅▆▇█▇▆ 14M 💬254
+    """
+    lines = []
+
+    # Line 1: Model, branch, percentages
+    line1_parts = []
+    short_model = shorten_model_name(ctx['model'])
+    line1_parts.append(f"{Colors.BRIGHT_YELLOW}{short_model}{Colors.RESET}")
+
+    if ctx['git_branch']:
+        line1_parts.append(f"{Colors.BRIGHT_GREEN}{ctx['git_branch']}{Colors.RESET}")
+
+    percentage_color = get_percentage_color(ctx['percentage'])
+    line1_parts.append(f"{percentage_color}{ctx['percentage']}%ctx{Colors.RESET}")
+
+    if ctx['session_duration']:
+        line1_parts.append(f"{Colors.BRIGHT_WHITE}{int(ctx['block_progress'])}%ses{Colors.RESET}")
+
+    lines.append(" ".join(line1_parts))
+
+    # Line 2: Sparkline, tokens, messages
+    line2_parts = []
+    if ctx['burn_timeline']:
+        sparkline = create_sparkline(ctx['burn_timeline'], width=10)
+        line2_parts.append(sparkline)
+
+    tokens_display = format_token_count_short(ctx['block_tokens'])
+    line2_parts.append(f"{Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}")
+
+    if ctx['total_messages'] > 0:
+        line2_parts.append(f"{Colors.BRIGHT_CYAN}💬{ctx['total_messages']}{Colors.RESET}")
+
+    lines.append(" ".join(line2_parts))
+
+    return lines
+
+def format_output_minimal(ctx):
+    """Minimal mode (< 45 chars): 1行サマリ
+
+    Example:
+    Son4 58% 1h15m 💬254
+    """
+    parts = []
+
+    short_model = shorten_model_name(ctx['model'])
+    parts.append(f"{Colors.BRIGHT_YELLOW}{short_model}{Colors.RESET}")
+
+    percentage_color = get_percentage_color(ctx['percentage'])
+    parts.append(f"{percentage_color}{ctx['percentage']}%{Colors.RESET}")
+
+    if ctx['session_duration']:
+        parts.append(f"{Colors.BRIGHT_WHITE}{ctx['session_duration']}{Colors.RESET}")
+
+    if ctx['total_messages'] > 0:
+        parts.append(f"{Colors.BRIGHT_CYAN}💬{ctx['total_messages']}{Colors.RESET}")
+
+    return [" ".join(parts)]
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
@@ -1474,6 +1811,15 @@ def main():
         api_input_tokens = api_context.get('total_input_tokens', 0)
         api_output_tokens = api_context.get('total_output_tokens', 0)
         api_context_size = api_context.get('context_window_size', 200000)
+
+        # Lines changed (v2.1.6+ feature)
+        api_lines_added = api_cost.get('total_lines_added', 0)
+        api_lines_removed = api_cost.get('total_lines_removed', 0)
+
+        # Context window percentage (v2.1.6+ feature)
+        # These are pre-calculated by Claude Code and more accurate than manual calculation
+        api_used_percentage = api_context.get('used_percentage')  # v2.1.6+
+        api_remaining_percentage = api_context.get('remaining_percentage')  # v2.1.6+
 
         # Dynamic compaction threshold (80% of context window)
         compaction_threshold = api_context_size * 0.8
@@ -1586,10 +1932,16 @@ def main():
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
         # Calculate percentage for Compact display (dynamic threshold)
-        # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
-        # NOT current context window usage. Must use transcript-calculated tokens.
+        # Prefer API-provided percentage (v2.1.6+) for accuracy, fallback to manual calculation
         compact_tokens = total_tokens
-        percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
+        if api_used_percentage is not None:
+            # Use Claude Code's pre-calculated percentage (more accurate)
+            percentage = min(100, round(api_used_percentage))
+        else:
+            # Fallback: manual calculation for older Claude Code versions
+            # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
+            # NOT current context window usage. Must use transcript-calculated tokens.
+            percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
         
         # Get additional info
         active_files = len(workspace.get('active_files', []))
@@ -1622,180 +1974,117 @@ def main():
         # Format displays - use API tokens for Compact line
         token_display = format_token_count(compact_tokens)
         percentage_color = get_percentage_color(percentage)
-        
-        # === 複数行版 ===
-        # 行1: 基本情報とトークン状況
-        line1_parts = []
-        
-        # Model - 正式名称を表示（最も明るく）
-        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{model}]{Colors.RESET}")
-        
-        # Git
-        if git_branch:
-            git_display = f"{Colors.BRIGHT_GREEN}🌿 {git_branch}"
-            if modified_files > 0:
-                git_display += f" {Colors.BRIGHT_YELLOW}M{modified_files}"
-            if untracked_files > 0:
-                git_display += f" {Colors.BRIGHT_CYAN}+{untracked_files}"
-            git_display += Colors.RESET
-            line1_parts.append(git_display)
-        
-        # Directory（より明るく）
-        line1_parts.append(f"{Colors.BRIGHT_CYAN}📁 {current_dir}{Colors.RESET}")
-        
-        # Files - 明るい色で表示（0の場合は非表示）
-        if active_files > 0:
-            line1_parts.append(f"{Colors.BRIGHT_WHITE}📝 {active_files}{Colors.RESET}")
-        
-        # Messages - 総数のみ表示
-        total_messages = user_messages + assistant_messages
-        if total_messages > 0:
-            line1_parts.append(f"{Colors.BRIGHT_CYAN}💬 {total_messages}{Colors.RESET}")
-        
-        # Errors
-        if error_count > 0:
-            line1_parts.append(f"{Colors.BRIGHT_RED}⚠️ {error_count}{Colors.RESET}")
-        
-        # Task status
-        if task_status != 'idle':
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}⚡ {task_status}{Colors.RESET}")
-        
-        # Cost display (moved from line 2)
-        if session_cost > 0:
-            cost_color = Colors.BRIGHT_YELLOW if session_cost > 10 else Colors.BRIGHT_WHITE
-            line1_parts.append(f"{cost_color}💰 {format_cost(session_cost)}{Colors.RESET}")
-        
-        # Current time moved to Session line
-        
-        # 行2: Token情報の統合
-        line2_parts = []
 
-        # Compact line: Shows conversation tokens vs compaction threshold (using API data)
-        compact_display = format_token_count(compact_tokens)
-        
-        # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
-        # 85%以上で警告表示
-        if percentage >= 85:
-            title_color = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}"
-            percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
-            compact_label = f"{title_color}Compact:{Colors.RESET}"
-        else:
-            title_color = Colors.BRIGHT_CYAN
-            percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
-            compact_label = f"{title_color}Compact:{Colors.RESET}"
-        
-        line2_parts.append(compact_label)
-        line2_parts.append(get_progress_bar(percentage, width=20))
-        line2_parts.append(percentage_display)
-        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(compaction_threshold)}{Colors.RESET}")
-        
-        # キャッシュ情報（説明付き簡潔版）- uses transcript data for cache details
+        # ========================================
+        # RESPONSIVE DISPLAY MODE SYSTEM
+        # ========================================
+
+        # Get terminal width and determine display mode
+        terminal_width = get_terminal_width()
+        display_mode = get_display_mode(terminal_width)
+
+        # 環境変数で強制モード指定（テスト/デバッグ用）
+        forced_mode = os.environ.get('STATUSLINE_DISPLAY_MODE')
+        if forced_mode in ('full', 'compact', 'tight', 'minimal'):
+            display_mode = forced_mode
+
+        # 従来の環境変数（後方互換性）
+        output_mode = os.environ.get('STATUSLINE_MODE', 'multi')
+        if output_mode == 'single':
+            display_mode = 'minimal'
+
+        # Calculate common values
+        total_messages = user_messages + assistant_messages
+
+        # Calculate cache ratio
+        cache_ratio = 0
         if cache_read > 0 or cache_creation > 0:
-            # Calculate cache ratio based on all tokens (API + cache)
             all_tokens = compact_tokens + cache_read + cache_creation
             cache_ratio = (cache_read / all_tokens * 100) if all_tokens > 0 else 0
-            if cache_ratio >= 50:  # 50%以上の場合のみ表示
-                line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(cache_ratio)}% cached{Colors.RESET}")
-        
-        # 警告表示を削除（ユーザーリクエスト）
-        
-        # 行3: Session情報の統合（元に戻す）
-        line3_parts = []
-        if duration_seconds is not None and session_duration:
-            # 5時間制限での計算
+
+        # Calculate block progress
+        block_progress = 0
+        if duration_seconds is not None:
             hours_elapsed = duration_seconds / 3600
-            block_progress = (hours_elapsed % 5) / 5 * 100  # 5時間内の進捗
-            
-            # セッション開始時間を取得 ()
-            session_start_time = None
-            if block_stats:
-                try:
-                    start_time_utc = block_stats['start_time']
-                    # Convert UTC to local time for display
-                    start_time_local = convert_utc_to_local(start_time_utc)
-                    session_start_time = start_time_local.strftime("%H:%M")
-                except Exception as e:
-                    # Fallback: use UTC time directly
-                    session_start_time = block_stats['start_time'].strftime("%H:%M")
-            
-            # Session情報（動的パディングでプログレスバー位置を2行目と揃える）
-            compact_text = f"Compact: {compact_display}/{format_token_count(compaction_threshold)}"
-            
-            # グラフ先頭表示: アイコン + タイトル + プログレスバー + 詳細情報
-            line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
-            session_bar = get_progress_bar(block_progress, width=20, show_current_segment=True)
-            line3_parts.append(session_bar)
-            line3_parts.append(f"{Colors.BRIGHT_WHITE}[{int(block_progress)}%]{Colors.RESET}")
-            line3_parts.append(f"{Colors.BRIGHT_WHITE}{session_duration}/5h{Colors.RESET}")
-            
-            # 現在時刻をSession行に追加（開始時刻と終了時刻付き）
-            if session_start_time:
-                # 5時間ブロックの終了時刻を計算
-                try:
-                    start_time_utc = block_stats['start_time']
-                    start_time_local = convert_utc_to_local(start_time_utc)
+            block_progress = (hours_elapsed % 5) / 5 * 100
 
-                    # 5時間後の終了時刻を計算
-                    end_time_local = start_time_local + timedelta(hours=5)
-                    session_end_time = end_time_local.strftime("%H:%M")
+        # Generate session time info
+        session_time_info = ""
+        if block_stats and duration_seconds is not None:
+            try:
+                start_time_utc = block_stats['start_time']
+                start_time_local = convert_utc_to_local(start_time_utc)
+                session_start_time = start_time_local.strftime("%H:%M")
+                end_time_local = start_time_local + timedelta(hours=5)
+                session_end_time = end_time_local.strftime("%H:%M")
 
-                    # Check if current time is past end time
-                    now_local = datetime.now()
-                    if now_local > end_time_local:
-                        # Block has ended - show as completed
-                        line3_parts.append(f"{Colors.BRIGHT_YELLOW}{current_time}{Colors.RESET} {Colors.BRIGHT_YELLOW}(ended at {session_end_time}){Colors.RESET}")
-                    else:
-                        line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}({session_start_time} to {session_end_time}){Colors.RESET}")
-                except Exception:
-                    # フォールバック: 開始時刻のみ表示
-                    line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}(from {session_start_time}){Colors.RESET}")
-            else:
-                line3_parts.append(f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}")
-        
-        # 出力モード（環境変数で制御）
-        output_mode = os.environ.get('STATUSLINE_MODE', 'multi')
-        
-        if output_mode == 'single':
-            # 1行集約版（公式仕様準拠）
-            single_line = []
-            if line1_parts:
-                single_line.extend(line1_parts[:3])  # モデル、Git、ディレクトリのみ
-            if token_display and percentage:
-                single_line.append(f"Tokens: {token_display}({percentage}%)")
-            if session_duration:
-                single_line.append(f"Time: {session_duration}")
-            print(" | ".join(single_line))
-        else:
-            # 複数行版（設定に基づいて表示）
-            # より強力な色リセット + 明るい色設定
-            if SHOW_LINE1:
-                print(f"\033[0m\033[1;97m" + " | ".join(line1_parts) + f"\033[0m")
-            
-            if SHOW_LINE2:
-                print(f"\033[0m\033[1;97m" + " ".join(line2_parts) + f"\033[0m") 
-            
-            # 3行目（セッション時間の詳細）を表示する場合
-            if SHOW_LINE3 and line3_parts:
-                print(f"\033[0m\033[1;97m" + " ".join(line3_parts) + f"\033[0m")
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # 📊 SESSION LINE SYSTEM: Line 4 - Burn Rate Display
-            # ═══════════════════════════════════════════════════════════════════
-            if SHOW_LINE4:
-                session_data = None
-                if block_stats:
-                    # Use block tokens and duration for BOTH sparkline and rate calculation
-                    # This ensures consistency between the two displays
-                    session_data = {
-                        'total_tokens': block_stats['total_tokens'],  # Block total for consistency
-                        'duration_seconds': duration_seconds if duration_seconds and duration_seconds > 0 else 1,  # Avoid division by zero
-                        'start_time': block_stats.get('start_time'),
-                        'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
-                        'current_cost': session_cost
-                    }
-                line4_parts = get_burn_line(session_data, session_id, block_stats, current_block)
-                if line4_parts:
-                    print(f"\033[0m\033[1;97m{line4_parts}\033[0m")
+                now_local = datetime.now()
+                if now_local > end_time_local:
+                    session_time_info = f"{Colors.BRIGHT_YELLOW}{current_time}{Colors.RESET} {Colors.BRIGHT_YELLOW}(ended at {session_end_time}){Colors.RESET}"
+                else:
+                    session_time_info = f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET} {Colors.BRIGHT_GREEN}({session_start_time} to {session_end_time}){Colors.RESET}"
+            except Exception:
+                session_time_info = f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}"
+
+        # Generate burn line and timeline for context
+        burn_line = ""
+        burn_timeline = []
+        block_tokens = 0
+        if SHOW_LINE4 and block_stats:
+            session_data = {
+                'total_tokens': block_stats['total_tokens'],
+                'duration_seconds': duration_seconds if duration_seconds and duration_seconds > 0 else 1,
+                'start_time': block_stats.get('start_time'),
+                'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
+                'current_cost': session_cost
+            }
+            burn_line = get_burn_line(session_data, session_id, block_stats, current_block)
+            burn_timeline = generate_real_burn_timeline(block_stats, current_block)
+            block_tokens = block_stats.get('total_tokens', 0)
+
+        # Build context dictionary for formatters
+        ctx = {
+            'model': model,
+            'git_branch': git_branch,
+            'modified_files': modified_files,
+            'untracked_files': untracked_files,
+            'current_dir': current_dir,
+            'active_files': active_files,
+            'total_messages': total_messages,
+            'lines_added': api_lines_added,
+            'lines_removed': api_lines_removed,
+            'error_count': error_count,
+            'task_status': task_status,
+            'session_cost': session_cost,
+            'compact_tokens': compact_tokens,
+            'compaction_threshold': compaction_threshold,
+            'percentage': percentage,
+            'cache_ratio': cache_ratio,
+            'session_duration': session_duration,
+            'block_progress': block_progress,
+            'session_time_info': session_time_info,
+            'burn_line': burn_line,
+            'burn_timeline': burn_timeline,
+            'block_tokens': block_tokens,
+            'show_line1': SHOW_LINE1,
+            'show_line2': SHOW_LINE2,
+            'show_line3': SHOW_LINE3,
+            'show_line4': SHOW_LINE4,
+        }
+
+        # Select formatter based on display mode
+        if display_mode == 'full':
+            lines = format_output_full(ctx)
+        elif display_mode == 'compact':
+            lines = format_output_compact(ctx)
+        elif display_mode == 'tight':
+            lines = format_output_tight(ctx)
+        else:  # minimal
+            lines = format_output_minimal(ctx)
+
+        # Output lines
+        for line in lines:
+            print(f"\033[0m\033[1;97m{line}\033[0m")
         
     except Exception as e:
         # Fallback status line on error
