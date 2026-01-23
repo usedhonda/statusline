@@ -1676,67 +1676,95 @@ def format_output_compact(ctx):
     return lines
 
 def format_output_tight(ctx):
-    """Tight mode (45-54 chars): 2-3行・重要項目のみ
+    """Tight mode (45-54 chars): 4行維持・さらに短縮
 
     Example:
-    Son4 main 58%ctx 25%ses
-    ▁▂▃▄▅▆▇█▇▆ 14M 💬254
+    [Son4] main M1+5
+    C: ████████ [58%] 91K
+    S: ███░░░░░ [25%] 1h15m
+    B: ▁▂▃▄▅▆▇█ 14M
     """
     lines = []
 
-    # Line 1: Model, branch, percentages
-    line1_parts = []
-    short_model = shorten_model_name(ctx['model'])
-    line1_parts.append(f"{Colors.BRIGHT_YELLOW}{short_model}{Colors.RESET}")
+    # Line 1: Model, branch (ultra short)
+    if ctx['show_line1']:
+        line1_parts = []
+        short_model = shorten_model_name(ctx['model'])
+        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
-    if ctx['git_branch']:
-        line1_parts.append(f"{Colors.BRIGHT_GREEN}{ctx['git_branch']}{Colors.RESET}")
+        if ctx['git_branch']:
+            git_display = f"{Colors.BRIGHT_GREEN}{ctx['git_branch']}"
+            if ctx['modified_files'] > 0 or ctx['untracked_files'] > 0:
+                git_display += f" M{ctx['modified_files']}+{ctx['untracked_files']}"
+            git_display += Colors.RESET
+            line1_parts.append(git_display)
 
-    percentage_color = get_percentage_color(ctx['percentage'])
-    line1_parts.append(f"{percentage_color}{ctx['percentage']}%ctx{Colors.RESET}")
+        lines.append(" ".join(line1_parts))
 
-    if ctx['session_duration']:
-        line1_parts.append(f"{Colors.BRIGHT_WHITE}{int(ctx['block_progress'])}%ses{Colors.RESET}")
+    # Line 2: Compact tokens (ultra short)
+    if ctx['show_line2']:
+        percentage = ctx['percentage']
+        compact_display = format_token_count_short(ctx['compact_tokens'])
+        percentage_color = get_percentage_color(percentage)
 
-    lines.append(" ".join(line1_parts))
+        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=8)} "
+        line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} {Colors.BRIGHT_WHITE}{compact_display}{Colors.RESET}"
+        lines.append(line2)
 
-    # Line 2: Sparkline, tokens, messages
-    line2_parts = []
-    if ctx['burn_timeline']:
-        sparkline = create_sparkline(ctx['burn_timeline'], width=10)
-        line2_parts.append(sparkline)
+    # Line 3: Session (ultra short)
+    if ctx['show_line3'] and ctx['session_duration']:
+        line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
+        line3 += f"{Colors.BRIGHT_WHITE}[{int(ctx['block_progress'])}%]{Colors.RESET} {Colors.BRIGHT_WHITE}{ctx['session_duration']}{Colors.RESET}"
+        lines.append(line3)
 
-    tokens_display = format_token_count_short(ctx['block_tokens'])
-    line2_parts.append(f"{Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}")
-
-    if ctx['total_messages'] > 0:
-        line2_parts.append(f"{Colors.BRIGHT_CYAN}💬{ctx['total_messages']}{Colors.RESET}")
-
-    lines.append(" ".join(line2_parts))
+    # Line 4: Burn (ultra short)
+    if ctx['show_line4'] and ctx['burn_timeline']:
+        sparkline = create_sparkline(ctx['burn_timeline'], width=8)
+        tokens_display = format_token_count_short(ctx['block_tokens'])
+        line4 = f"{Colors.BRIGHT_CYAN}B:{Colors.RESET} {sparkline} {Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}"
+        lines.append(line4)
 
     return lines
 
 def format_output_minimal(ctx):
-    """Minimal mode (< 45 chars): 1行サマリ
+    """Minimal mode (< 45 chars): 4行維持・最小限
 
     Example:
-    Son4 58% 1h15m 💬254
+    Son4 main
+    C: ████ 58%
+    S: ██░░ 25%
+    B: ▁▂▃▄ 14M
     """
-    parts = []
+    lines = []
 
-    short_model = shorten_model_name(ctx['model'])
-    parts.append(f"{Colors.BRIGHT_YELLOW}{short_model}{Colors.RESET}")
+    # Line 1
+    if ctx['show_line1']:
+        short_model = shorten_model_name(ctx['model'])
+        line1 = f"{Colors.BRIGHT_YELLOW}{short_model}{Colors.RESET}"
+        if ctx['git_branch']:
+            line1 += f" {Colors.BRIGHT_GREEN}{ctx['git_branch']}{Colors.RESET}"
+        lines.append(line1)
 
-    percentage_color = get_percentage_color(ctx['percentage'])
-    parts.append(f"{percentage_color}{ctx['percentage']}%{Colors.RESET}")
+    # Line 2
+    if ctx['show_line2']:
+        percentage = ctx['percentage']
+        percentage_color = get_percentage_color(percentage)
+        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=4)} {percentage_color}{percentage}%{Colors.RESET}"
+        lines.append(line2)
 
-    if ctx['session_duration']:
-        parts.append(f"{Colors.BRIGHT_WHITE}{ctx['session_duration']}{Colors.RESET}")
+    # Line 3
+    if ctx['show_line3'] and ctx['session_duration']:
+        line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=4)} {Colors.BRIGHT_WHITE}{int(ctx['block_progress'])}%{Colors.RESET}"
+        lines.append(line3)
 
-    if ctx['total_messages'] > 0:
-        parts.append(f"{Colors.BRIGHT_CYAN}💬{ctx['total_messages']}{Colors.RESET}")
+    # Line 4
+    if ctx['show_line4'] and ctx['burn_timeline']:
+        sparkline = create_sparkline(ctx['burn_timeline'], width=4)
+        tokens_display = format_token_count_short(ctx['block_tokens'])
+        line4 = f"{Colors.BRIGHT_CYAN}B:{Colors.RESET} {sparkline} {Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}"
+        lines.append(line4)
 
-    return [" ".join(parts)]
+    return lines
 
 def main():
     # Parse command line arguments
