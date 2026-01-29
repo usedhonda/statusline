@@ -169,28 +169,25 @@ def get_terminal_width():
     return 80  # デフォルト
 
 def get_display_mode(width):
-    """ターミナル幅からモードを決定（ヒステリシス対応）
+    """ターミナル幅からモードを決定
 
-    | モード | 幅 | 表示内容 |
-    |--------|-----|---------|
-    | full | >= 72 | 4行・全項目・装飾あり |
-    | compact | 55-71 | 4行・ラベル短縮・装飾削減 |
-    | tight | 45-54 | 2-3行・重要項目のみ |
-    | minimal | < 45 | 1行サマリ |
+    | モード | 幅 | 最長行 | 表示内容 |
+    |--------|-----|--------|---------|
+    | full | >= 68 | 66文字 | 4行・全項目・装飾あり |
+    | compact | 35-67 | 30文字 | 4行・ラベル短縮・装飾削減 |
+    | tight | < 35 | 23文字 | 4行・最短表示 |
 
     Args:
         width: ターミナル幅
     Returns:
-        str: 'full', 'compact', 'tight', or 'minimal'
+        str: 'full', 'compact', or 'tight'
     """
-    if width >= 72:      # Full: 70 + 2（ヒステリシス）
+    if width >= 68:
         return 'full'
-    elif width >= 55:
+    elif width >= 35:
         return 'compact'
-    elif width >= 45:
-        return 'tight'
     else:
-        return 'minimal'
+        return 'tight'
 
 def get_total_tokens(usage_data):
     """Calculate total tokens from usage data (UNIVERSAL HELPER) - external tool compatible
@@ -533,33 +530,38 @@ def find_session_transcript(session_id):
     
     return None
 
-def find_all_transcript_files():
-    """Find all transcript files across all projects"""
+def find_all_transcript_files(hours_limit=6):
+    """Find transcript files updated within the specified time limit
+
+    Args:
+        hours_limit: Only return files modified within this many hours (default: 6)
+                     Set to None to return all files (not recommended for performance)
+    """
     projects_dir = Path.home() / '.claude' / 'projects'
-    
+
     if not projects_dir.exists():
         return []
-    
+
     transcript_files = []
+    cutoff_time = time.time() - (hours_limit * 3600) if hours_limit else 0
+
     for project_dir in projects_dir.iterdir():
         if project_dir.is_dir():
             for file_path in project_dir.glob("*.jsonl"):
-                transcript_files.append(file_path)
-    
+                # Only include files modified within the time limit
+                if hours_limit is None or file_path.stat().st_mtime >= cutoff_time:
+                    transcript_files.append(file_path)
+
     return transcript_files
 
-def load_all_messages_chronologically():
-    """Load all messages from all transcripts in chronological order"""
-    all_messages = []
-    transcript_files = find_all_transcript_files()
+def load_all_messages_chronologically(hours_limit=6):
+    """Load messages from recently updated transcripts in chronological order
 
-    # DEBUG: Show transcript file count and locations
-    import sys
-    print(f"DEBUG: Found {len(transcript_files)} transcript files", file=sys.stderr)
-    for i, f in enumerate(transcript_files[:5]):  # Show first 5 files
-        print(f"DEBUG: File {i+1}: {f}", file=sys.stderr)
-    if len(transcript_files) > 5:
-        print(f"DEBUG: ... and {len(transcript_files) - 5} more files", file=sys.stderr)
+    Args:
+        hours_limit: Only load from files modified within this many hours (default: 6)
+    """
+    all_messages = []
+    transcript_files = find_all_transcript_files(hours_limit=hours_limit)
 
     for transcript_file in transcript_files:
         try:
@@ -589,10 +591,7 @@ def load_all_messages_chronologically():
     
     # 時系列でソート
     all_messages.sort(key=lambda x: x['timestamp'])
-    
-    # DEBUG: Show total message count before filtering
-    print(f"DEBUG: Loaded {len(all_messages)} total messages from all projects", file=sys.stderr)
-    
+
     return all_messages
 
 def detect_five_hour_blocks(all_messages, block_duration_hours=5):
@@ -632,11 +631,7 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
     
     # Use recent messages instead of all messages
     sorted_messages = recent_messages
-    
-    # DEBUG: Show filtering results  
-    import sys
-    print(f"DEBUG: After 6-hour filter: {len(sorted_messages)} messages (filtered out {len(all_messages) - len(sorted_messages)})", file=sys.stderr)
-    
+
     blocks = []
     block_duration_ms = block_duration_hours * 60 * 60 * 1000
     current_block_start = None
@@ -654,9 +649,6 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
         if current_block_start is None:
             # First entry - start a new block (floored to the hour)
             current_block_start = floor_to_hour(entry_time)
-            # DEBUG: Show first entry timing
-            import sys
-            print(f"DEBUG: First entry time: {entry_time}, floored to: {current_block_start}, session: {entry.get('session_id')}", file=sys.stderr)
             current_block_entries = [entry]
         else:
             # Check if we need to close current block -  123
@@ -681,9 +673,6 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
                 # Start new block (floored to the hour)
                 current_block_start = floor_to_hour(entry_time)
                 current_block_entries = [entry]
-                # DEBUG: Show new block creation
-                import sys
-                print(f"DEBUG: New block created at: {current_block_start}", file=sys.stderr)
             else:
                 # Add to current block -  142
                 current_block_entries.append(entry)
@@ -747,9 +736,6 @@ def find_current_session_block(blocks, target_session_id):
         
         # Check if current time is within this block's 5-hour window
         if block_start <= now <= block_end:
-            # DEBUG: Show which block is currently active
-            import sys
-            print(f"DEBUG: Found current active block: {block_start} to {block_end}", file=sys.stderr)
             return block
     
     # Fallback: Find block containing target session
@@ -795,12 +781,7 @@ def calculate_block_statistics_from_messages(block):
             message_id = message.get('uuid') or message.get('message_id')
             request_id = message.get('requestId') or message.get('request_id')
             session_id = message.get('session_id')
-            
-            # Debug first few messages
-            if len(debug_samples) < 3:
-                import sys
-                print(f"DEBUG: Processing message: uuid={message_id}, requestId={request_id}, session={session_id}", file=sys.stderr)
-            
+
             unique_hash = None
             if message_id and request_id:
                 unique_hash = f"{message_id}:{request_id}"
@@ -869,21 +850,7 @@ def calculate_block_statistics_from_messages(block):
     
     # Final calculation - use actual accumulated values
     total_tokens = total_input_tokens + total_output_tokens + total_cache_creation + total_cache_read
-    
-    # DEBUG: Show block statistics with enhanced deduplication analysis
-    import sys
-    dedup_rate = (skipped_duplicates / (total_messages + skipped_duplicates)) * 100 if (total_messages + skipped_duplicates) > 0 else 0
-    print(f"DEBUG: Final stats: {total_messages} messages, {total_tokens:,} tokens (dedup: {skipped_duplicates}, rate: {dedup_rate:.1f}%)", file=sys.stderr)
-    print(f"DEBUG: Components: input={total_input_tokens:,}, output={total_output_tokens:,}, cache_create={total_cache_creation:,}, cache_read={total_cache_read:,}", file=sys.stderr)
-    
-    # Show ratio to external reference for debugging
-    reference_estimate = 75000000  # Approximate reference value
-    ratio = total_tokens / reference_estimate if reference_estimate > 0 else 0
-    print(f"DEBUG: Ratio to reference: {ratio:.2f}x (statusline={total_tokens:,} vs reference≈{reference_estimate:,})", file=sys.stderr)
-    
-    for sample in debug_samples:
-        print(f"DEBUG: Sample {sample['idx']}: session={sample['session_id'][:8]}..., total={sample['total']}, cache_read={sample['cache_read']}", file=sys.stderr)
-    
+
     return {
         'start_time': block['start_time'],
         'duration_seconds': block.get('duration_seconds', 0),
@@ -1011,10 +978,8 @@ def calculate_tokens_from_jsonl_with_dedup(transcript_file, block_start_time, du
             'is_active': True,
             'burn_timeline': generate_burn_timeline_from_jsonl(transcript_file, block_start_utc, duration_seconds)
         }
-        
-    except Exception as e:
-        import sys
-        print(f"DEBUG: Error in JSONL dedup: {e}", file=sys.stderr)
+
+    except Exception:
         return None
 
 def generate_burn_timeline_from_jsonl(transcript_file, block_start_utc, duration_seconds):
@@ -1159,13 +1124,7 @@ def calculate_block_statistics_fallback(block):
     
     # 5時間ブロック内での15分間隔Burnデータを生成（20セグメント）- 同じデータソース使用
     burn_timeline = generate_realtime_burn_timeline(block['start_time'], actual_duration)
-    
-    # デバッグ出力：重複除去の効果を確認
-    if total_messages > 0:
-        dedup_rate = (skipped_duplicates / total_messages) * 100
-        import sys
-        print(f"DEBUG: total_messages={total_messages}, skipped_duplicates={skipped_duplicates}, dedup_rate={dedup_rate:.1f}%", file=sys.stderr)
-    
+
     return {
         'start_time': block['start_time'],
         'duration_seconds': actual_duration,
@@ -1522,7 +1481,88 @@ def shorten_model_name(model):
         return "Hai"
     return model[:6]
 
-def format_output_full(ctx):
+def truncate_text(text, max_len):
+    """テキストを最大長で切り詰め、...を追加"""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[:max_len-3] + "..."
+
+def build_line1_parts(ctx, shorten_model=False, max_branch_len=None, max_dir_len=None,
+                      include_active_files=True, include_messages=True,
+                      include_lines=True, include_errors=True,
+                      include_task=True, include_cost=True):
+    """Line 1の各パーツを構築する
+
+    Args:
+        ctx: コンテキスト辞書
+        shorten_model: モデル名を短縮形にするか
+        max_branch_len: ブランチ名の最大長（Noneで無制限）
+        max_dir_len: ディレクトリ名の最大長（Noneで無制限）
+        include_active_files: アクティブファイル数を含めるか
+        include_messages: メッセージ数を含めるか
+        include_lines: 行変更数を含めるか
+        include_errors: エラー数を含めるか
+        include_task: タスクステータスを含めるか
+        include_cost: コストを含めるか
+
+    Returns:
+        list: Line 1のパーツのリスト
+    """
+    parts = []
+
+    # Model
+    model_name = shorten_model_name(ctx['model']) if shorten_model else ctx['model']
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
+
+    # Git branch
+    if ctx['git_branch']:
+        branch = ctx['git_branch']
+        if max_branch_len and len(branch) > max_branch_len:
+            branch = truncate_text(branch, max_branch_len)
+        git_display = f"{Colors.BRIGHT_GREEN}🌿 {branch}"
+        if ctx['modified_files'] > 0:
+            git_display += f" {Colors.BRIGHT_YELLOW}M{ctx['modified_files']}"
+        if ctx['untracked_files'] > 0:
+            git_display += f" {Colors.BRIGHT_CYAN}+{ctx['untracked_files']}"
+        git_display += Colors.RESET
+        parts.append(git_display)
+
+    # Directory
+    dir_name = ctx['current_dir']
+    if max_dir_len and len(dir_name) > max_dir_len:
+        dir_name = truncate_text(dir_name, max_dir_len)
+    parts.append(f"{Colors.BRIGHT_CYAN}📁 {dir_name}{Colors.RESET}")
+
+    # Active files
+    if include_active_files and ctx['active_files'] > 0:
+        parts.append(f"{Colors.BRIGHT_WHITE}📝 {ctx['active_files']}{Colors.RESET}")
+
+    # Messages
+    if include_messages and ctx['total_messages'] > 0:
+        parts.append(f"{Colors.BRIGHT_CYAN}💬 {ctx['total_messages']}{Colors.RESET}")
+
+    # Lines changed
+    if include_lines and (ctx['lines_added'] > 0 or ctx['lines_removed'] > 0):
+        parts.append(f"{Colors.BRIGHT_GREEN}+{ctx['lines_added']}{Colors.RESET}/{Colors.BRIGHT_RED}-{ctx['lines_removed']}{Colors.RESET}")
+
+    # Errors
+    if include_errors and ctx['error_count'] > 0:
+        parts.append(f"{Colors.BRIGHT_RED}⚠️ {ctx['error_count']}{Colors.RESET}")
+
+    # Task status
+    if include_task and ctx['task_status'] != 'idle':
+        parts.append(f"{Colors.BRIGHT_YELLOW}⚡ {ctx['task_status']}{Colors.RESET}")
+
+    # Cost
+    if include_cost and ctx['session_cost'] > 0:
+        cost_color = Colors.BRIGHT_YELLOW if ctx['session_cost'] > 10 else Colors.BRIGHT_WHITE
+        parts.append(f"{cost_color}💰 {format_cost(ctx['session_cost'])}{Colors.RESET}")
+
+    return parts
+
+def format_output_full(ctx, terminal_width=None):
     """Full mode (>= 72 chars): 4行・全項目・装飾あり
 
     Example:
@@ -1530,45 +1570,80 @@ def format_output_full(ctx):
     Compact: ████████▒▒▒▒▒▒▒ [58%] 91.8K/160.0K ♻️ 99%
     Session: ███▒▒▒▒▒▒▒▒▒▒▒▒ [25%] 1h15m/5h (08:00-13:00)
     Burn:    ▁▂▃▄▅▆▇█▇▆▅▄▃▂▁ 14.0M tok
+
+    Args:
+        ctx: コンテキスト辞書
+        terminal_width: ターミナル幅（Noneの場合は自動取得）
     """
     lines = []
 
-    # Line 1: Model/Git/Dir/Messages
+    # Line 1: Model/Git/Dir/Messages (with dynamic length adjustment)
     if ctx['show_line1']:
-        line1_parts = []
-        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{ctx['model']}]{Colors.RESET}")
+        if terminal_width is None:
+            terminal_width = get_terminal_width()
 
-        if ctx['git_branch']:
-            git_display = f"{Colors.BRIGHT_GREEN}🌿 {ctx['git_branch']}"
-            if ctx['modified_files'] > 0:
-                git_display += f" {Colors.BRIGHT_YELLOW}M{ctx['modified_files']}"
-            if ctx['untracked_files'] > 0:
-                git_display += f" {Colors.BRIGHT_CYAN}+{ctx['untracked_files']}"
-            git_display += Colors.RESET
-            line1_parts.append(git_display)
+        # Step 1: 全要素で構築
+        line1_parts = build_line1_parts(ctx)
+        line1 = " | ".join(line1_parts)
 
-        line1_parts.append(f"{Colors.BRIGHT_CYAN}📁 {ctx['current_dir']}{Colors.RESET}")
+        if get_display_width(line1) <= terminal_width:
+            lines.append(line1)
+        else:
+            # Step 2: 低優先度要素を削除（コスト、行変更、エラー、タスク）
+            line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
+                                            include_errors=False, include_task=False)
+            line1 = " | ".join(line1_parts)
 
-        if ctx['active_files'] > 0:
-            line1_parts.append(f"{Colors.BRIGHT_WHITE}📝 {ctx['active_files']}{Colors.RESET}")
+            if get_display_width(line1) <= terminal_width:
+                lines.append(line1)
+            else:
+                # Step 3: アクティブファイルも削除
+                line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
+                                                include_errors=False, include_task=False,
+                                                include_active_files=False)
+                line1 = " | ".join(line1_parts)
 
-        if ctx['total_messages'] > 0:
-            line1_parts.append(f"{Colors.BRIGHT_CYAN}💬 {ctx['total_messages']}{Colors.RESET}")
+                if get_display_width(line1) <= terminal_width:
+                    lines.append(line1)
+                else:
+                    # Step 4: ディレクトリ名を短縮
+                    line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
+                                                    include_errors=False, include_task=False,
+                                                    include_active_files=False, max_dir_len=12)
+                    line1 = " | ".join(line1_parts)
 
-        if ctx['lines_added'] > 0 or ctx['lines_removed'] > 0:
-            line1_parts.append(f"{Colors.BRIGHT_GREEN}+{ctx['lines_added']}{Colors.RESET}/{Colors.BRIGHT_RED}-{ctx['lines_removed']}{Colors.RESET}")
+                    if get_display_width(line1) <= terminal_width:
+                        lines.append(line1)
+                    else:
+                        # Step 5: ブランチ名を短縮
+                        line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
+                                                        include_errors=False, include_task=False,
+                                                        include_active_files=False,
+                                                        max_branch_len=15, max_dir_len=12)
+                        line1 = " | ".join(line1_parts)
 
-        if ctx['error_count'] > 0:
-            line1_parts.append(f"{Colors.BRIGHT_RED}⚠️ {ctx['error_count']}{Colors.RESET}")
+                        if get_display_width(line1) <= terminal_width:
+                            lines.append(line1)
+                        else:
+                            # Step 6: モデル名を短縮
+                            line1_parts = build_line1_parts(ctx, shorten_model=True,
+                                                            include_cost=False, include_lines=False,
+                                                            include_errors=False, include_task=False,
+                                                            include_active_files=False,
+                                                            max_branch_len=15, max_dir_len=12)
+                            line1 = " | ".join(line1_parts)
 
-        if ctx['task_status'] != 'idle':
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}⚡ {ctx['task_status']}{Colors.RESET}")
-
-        if ctx['session_cost'] > 0:
-            cost_color = Colors.BRIGHT_YELLOW if ctx['session_cost'] > 10 else Colors.BRIGHT_WHITE
-            line1_parts.append(f"{cost_color}💰 {format_cost(ctx['session_cost'])}{Colors.RESET}")
-
-        lines.append(" | ".join(line1_parts))
+                            if get_display_width(line1) <= terminal_width:
+                                lines.append(line1)
+                            else:
+                                # Step 7: さらにブランチ名を短縮
+                                line1_parts = build_line1_parts(ctx, shorten_model=True,
+                                                                include_cost=False, include_lines=False,
+                                                                include_errors=False, include_task=False,
+                                                                include_active_files=False,
+                                                                include_messages=False,
+                                                                max_branch_len=10, max_dir_len=10)
+                                lines.append(" | ".join(line1_parts))
 
     # Line 2: Compact tokens
     if ctx['show_line2']:
@@ -1726,46 +1801,6 @@ def format_output_tight(ctx):
 
     return lines
 
-def format_output_minimal(ctx):
-    """Minimal mode (< 45 chars): 4行維持・最小限
-
-    Example:
-    Son4 main
-    C: ████ 58%
-    S: ██░░ 25%
-    B: ▁▂▃▄ 14M
-    """
-    lines = []
-
-    # Line 1
-    if ctx['show_line1']:
-        short_model = shorten_model_name(ctx['model'])
-        line1 = f"{Colors.BRIGHT_YELLOW}{short_model}{Colors.RESET}"
-        if ctx['git_branch']:
-            line1 += f" {Colors.BRIGHT_GREEN}{ctx['git_branch']}{Colors.RESET}"
-        lines.append(line1)
-
-    # Line 2
-    if ctx['show_line2']:
-        percentage = ctx['percentage']
-        percentage_color = get_percentage_color(percentage)
-        line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=4)} {percentage_color}{percentage}%{Colors.RESET}"
-        lines.append(line2)
-
-    # Line 3
-    if ctx['show_line3'] and ctx['session_duration']:
-        line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=4)} {Colors.BRIGHT_WHITE}{int(ctx['block_progress'])}%{Colors.RESET}"
-        lines.append(line3)
-
-    # Line 4
-    if ctx['show_line4'] and ctx['burn_timeline']:
-        sparkline = create_sparkline(ctx['burn_timeline'], width=4)
-        tokens_display = format_token_count_short(ctx['block_tokens'])
-        line4 = f"{Colors.BRIGHT_CYAN}B:{Colors.RESET} {sparkline} {Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}"
-        lines.append(line4)
-
-    return lines
-
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
@@ -1885,8 +1920,7 @@ def main():
                 # 5時間ブロックを検出
                 try:
                     blocks = detect_five_hour_blocks(all_messages)
-                except Exception as e:
-                    print(f"DEBUG: Error in detect_five_hour_blocks: {e}", file=sys.stderr)
+                except Exception:
                     blocks = []
                 
                 # 現在のセッションが含まれるブロックを特定
@@ -2013,13 +2047,13 @@ def main():
 
         # 環境変数で強制モード指定（テスト/デバッグ用）
         forced_mode = os.environ.get('STATUSLINE_DISPLAY_MODE')
-        if forced_mode in ('full', 'compact', 'tight', 'minimal'):
+        if forced_mode in ('full', 'compact', 'tight'):
             display_mode = forced_mode
 
         # 従来の環境変数（後方互換性）
         output_mode = os.environ.get('STATUSLINE_MODE', 'multi')
         if output_mode == 'single':
-            display_mode = 'minimal'
+            display_mode = 'tight'
 
         # Calculate common values
         total_messages = user_messages + assistant_messages
@@ -2102,13 +2136,11 @@ def main():
 
         # Select formatter based on display mode
         if display_mode == 'full':
-            lines = format_output_full(ctx)
+            lines = format_output_full(ctx, terminal_width)
         elif display_mode == 'compact':
             lines = format_output_compact(ctx)
-        elif display_mode == 'tight':
+        else:  # tight
             lines = format_output_tight(ctx)
-        else:  # minimal
-            lines = format_output_minimal(ctx)
 
         # Output lines
         for line in lines:
@@ -2267,9 +2299,8 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None, 
         
         return (f"{Colors.BRIGHT_CYAN}Burn:   {Colors.RESET} {sparkline} "
                 f"{Colors.BRIGHT_WHITE}{tokens_formatted} token(w/cache){Colors.RESET}, Rate: {burn_rate_formatted} t/m")
-        
-    except Exception as e:
-        print(f"DEBUG: Burn line error: {e}", file=sys.stderr)
+
+    except Exception:
         return f"{Colors.BRIGHT_CYAN}Burn:   {Colors.RESET} {Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
 if __name__ == "__main__":
     main()
