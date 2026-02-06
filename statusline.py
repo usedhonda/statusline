@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 
-# OUTPUT CONFIGURATION - CHOOSE WHICH LINES TO DISPLAY
+# ============================================
+# 📝 CONFIGURATION - Edit these values
+# ============================================
 
-# Set which lines to display (True = show, False = hide)
-SHOW_LINE1 = True   # [Sonnet 4] | 🌿 main M2 +1 | 📁 statusline | 💬 254
-SHOW_LINE2 = True   # Compact: 91.8K/160.0K ████████▒▒▒▒▒▒▒ 58% ♻️ 99% cached 💰 $0.031
-SHOW_LINE3 = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒▒▒▒▒ 25% 09:15 (08:00 to 13:00)
-SHOW_LINE4 = True   # Burn: 14.0M (Rate: 321K t/m) ▁▁▂▃▄▅▆▇█▇▆▅▄▃▂▁▁▁▂▃
+# Display settings (True = show, False = hide)
+SHOW_LINE1    = True   # [Sonnet 4] | 🌿 main M2 | 📁 project | 💬 254
+SHOW_LINE2    = True   # Compact: 91.8K/160.0K ████████▒▒▒ 58%
+SHOW_LINE3    = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒ 25%
+SHOW_LINE4    = True   # Burn: 14.0M ▁▂▃▄▅▆▇█▇▆▅▄▃▂▁
+SHOW_SCHEDULE = True   # 📅 14:00 Meeting (in 30m) - swaps with Line1
 
-# Alternative quick configurations (uncomment one to use):
-# SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = True, True, False, False   # Only lines 1-2
-# SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = False, True, True, True    # Skip line 1
-# SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4 = False, False, True, True   # Only lines 3-4
+# Schedule settings (requires `gog` command)
+SCHEDULE_SWAP_INTERVAL = 1    # Swap interval (seconds)
+SCHEDULE_CACHE_TTL     = 300  # Cache time (seconds)
+
+# ============================================
+# Internal (don't edit below)
+# ============================================
+SCHEDULE_CACHE_FILE = None
 
 # IMPORTS AND SYSTEM CODE
 
@@ -1349,6 +1356,271 @@ def get_time_info():
     now = datetime.now()
     return now.strftime("%H:%M")
 
+# ========================================
+# SCHEDULE DISPLAY FUNCTIONS (gog integration)
+# ========================================
+
+def get_schedule_cache_file():
+    """Get schedule cache file path (lazy initialization)"""
+    global SCHEDULE_CACHE_FILE
+    if SCHEDULE_CACHE_FILE is None:
+        SCHEDULE_CACHE_FILE = Path.home() / '.claude' / '.schedule_cache.json'
+    return SCHEDULE_CACHE_FILE
+
+def parse_event_time(event):
+    """Parse event time from gog JSON format
+
+    Args:
+        event: dict with 'start' containing either 'dateTime' or 'date'
+
+    Returns:
+        tuple: (datetime, is_all_day)
+    """
+    start = event.get('start', {})
+
+    # Check for all-day event (date field instead of dateTime)
+    if 'date' in start:
+        # All-day event: parse date only
+        date_str = start['date']
+        dt = datetime.strptime(date_str, '%Y-%m-%d')
+        # Set to start of day in local timezone
+        return dt.replace(hour=0, minute=0, second=0), True
+
+    # Regular event with dateTime
+    datetime_str = start.get('dateTime', '')
+    if not datetime_str:
+        return None, False
+
+    # Parse RFC3339 format with timezone
+    dt = datetime.fromisoformat(datetime_str)
+    # Convert to local timezone
+    return dt.astimezone(), False
+
+def get_schedule_color(minutes_until):
+    """Return color based on time until event
+
+    Args:
+        minutes_until: minutes until event starts (negative = ongoing)
+
+    Returns:
+        str: ANSI color code
+    """
+    if minutes_until <= 0:
+        return Colors.BRIGHT_GREEN  # Ongoing
+    elif minutes_until <= 10:
+        return Colors.BRIGHT_RED    # Within 10 minutes (urgent)
+    elif minutes_until <= 30:
+        return Colors.BRIGHT_YELLOW # Within 30 minutes
+    else:
+        return Colors.BRIGHT_WHITE  # Normal
+
+def fetch_from_gog():
+    """Fetch next timed event from gog command (skip all-day events)
+
+    Returns:
+        dict or None: Event data or None if unavailable
+    """
+    try:
+        # Fetch multiple events to skip all-day ones
+        result = subprocess.run(
+            ['gog', 'calendar', 'events', '--days=1', '--max=10', '--json'],
+            capture_output=True, text=True, timeout=10
+        )
+
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+        events = data.get('events', [])
+
+        if not events:
+            return None
+
+        # Find first timed event (skip all-day events)
+        for event in events:
+            start = event.get('start', {})
+            # All-day events have 'date' instead of 'dateTime'
+            if 'dateTime' in start:
+                return event
+
+        # No timed events found
+        return None
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+def load_schedule_cache():
+    """Load schedule cache from file
+
+    Returns:
+        dict or None: Cache data with 'timestamp' and 'data' keys
+    """
+    cache_file = get_schedule_cache_file()
+    try:
+        if cache_file.exists():
+            with open(cache_file, 'r') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        pass
+    return None
+
+def save_schedule_cache(event_data):
+    """Save event data to cache file
+
+    Args:
+        event_data: Event dict to cache
+    """
+    cache_file = get_schedule_cache_file()
+    try:
+        cache = {
+            'timestamp': time.time(),
+            'data': event_data
+        }
+        with open(cache_file, 'w') as f:
+            json.dump(cache, f)
+    except IOError:
+        pass
+
+def get_next_event():
+    """Get next calendar event with caching
+
+    Returns:
+        dict or None: {'time': '14:00', 'summary': '...', 'minutes_until': 30, 'is_all_day': False}
+    """
+    # Check cache first
+    cache = load_schedule_cache()
+    if cache and (time.time() - cache.get('timestamp', 0)) < SCHEDULE_CACHE_TTL:
+        event = cache.get('data')
+        if event:
+            # Re-calculate minutes_until for cached event
+            dt, is_all_day = parse_event_time(event)
+            if dt:
+                now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                delta = dt - now
+                minutes_until = int(delta.total_seconds() / 60)
+
+                # Skip past events
+                end = event.get('end', {})
+                end_dt = None
+                if 'dateTime' in end:
+                    end_dt = datetime.fromisoformat(end['dateTime']).astimezone()
+                elif 'date' in end:
+                    end_dt = datetime.strptime(end['date'], '%Y-%m-%d')
+
+                if end_dt and now > end_dt:
+                    # Event has ended, invalidate cache
+                    pass
+                else:
+                    return {
+                        'time': dt.strftime('%H:%M') if not is_all_day else None,
+                        'summary': event.get('summary', 'Untitled'),
+                        'minutes_until': minutes_until,
+                        'is_all_day': is_all_day
+                    }
+
+    # Fetch fresh data
+    event = fetch_from_gog()
+    save_schedule_cache(event)
+
+    if not event:
+        return None
+
+    dt, is_all_day = parse_event_time(event)
+    if not dt:
+        return None
+
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    delta = dt - now
+    minutes_until = int(delta.total_seconds() / 60)
+
+    # Check if event has ended
+    end = event.get('end', {})
+    end_dt = None
+    if 'dateTime' in end:
+        end_dt = datetime.fromisoformat(end['dateTime']).astimezone()
+    elif 'date' in end:
+        end_dt = datetime.strptime(end['date'], '%Y-%m-%d')
+
+    if end_dt and now > end_dt:
+        # Event has ended
+        return None
+
+    return {
+        'time': dt.strftime('%H:%M') if not is_all_day else None,
+        'summary': event.get('summary', 'Untitled'),
+        'minutes_until': minutes_until,
+        'is_all_day': is_all_day
+    }
+
+def format_time_until(minutes):
+    """Format time until event as human-readable string
+
+    Args:
+        minutes: minutes until event (can be negative for ongoing)
+
+    Returns:
+        str: e.g., "(in 30m)", "(in 2h)", "(now)"
+    """
+    if minutes <= 0:
+        return "(now)"
+    elif minutes < 60:
+        return f"(in {minutes}m)"
+    else:
+        hours = minutes // 60
+        mins = minutes % 60
+        if mins > 0:
+            return f"(in {hours}h{mins}m)"
+        else:
+            return f"(in {hours}h)"
+
+def format_schedule_line(event, terminal_width):
+    """Format schedule event as status line
+
+    Args:
+        event: dict with 'time', 'summary', 'minutes_until', 'is_all_day'
+        terminal_width: available width for the line
+
+    Returns:
+        str: Formatted schedule line e.g., "📅 14:00 ミーティング (in 30m)"
+    """
+    if not event:
+        return None
+
+    color = get_schedule_color(event['minutes_until'])
+    time_until = format_time_until(event['minutes_until'])
+
+    if event['is_all_day']:
+        time_part = "終日"
+    else:
+        time_part = event['time']
+
+    summary = event['summary']
+
+    # Build the line: 📅 14:00 summary (in Xm)
+    prefix = f"📅 {time_part} "
+    suffix = f" {time_until}"
+
+    # Calculate available space for summary
+    prefix_width = get_display_width(prefix)
+    suffix_width = get_display_width(suffix)
+    available = terminal_width - prefix_width - suffix_width - 2  # margin
+
+    # Truncate summary if needed
+    summary_width = get_display_width(summary)
+    if summary_width > available and available > 3:
+        # Truncate with ellipsis
+        truncated = ""
+        current_width = 0
+        for char in summary:
+            char_width = 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
+            if current_width + char_width + 1 > available:  # +1 for ellipsis
+                break
+            truncated += char
+            current_width += char_width
+        summary = truncated + "…"
+
+    return f"{color}📅 {time_part} {summary} {time_until}{Colors.RESET}"
+
 # REMOVED: detect_session_boundaries() - unused function (replaced by 5-hour block system)
 
 def detect_active_periods(messages, idle_threshold=5*60):
@@ -1468,18 +1740,30 @@ def format_cost(cost):
 # RESPONSIVE DISPLAY MODE FORMATTERS
 # ========================================
 
-def shorten_model_name(model):
-    """モデル名を短縮形に変換"""
-    model_lower = model.lower()
-    if "opus" in model_lower:
-        if "4.1" in model or "4.5" in model_lower:
-            return "Op4.5" if "4.5" in model_lower else "Op4.1"
-        return "Op4"
-    elif "sonnet" in model_lower:
-        return "Son4"
-    elif "haiku" in model_lower:
-        return "Hai"
-    return model[:6]
+def shorten_model_name(model, tight=False):
+    """モデル名を短縮形に変換
+
+    tight=False: "Claude " 除去のみ → "Opus 4.6"
+    tight=True: ファミリー名も短縮 → "Op4.6"
+    """
+    import re
+    # "Claude " プレフィックスを除去
+    name = re.sub(r'^Claude\s+', '', model, flags=re.IGNORECASE)
+
+    # "3.5 Haiku" → "Haiku 3.5" に正規化（バージョンが前にある場合）
+    m = re.match(r'^([\d.]+)\s+(Haiku|Sonnet|Opus)', name, re.IGNORECASE)
+    if m:
+        name = f"{m.group(2)} {m.group(1)}"
+
+    if tight:
+        # ファミリー名を短縮
+        name = re.sub(r'Opus', 'Op', name, flags=re.IGNORECASE)
+        name = re.sub(r'Sonnet', 'Son', name, flags=re.IGNORECASE)
+        name = re.sub(r'Haiku', 'Hai', name, flags=re.IGNORECASE)
+        # スペース除去 → "Op4.6", "Son4.5", "Hai3.5"
+        name = name.replace(' ', '')
+
+    return name
 
 def truncate_text(text, max_len):
     """テキストを最大長で切り詰め、...を追加"""
@@ -1569,57 +1853,75 @@ def format_output_full(ctx, terminal_width=None):
     lines = []
 
     # Line 1: Model/Git/Dir/Messages (with dynamic length adjustment)
+    # Or schedule display if --schedule is enabled (time-based swap)
     if ctx['show_line1']:
         if terminal_width is None:
             terminal_width = get_terminal_width()
 
-        # Step 1: 全要素で構築
-        line1_parts = build_line1_parts(ctx)
-        line1 = " | ".join(line1_parts)
+        # Check if we should show schedule line (swap every SCHEDULE_SWAP_INTERVAL seconds)
+        show_schedule_now = False
+        schedule_line = None
+        if ctx.get('show_schedule'):
+            # Time-based swap: 0-4s = normal, 5-9s = schedule
+            is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
+            if is_schedule_turn:
+                event = get_next_event()
+                if event:
+                    schedule_line = format_schedule_line(event, terminal_width)
+                    if schedule_line:
+                        show_schedule_now = True
 
-        if get_display_width(line1) <= terminal_width:
-            lines.append(line1)
+        if show_schedule_now and schedule_line:
+            lines.append(schedule_line)
         else:
-            # Step 2: 低優先度要素を削除（コスト、行変更、エラー）
-            line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                            include_errors=False)
+            # Normal Line 1: Model/Git/Dir/Messages
+            # Step 1: 全要素で構築
+            line1_parts = build_line1_parts(ctx)
             line1 = " | ".join(line1_parts)
 
             if get_display_width(line1) <= terminal_width:
                 lines.append(line1)
             else:
-                # Step 3: アクティブファイルも削除
+                # Step 2: 低優先度要素を削除（コスト、行変更、エラー）
                 line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                                include_errors=False, include_active_files=False)
+                                                include_errors=False)
                 line1 = " | ".join(line1_parts)
 
                 if get_display_width(line1) <= terminal_width:
                     lines.append(line1)
                 else:
-                    # Step 4: ディレクトリ名を短縮
+                    # Step 3: アクティブファイルも削除
                     line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                                    include_errors=False, include_active_files=False,
-                                                    max_dir_len=12)
+                                                    include_errors=False, include_active_files=False)
                     line1 = " | ".join(line1_parts)
 
                     if get_display_width(line1) <= terminal_width:
                         lines.append(line1)
                     else:
-                        # Step 5: ブランチ名をさらに短縮
+                        # Step 4: ディレクトリ名を短縮
                         line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
                                                         include_errors=False, include_active_files=False,
-                                                        max_branch_len=12, max_dir_len=12)
+                                                        max_dir_len=12)
                         line1 = " | ".join(line1_parts)
 
                         if get_display_width(line1) <= terminal_width:
                             lines.append(line1)
                         else:
-                            # Step 6: メッセージも削除、最小構成
+                            # Step 5: ブランチ名をさらに短縮
                             line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
                                                             include_errors=False, include_active_files=False,
-                                                            include_messages=False,
-                                                            max_branch_len=10, max_dir_len=10)
-                            lines.append(" | ".join(line1_parts))
+                                                            max_branch_len=12, max_dir_len=12)
+                            line1 = " | ".join(line1_parts)
+
+                            if get_display_width(line1) <= terminal_width:
+                                lines.append(line1)
+                            else:
+                                # Step 6: メッセージも削除、最小構成
+                                line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
+                                                                include_errors=False, include_active_files=False,
+                                                                include_messages=False,
+                                                                max_branch_len=10, max_dir_len=10)
+                                lines.append(" | ".join(line1_parts))
 
     # Line 2: Compact tokens
     if ctx['show_line2']:
@@ -1730,7 +2032,7 @@ def format_output_tight(ctx):
     """Tight mode (45-54 chars): 4行維持・さらに短縮
 
     Example:
-    [Son4] main M1+5
+    [Son4.5] main M1+5
     C: ████████ [58%] 91K
     S: ███░░░░░ [25%] 1h15m
     B: ▁▂▃▄▅▆▇█ 14M
@@ -1740,7 +2042,7 @@ def format_output_tight(ctx):
     # Line 1: Model, branch (ultra short)
     if ctx['show_line1']:
         line1_parts = []
-        short_model = shorten_model_name(ctx['model'])
+        short_model = shorten_model_name(ctx['model'], tight=True)
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
         if ctx['git_branch']:
@@ -1781,10 +2083,11 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
     parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
+    parser.add_argument('--schedule', action='store_true', help='Show next calendar event (requires gog command)')
     parser.add_argument('--help', action='store_true', help='Show help')
 
     # Initialize args with default values first
-    args = argparse.Namespace(show=None, help=False)
+    args = argparse.Namespace(show=None, schedule=False, help=False)
 
     # Parse arguments, but don't exit on failure (for stdin compatibility)
     try:
@@ -1806,6 +2109,7 @@ def main():
         print("  --show 1,2,3,4    Show specific lines (comma-separated)")
         print("  --show simple     Show compact and session lines (2,3)")
         print("  --show all        Show all lines")
+        print("  --schedule        Show next calendar event (swaps with Line 1)")
         print("  --help            Show this help")
         return
     
@@ -2108,6 +2412,7 @@ def main():
             'show_line2': SHOW_LINE2,
             'show_line3': SHOW_LINE3,
             'show_line4': SHOW_LINE4,
+            'show_schedule': SHOW_SCHEDULE or args.schedule,
         }
 
         # Select formatter based on display mode
