@@ -141,11 +141,15 @@ def get_terminal_width():
             except ValueError:
                 pass
 
-        # 2. tmux環境の場合、pane幅を取得
+        # 2. tmux環境の場合、pane幅を取得（-t $TMUX_PANE で正しいペインを指定）
         if 'TMUX' in os.environ:
             try:
+                pane_id = os.environ.get('TMUX_PANE', '')
+                cmd = ['tmux', 'display-message', '-p', '#{pane_width}']
+                if pane_id:
+                    cmd = ['tmux', 'display-message', '-t', pane_id, '-p', '#{pane_width}']
                 result = subprocess.run(
-                    ['tmux', 'display-message', '-p', '#{pane_width}'],
+                    cmd,
                     capture_output=True, text=True, timeout=1
                 )
                 if result.returncode == 0 and result.stdout.strip().isdigit():
@@ -174,6 +178,58 @@ def get_terminal_width():
         pass
 
     return 80  # デフォルト
+
+def get_terminal_height():
+    """ターミナル高さを取得（安全なフォールバック付き）
+
+    優先順位:
+    1. LINES環境変数（明示的指定）
+    2. tmux pane高さ（tmux環境の場合）
+    3. tput lines（TTY不要）
+    4. shutil.get_terminal_size()（TTY必要）
+    5. デフォルト4
+    """
+    try:
+        if 'LINES' in os.environ:
+            try:
+                return int(os.environ['LINES'])
+            except ValueError:
+                pass
+
+        if 'TMUX' in os.environ:
+            try:
+                pane_id = os.environ.get('TMUX_PANE', '')
+                cmd = ['tmux', 'display-message', '-p', '#{pane_height}']
+                if pane_id:
+                    cmd = ['tmux', 'display-message', '-t', pane_id, '-p', '#{pane_height}']
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip().isdigit():
+                    return int(result.stdout.strip())
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+
+        try:
+            result = subprocess.run(
+                ['tput', 'lines'],
+                capture_output=True, text=True, timeout=1
+            )
+            if result.returncode == 0 and result.stdout.strip().isdigit():
+                return int(result.stdout.strip())
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        if sys.stdout.isatty():
+            size = shutil.get_terminal_size()
+            if size.lines > 0:
+                return size.lines
+
+    except (OSError, AttributeError):
+        pass
+
+    return 4  # デフォルト
 
 def get_display_mode(width):
     """ターミナル幅からモードを決定
@@ -1837,6 +1893,39 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     return parts
 
+def get_dead_agents():
+    """Read dead agents file written by team-watcher"""
+    try:
+        with open('/tmp/tproj-dead-agents', 'r') as f:
+            agents = [line.strip() for line in f if line.strip()]
+            return agents
+    except (FileNotFoundError, PermissionError):
+        return []
+
+def format_agent_line(ctx, agent_name):
+    """Agent Teams teammate: single-line status"""
+    parts = []
+
+    # Agent name
+    parts.append(f"{Colors.BRIGHT_MAGENTA}\U0001F916 {agent_name}{Colors.RESET}")
+
+    # Model
+    model_name = shorten_model_name(ctx['model'])
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
+
+    # Messages
+    if ctx['total_messages'] > 0:
+        parts.append(f"{Colors.BRIGHT_CYAN}\U0001F4AC {ctx['total_messages']}{Colors.RESET}")
+
+    # Compact percentage
+    parts.append(f"{ctx['percentage']}%")
+
+    # Cost
+    if ctx['session_cost'] > 0:
+        parts.append(f"\U0001F4B0 ${ctx['session_cost']:.2f}")
+
+    return " | ".join(parts)
+
 def format_output_full(ctx, terminal_width=None):
     """Full mode (>= 68 chars): 4行・全項目・装飾あり
 
@@ -2079,6 +2168,31 @@ def format_output_tight(ctx):
 
     return lines
 
+def format_output_minimal(ctx, terminal_width):
+    """Minimal 1-line mode for short terminal heights (<= 8 lines)
+
+    Example:
+    Cpt58% 91K/160K ♻99%
+    """
+    percentage = ctx['percentage']
+    compact_display = format_token_count_short(ctx['compact_tokens'])
+    threshold_display = format_token_count_short(ctx['compaction_threshold'])
+    percentage_color = get_percentage_color(percentage)
+
+    parts = []
+    parts.append(f"{percentage_color}Cpt{percentage}%{Colors.RESET}")
+    parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}")
+
+    line = " ".join(parts)
+
+    # Add cache ratio if it fits
+    if ctx['cache_ratio'] >= 50:
+        cache_part = f" {Colors.BRIGHT_GREEN}\u267b{int(ctx['cache_ratio'])}%{Colors.RESET}"
+        if get_display_width(line + cache_part) <= terminal_width:
+            line += cache_part
+
+    return [line]
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
@@ -2134,7 +2248,10 @@ def main():
             except ValueError:
                 print("Error: Invalid --show format. Use: 1,2,3,4, simple, or all", file=sys.stderr)
                 return
-    
+
+    # Auto-detect Agent Teams teammate
+    agent_name = os.environ.get('CLAUDE_CODE_AGENT_NAME') if not args.show else None
+
     try:
         # Read JSON from stdin
         input_data = sys.stdin.read()
@@ -2415,13 +2532,27 @@ def main():
             'show_schedule': SHOW_SCHEDULE or args.schedule,
         }
 
-        # Select formatter based on display mode
-        if display_mode == 'full':
+        # Select formatter based on display mode and terminal height
+        terminal_height = get_terminal_height()
+
+        if agent_name:
+            lines = [format_agent_line(ctx, agent_name)]
+        elif not args.show and terminal_height <= 8:
+            # Short terminal: 1-line minimal mode
+            lines = format_output_minimal(ctx, terminal_width)
+        elif display_mode == 'full':
             lines = format_output_full(ctx, terminal_width)
         elif display_mode == 'compact':
             lines = format_output_compact(ctx)
         else:  # tight
             lines = format_output_tight(ctx)
+
+        # Prepend dead agent warning if any
+        dead_agents = get_dead_agents()
+        if dead_agents and not agent_name:  # Don't show on agent panes themselves
+            dead_names = ", ".join(dead_agents)
+            warning = f"{Colors.BRIGHT_RED}\u26a0\ufe0f DEAD: {dead_names}{Colors.RESET}"
+            lines.insert(0, warning)
 
         # Output lines
         for line in lines:
