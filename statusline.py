@@ -120,116 +120,156 @@ def get_display_width(text):
         width += 2 if ea in ('W', 'F') else 1
     return width
 
-def get_terminal_width():
-    """ターミナル幅を取得（安全なフォールバック付き）
+def get_terminal_size():
+    """ターミナルサイズ(幅, 高さ)を同時取得
 
     優先順位:
-    1. COLUMNS環境変数（明示的指定）
-    2. tmux pane幅（tmux環境の場合）
-    3. tput cols（TTY不要）
-    4. shutil.get_terminal_size()（TTY必要）
-    5. デフォルト80
+    1. tmux -t $TMUX_PANE (幅・高さ同時、最も正確)
+    2. shutil.get_terminal_size() (ioctl経由、TTY必要)
+    3. tput cols/lines (TERM依存)
+    4. COLUMNS/LINES 環境変数 (override用)
+    5. デフォルト (80, 24)
+
+    COLUMNS/LINESは部分override対応: COLUMNSだけ設定されていれば幅のみ上書き。
 
     Returns:
-        int: ターミナル幅（右端1文字問題対策で-1）
+        tuple[int, int]: (幅, 高さ)  ※幅は右端問題対策で-1済み、最小10
     """
+    raw_width = 0
+    raw_height = 0
+
     try:
-        # 1. 環境変数COLUMNSを最優先（テスト用・明示的指定）
+        # 1. tmux: 1コマンドで幅・高さ同時取得（最も正確）
+        if 'TMUX' in os.environ:
+            try:
+                pane_id = os.environ.get('TMUX_PANE', '')
+                cmd = ['tmux', 'display-message', '-p', '#{pane_width} #{pane_height}']
+                if pane_id:
+                    cmd = ['tmux', 'display-message', '-t', pane_id, '-p', '#{pane_width} #{pane_height}']
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=1
+                )
+                if result.returncode == 0:
+                    parts = result.stdout.strip().split()
+                    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                        raw_width = int(parts[0])
+                        raw_height = int(parts[1])
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+
+        # 2. shutil.get_terminal_size() (ioctl経由)
+        if raw_width == 0 or raw_height == 0:
+            try:
+                if sys.stdout.isatty():
+                    size = shutil.get_terminal_size()
+                    if size.columns > 0 and raw_width == 0:
+                        raw_width = size.columns
+                    if size.lines > 0 and raw_height == 0:
+                        raw_height = size.lines
+            except (OSError, AttributeError):
+                pass
+
+        # 3. tput cols/lines (TERM依存)
+        if raw_width == 0:
+            try:
+                result = subprocess.run(
+                    ['tput', 'cols'],
+                    capture_output=True, text=True, timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip().isdigit():
+                    raw_width = int(result.stdout.strip())
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+        if raw_height == 0:
+            try:
+                result = subprocess.run(
+                    ['tput', 'lines'],
+                    capture_output=True, text=True, timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip().isdigit():
+                    raw_height = int(result.stdout.strip())
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+
+        # 4. COLUMNS/LINES 環境変数 (override: 個別上書き対応)
         if 'COLUMNS' in os.environ:
             try:
-                return int(os.environ['COLUMNS']) - 1
+                raw_width = int(os.environ['COLUMNS'])
             except ValueError:
                 pass
-
-        # 2. tmux環境の場合、pane幅を取得（-t $TMUX_PANE で正しいペインを指定）
-        if 'TMUX' in os.environ:
-            try:
-                pane_id = os.environ.get('TMUX_PANE', '')
-                cmd = ['tmux', 'display-message', '-p', '#{pane_width}']
-                if pane_id:
-                    cmd = ['tmux', 'display-message', '-t', pane_id, '-p', '#{pane_width}']
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True, text=True, timeout=1
-                )
-                if result.returncode == 0 and result.stdout.strip().isdigit():
-                    return int(result.stdout.strip()) - 1
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                pass
-
-        # 3. tput cols（TTY不要、$TERMから取得）
-        try:
-            result = subprocess.run(
-                ['tput', 'cols'],
-                capture_output=True, text=True, timeout=1
-            )
-            if result.returncode == 0 and result.stdout.strip().isdigit():
-                return int(result.stdout.strip()) - 1
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-        # 4. shutil.get_terminal_size()（TTY必要）
-        if sys.stdout.isatty():
-            size = shutil.get_terminal_size()
-            if size.columns > 0:
-                return size.columns - 1
-
-    except (OSError, AttributeError):
-        pass
-
-    return 80  # デフォルト
-
-def get_terminal_height():
-    """ターミナル高さを取得（安全なフォールバック付き）
-
-    優先順位:
-    1. LINES環境変数（明示的指定）
-    2. tmux pane高さ（tmux環境の場合）
-    3. tput lines（TTY不要）
-    4. shutil.get_terminal_size()（TTY必要）
-    5. デフォルト4
-    """
-    try:
         if 'LINES' in os.environ:
             try:
-                return int(os.environ['LINES'])
+                raw_height = int(os.environ['LINES'])
             except ValueError:
                 pass
-
-        if 'TMUX' in os.environ:
-            try:
-                pane_id = os.environ.get('TMUX_PANE', '')
-                cmd = ['tmux', 'display-message', '-p', '#{pane_height}']
-                if pane_id:
-                    cmd = ['tmux', 'display-message', '-t', pane_id, '-p', '#{pane_height}']
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True, text=True, timeout=1
-                )
-                if result.returncode == 0 and result.stdout.strip().isdigit():
-                    return int(result.stdout.strip())
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                pass
-
-        try:
-            result = subprocess.run(
-                ['tput', 'lines'],
-                capture_output=True, text=True, timeout=1
-            )
-            if result.returncode == 0 and result.stdout.strip().isdigit():
-                return int(result.stdout.strip())
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-        if sys.stdout.isatty():
-            size = shutil.get_terminal_size()
-            if size.lines > 0:
-                return size.lines
 
     except (OSError, AttributeError):
         pass
 
-    return 4  # デフォルト
+    # デフォルト値
+    if raw_width == 0:
+        raw_width = 80
+    if raw_height == 0:
+        raw_height = 24
+
+    # clamp: 幅は-1して最小10、高さは最小1
+    width = max(10, raw_width - 1)
+    height = max(1, raw_height)
+
+    return width, height
+
+
+def get_terminal_width():
+    """後方互換ラッパー"""
+    w, _ = get_terminal_size()
+    return w
+
+
+def get_terminal_height():
+    """後方互換ラッパー"""
+    _, h = get_terminal_size()
+    return h
+
+def get_height_mode(height):
+    """高さからモードを判定（ヒステリシス付き）
+
+    モードフラップ防止:
+    - minimal -> normal: 高さ >= 10 で切替（余裕を持たせる）
+    - normal -> minimal: 高さ <= 7 で切替（すぐには戻さない）
+    - 8, 9 は前回モード維持（デッドゾーン）
+
+    ファイルが存在しない場合は閾値 8 で従来通り判定（初回互換）。
+
+    Returns: 'minimal' or 'normal'
+    """
+    state_file = Path.home() / '.claude' / 'statusline-height-mode.txt'
+    prev_mode = None
+    try:
+        prev_mode = state_file.read_text().strip()
+        if prev_mode not in ('minimal', 'normal'):
+            prev_mode = None
+    except (FileNotFoundError, OSError):
+        pass
+
+    if prev_mode is None:
+        # 初回: 従来の閾値 8 で判定
+        mode = 'minimal' if height <= 8 else 'normal'
+    elif height >= 10:
+        mode = 'normal'
+    elif height <= 7:
+        mode = 'minimal'
+    else:
+        mode = prev_mode  # 8-9 はデッドゾーン
+
+    if mode != prev_mode:
+        try:
+            state_file.write_text(mode)
+        except OSError:
+            pass
+
+    return mode
+
 
 def get_display_mode(width):
     """ターミナル幅からモードを決定
@@ -1831,7 +1871,8 @@ def truncate_text(text, max_len):
 
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_active_files=True, include_messages=True,
-                      include_lines=True, include_errors=True, include_cost=True):
+                      include_lines=True, include_errors=True, include_cost=True,
+                      tight_model=False):
     """Line 1の各パーツを構築する
 
     Args:
@@ -1843,14 +1884,15 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         include_lines: 行変更数を含めるか
         include_errors: エラー数を含めるか
         include_cost: コストを含めるか
+        tight_model: モデル名を超短縮形式にするか（Op4.6など）
 
     Returns:
         list: Line 1のパーツのリスト
     """
     parts = []
 
-    # Model (always shortened)
-    model_name = shorten_model_name(ctx['model'])
+    # Model (normal or tight)
+    model_name = shorten_model_name(ctx['model'], tight=tight_model)
     parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
 
     # Git branch (no untracked files count)
@@ -1964,8 +2006,8 @@ def format_output_full(ctx, terminal_width=None):
             lines.append(schedule_line)
         else:
             # Normal Line 1: Model/Git/Dir/Messages
-            # Step 1: 全要素で構築
-            line1_parts = build_line1_parts(ctx)
+            # Step 1: 全要素で構築（ブランチ名をやや短めに）
+            line1_parts = build_line1_parts(ctx, max_branch_len=15)
             line1 = " | ".join(line1_parts)
 
             if get_display_width(line1) <= terminal_width:
@@ -1979,18 +2021,22 @@ def format_output_full(ctx, terminal_width=None):
                 if get_display_width(line1) <= terminal_width:
                     lines.append(line1)
                 else:
-                    # Step 3: アクティブファイルも削除
-                    line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                                    include_errors=False, include_active_files=False)
+                    # Step 3: アクティブファイル削除 + モデル名短縮
+                    line1_parts = build_line1_parts(ctx, max_branch_len=15,
+                                                    include_cost=False, include_lines=False,
+                                                    include_errors=False, include_active_files=False,
+                                                    tight_model=True)
                     line1 = " | ".join(line1_parts)
 
                     if get_display_width(line1) <= terminal_width:
                         lines.append(line1)
                     else:
-                        # Step 4: ディレクトリ名を短縮
-                        line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
+                        # Step 4: ブランチ名とディレクトリ名を短縮
+                        line1_parts = build_line1_parts(ctx, max_branch_len=12,
+                                                        include_cost=False, include_lines=False,
                                                         include_errors=False, include_active_files=False,
-                                                        max_dir_len=12)
+                                                        max_dir_len=12,
+                                                        tight_model=True)
                         line1 = " | ".join(line1_parts)
 
                         if get_display_width(line1) <= terminal_width:
@@ -1999,7 +2045,8 @@ def format_output_full(ctx, terminal_width=None):
                             # Step 5: ブランチ名をさらに短縮
                             line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
                                                             include_errors=False, include_active_files=False,
-                                                            max_branch_len=12, max_dir_len=12)
+                                                            max_branch_len=10, max_dir_len=12,
+                                                            tight_model=True)
                             line1 = " | ".join(line1_parts)
 
                             if get_display_width(line1) <= terminal_width:
@@ -2009,7 +2056,8 @@ def format_output_full(ctx, terminal_width=None):
                                 line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
                                                                 include_errors=False, include_active_files=False,
                                                                 include_messages=False,
-                                                                max_branch_len=10, max_dir_len=10)
+                                                                max_branch_len=10, max_dir_len=10,
+                                                                tight_model=True)
                                 lines.append(" | ".join(line1_parts))
 
     # Line 2: Compact tokens
@@ -2070,11 +2118,16 @@ def format_output_compact(ctx):
     # Line 1: Shortened model/git/dir
     if ctx['show_line1']:
         line1_parts = []
-        short_model = shorten_model_name(ctx['model'])
+        # Compact mode: use tight model name for space efficiency
+        short_model = shorten_model_name(ctx['model'], tight=True)
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
         if ctx['git_branch']:
-            git_display = f"{Colors.BRIGHT_GREEN}{ctx['git_branch']}"
+            branch = ctx['git_branch']
+            # Compact mode: truncate long branch names
+            if len(branch) > 10:
+                branch = truncate_text(branch, 10)
+            git_display = f"{Colors.BRIGHT_GREEN}{branch}"
             if ctx['modified_files'] > 0:
                 git_display += f" M{ctx['modified_files']}"
             if ctx['untracked_files'] > 0:
@@ -2135,7 +2188,11 @@ def format_output_tight(ctx):
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
         if ctx['git_branch']:
-            git_display = f"{Colors.BRIGHT_GREEN}{ctx['git_branch']}"
+            branch = ctx['git_branch']
+            # Tight mode: truncate long branch names more aggressively
+            if len(branch) > 10:
+                branch = truncate_text(branch, 10)
+            git_display = f"{Colors.BRIGHT_GREEN}{branch}"
             if ctx['modified_files'] > 0 or ctx['untracked_files'] > 0:
                 git_display += f" M{ctx['modified_files']}+{ctx['untracked_files']}"
             git_display += Colors.RESET
@@ -2438,8 +2495,8 @@ def main():
         # RESPONSIVE DISPLAY MODE SYSTEM
         # ========================================
 
-        # Get terminal width and determine display mode
-        terminal_width = get_terminal_width()
+        # Get terminal size (1 call, width and height together)
+        terminal_width, terminal_height = get_terminal_size()
         display_mode = get_display_mode(terminal_width)
 
         # 環境変数で強制モード指定（テスト/デバッグ用）
@@ -2532,12 +2589,12 @@ def main():
             'show_schedule': SHOW_SCHEDULE or args.schedule,
         }
 
-        # Select formatter based on display mode and terminal height
-        terminal_height = get_terminal_height()
+        # Select formatter based on display mode and terminal height (with hysteresis)
+        height_mode = get_height_mode(terminal_height)
 
         if agent_name:
             lines = [format_agent_line(ctx, agent_name)]
-        elif not args.show and terminal_height <= 8:
+        elif not args.show and height_mode == 'minimal':
             # Short terminal: 1-line minimal mode
             lines = format_output_minimal(ctx, terminal_width)
         elif display_mode == 'full':
