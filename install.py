@@ -5,7 +5,6 @@ This script installs statusline.py and properly configures Claude Code settings.
 """
 
 import json
-import os
 import shutil
 import sys
 from pathlib import Path
