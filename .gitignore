@@ -213,3 +213,11 @@ marimo/_lsp/
 __marimo__/
 .DS_Store
 plans/
+
+# CC persona (auto-generated)
+.persona.md
+
+# Cdx persona (auto-generated)
+.codex/config.toml
+
+AGENTS.md

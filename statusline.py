@@ -31,16 +31,15 @@ import shutil
 import re
 import unicodedata
 from pathlib import Path
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone
 import time
-from collections import defaultdict
 
 # CONSTANTS
 
 # Token compaction threshold - FALLBACK VALUE ONLY
 # Dynamic value is now calculated from API: context_window_size * 0.8
 # This constant is kept for backwards compatibility if API data is unavailable
-COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback)
+COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback). 1M context: 800K
 
 # TWO DISTINCT TOKEN CALCULATION SYSTEMS
 
@@ -53,7 +52,7 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback)
 # Scope: Single conversation, monitors compression timing
 # Calculation: block_stats['total_tokens'] from detect_five_hour_blocks()
 # Display: Compact line (Line 2) - "118.1K/160.0K ████████▒▒▒▒ 74%"
-# Range: 0-200K tokens (until conversation gets compressed)
+# Range: 0 to context_window_size (200K or 1M, until conversation gets compressed)
 # Reset Point: When conversation gets compacted/compressed
 
 # 🕐 SESSION WINDOW SYSTEM (Session Management)
@@ -1337,7 +1336,7 @@ def generate_real_burn_timeline(block_stats, current_block):
     
     try:
         block_start = block_stats['start_time']
-        current_time = datetime.now(timezone.utc).replace(tzinfo=None)  # UTC統一
+        _ = datetime.now(timezone.utc).replace(tzinfo=None)  # UTC統一 (unused, kept for reference)
         
         # 内部処理は全てUTCで統一
         if hasattr(block_start, 'tzinfo') and block_start.tzinfo:
@@ -1401,7 +1400,7 @@ def generate_real_burn_timeline(block_stats, current_block):
         # if segment_info:
         #     print(f"DEBUG: Segment message counts (first 10): {', '.join(segment_info)}", file=sys.stderr)
     
-    except Exception as e:
+    except Exception:
         # import sys
         # print(f"DEBUG: Error in generate_real_burn_timeline: {e}", file=sys.stderr)
         # エラー時は空のタイムラインを返す
@@ -1767,7 +1766,7 @@ def detect_active_periods(messages, idle_threshold=5*60):
 
 # REMOVED: get_time_progress_bar() - unused function (replaced by get_progress_bar)
 
-def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model_name="Unknown"):
+def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model_name="Unknown", model_id=""):
     """Calculate estimated cost based on token usage
     
     Pricing (per million tokens) - Claude 4 models (2025):
@@ -1791,16 +1790,17 @@ def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, mode
     - Cache read: $0.10
     """
     
-    # モデル名からタイプを判定
+    # モデル名またはIDからタイプを判定
     model_lower = model_name.lower()
-    
-    if "haiku" in model_lower:
+    id_lower = model_id.lower() if model_id else ""
+
+    if "haiku" in model_lower or "haiku" in id_lower:
         # Claude 3.5 Haiku pricing (legacy)
         input_rate = 1.00
         output_rate = 5.00
         cache_write_rate = 1.25
         cache_read_rate = 0.10
-    elif "sonnet" in model_lower:
+    elif "sonnet" in model_lower or "sonnet" in id_lower:
         # Claude Sonnet 4 pricing
         input_rate = 3.00
         output_rate = 15.00
@@ -1872,7 +1872,7 @@ def truncate_text(text, max_len):
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_active_files=True, include_messages=True,
                       include_lines=True, include_errors=True, include_cost=True,
-                      tight_model=False):
+                      tight_model=False, include_context_badge=True):
     """Line 1の各パーツを構築する
 
     Args:
@@ -1885,6 +1885,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         include_errors: エラー数を含めるか
         include_cost: コストを含めるか
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
+        include_context_badge: 1Mコンテキストバッジを表示するか
 
     Returns:
         list: Line 1のパーツのリスト
@@ -1894,6 +1895,14 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     # Model (normal or tight)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
     parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
+
+    # Context mode badge (1M only - 200K is default, no badge needed)
+    if include_context_badge and ctx.get('context_size', 200000) > 200000:
+        ctx_label = format_token_count_short(ctx['context_size'])
+        if tight_model:
+            parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
+        else:
+            parts.append(f"{Colors.BRIGHT_MAGENTA}[{ctx_label}ctx]{Colors.RESET}")
 
     # Git branch (no untracked files count)
     if ctx['git_branch']:
@@ -2042,11 +2051,11 @@ def format_output_full(ctx, terminal_width=None):
                         if get_display_width(line1) <= terminal_width:
                             lines.append(line1)
                         else:
-                            # Step 5: ブランチ名をさらに短縮
+                            # Step 5: ブランチ名をさらに短縮 + コンテキストバッジ削除
                             line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
                                                             include_errors=False, include_active_files=False,
                                                             max_branch_len=10, max_dir_len=12,
-                                                            tight_model=True)
+                                                            tight_model=True, include_context_badge=False)
                             line1 = " | ".join(line1_parts)
 
                             if get_display_width(line1) <= terminal_width:
@@ -2057,7 +2066,7 @@ def format_output_full(ctx, terminal_width=None):
                                                                 include_errors=False, include_active_files=False,
                                                                 include_messages=False,
                                                                 max_branch_len=10, max_dir_len=10,
-                                                                tight_model=True)
+                                                                tight_model=True, include_context_badge=False)
                                 lines.append(" | ".join(line1_parts))
 
     # Line 2: Compact tokens
@@ -2078,10 +2087,17 @@ def format_output_full(ctx, terminal_width=None):
         line2_parts.append(compact_label)
         line2_parts.append(get_progress_bar(percentage, width=20))
         line2_parts.append(percentage_display)
-        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(ctx['compaction_threshold'])}{Colors.RESET}")
+        denom = ctx['context_size'] if ctx['percentage_of_full_context'] else ctx['compaction_threshold']
+        line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(denom)}{Colors.RESET}")
 
         if ctx['cache_ratio'] >= 50:
             line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(ctx['cache_ratio'])}% cached{Colors.RESET}")
+
+        if ctx.get('exceeds_200k'):
+            if ctx.get('context_size', 200000) > 200000:
+                line2_parts.append(f"{Colors.BG_YELLOW}{Colors.BOLD} PREMIUM {Colors.RESET}")
+            else:
+                line2_parts.append(f"{Colors.BG_RED}{Colors.BRIGHT_WHITE} >200K {Colors.RESET}")
 
         lines.append(" ".join(line2_parts))
 
@@ -2122,6 +2138,10 @@ def format_output_compact(ctx):
         short_model = shorten_model_name(ctx['model'], tight=True)
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
+        # Context mode badge (1M only)
+        if ctx.get('context_size', 200000) > 200000:
+            line1_parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
+
         if ctx['git_branch']:
             branch = ctx['git_branch']
             # Compact mode: truncate long branch names
@@ -2146,12 +2166,18 @@ def format_output_compact(ctx):
     if ctx['show_line2']:
         percentage = ctx['percentage']
         compact_display = format_token_count_short(ctx['compact_tokens'])
-        threshold_display = format_token_count_short(ctx['compaction_threshold'])
+        denom = ctx['context_size'] if ctx['percentage_of_full_context'] else ctx['compaction_threshold']
+        threshold_display = format_token_count_short(denom)
         percentage_color = get_percentage_color(percentage)
 
         line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=12)} "
         line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} "
         line2 += f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}"
+        if ctx.get('exceeds_200k'):
+            if ctx.get('context_size', 200000) > 200000:
+                line2 += f" {Colors.BG_YELLOW}PRM{Colors.RESET}"
+            else:
+                line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
     # Line 3: Session (shortened)
@@ -2187,6 +2213,10 @@ def format_output_tight(ctx):
         short_model = shorten_model_name(ctx['model'], tight=True)
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
+        # Context mode badge (1M only)
+        if ctx.get('context_size', 200000) > 200000:
+            line1_parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
+
         if ctx['git_branch']:
             branch = ctx['git_branch']
             # Tight mode: truncate long branch names more aggressively
@@ -2208,6 +2238,11 @@ def format_output_tight(ctx):
 
         line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=8)} "
         line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} {Colors.BRIGHT_WHITE}{compact_display}{Colors.RESET}"
+        if ctx.get('exceeds_200k'):
+            if ctx.get('context_size', 200000) > 200000:
+                line2 += f" {Colors.BG_YELLOW}PRM{Colors.RESET}"
+            else:
+                line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
     # Line 3: Session (ultra short)
@@ -2233,10 +2268,16 @@ def format_output_minimal(ctx, terminal_width):
     """
     percentage = ctx['percentage']
     compact_display = format_token_count_short(ctx['compact_tokens'])
-    threshold_display = format_token_count_short(ctx['compaction_threshold'])
+    denom = ctx['context_size'] if ctx['percentage_of_full_context'] else ctx['compaction_threshold']
+    threshold_display = format_token_count_short(denom)
     percentage_color = get_percentage_color(percentage)
 
     parts = []
+    if ctx.get('exceeds_200k'):
+        if ctx.get('context_size', 200000) > 200000:
+            parts.append(f"{Colors.BG_YELLOW}PRM{Colors.RESET}")
+        else:
+            parts.append(f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}>200K{Colors.RESET}")
     parts.append(f"{percentage_color}Cpt{percentage}%{Colors.RESET}")
     parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}")
 
@@ -2306,8 +2347,8 @@ def main():
                 print("Error: Invalid --show format. Use: 1,2,3,4, simple, or all", file=sys.stderr)
                 return
 
-    # Auto-detect Agent Teams teammate
-    agent_name = os.environ.get('CLAUDE_CODE_AGENT_NAME') if not args.show else None
+    # Agent name: resolved after JSON parse (API field > env var)
+    agent_name = None
 
     try:
         # Read JSON from stdin
@@ -2333,6 +2374,17 @@ def main():
         api_lines_added = api_cost.get('total_lines_added', 0)
         api_lines_removed = api_cost.get('total_lines_removed', 0)
 
+        # Session duration from API (fallback when block_stats unavailable)
+        api_total_duration_ms = api_cost.get('total_duration_ms')
+
+        # 200K token exceeded flag
+        api_exceeds_200k = data.get('exceeds_200k_tokens', False)
+
+        # Current usage cache details (fallback for cache ratio)
+        api_current_usage = api_context.get('current_usage', {})
+        api_current_cache_creation = api_current_usage.get('cache_creation_input_tokens', 0)
+        api_current_cache_read = api_current_usage.get('cache_read_input_tokens', 0)
+
         # Context window percentage (v2.1.6+ feature)
         # These are pre-calculated by Claude Code and more accurate than manual calculation
         api_used_percentage = api_context.get('used_percentage')  # v2.1.6+
@@ -2343,10 +2395,15 @@ def main():
 
         # Extract basic values
         model = data.get('model', {}).get('display_name', 'Unknown')
-        
+        model_id = data.get('model', {}).get('id', '')
+
         workspace = data.get('workspace', {})
         current_dir = os.path.basename(workspace.get('current_dir', data.get('cwd', '.')))
         session_id = data.get('session_id') or data.get('sessionId')
+
+        # Agent name: API field > env var > None
+        if not args.show:
+            agent_name = data.get('agent', {}).get('name') or os.environ.get('CLAUDE_CODE_AGENT_NAME')
         
         # Get git info
         git_branch, modified_files, untracked_files = get_git_info(
@@ -2433,7 +2490,7 @@ def main():
                         output_tokens = 0
                         cache_creation = 0
                         cache_read = 0
-            except Exception as e:
+            except Exception:
 
                 # フォールバック: 従来の単一ファイル方式
                 # transcript_pathが提供されていればそれを使用、なければsession_idから探す
@@ -2452,12 +2509,16 @@ def main():
         compact_tokens = total_tokens
         if api_used_percentage is not None:
             # Use Claude Code's pre-calculated percentage (more accurate)
+            # This is relative to full context_window_size (200K or 1M)
             percentage = min(100, round(api_used_percentage))
+            percentage_of_full_context = True
         else:
             # Fallback: manual calculation for older Claude Code versions
             # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
             # NOT current context window usage. Must use transcript-calculated tokens.
+            # This is relative to compaction_threshold (80% of context_window_size)
             percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
+            percentage_of_full_context = False
         
         # Get additional info
         active_files = len(workspace.get('active_files', []))
@@ -2469,8 +2530,11 @@ def main():
         if block_stats:
             # ブロック統計から時間情報を取得
             duration_seconds = block_stats['duration_seconds']
-            
-            # フォーマット済み文字列
+        elif api_total_duration_ms is not None:
+            # Fallback: API-provided total session duration
+            duration_seconds = api_total_duration_ms / 1000.0
+
+        if duration_seconds is not None:
             if duration_seconds < 60:
                 session_duration = f"{int(duration_seconds)}s"
             elif duration_seconds < 3600:
@@ -2485,7 +2549,7 @@ def main():
             session_cost = api_total_cost
         else:
             # Fallback to manual calculation if API cost unavailable
-            session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model)
+            session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model, model_id)
         
         # Format displays - use API tokens for Compact line
         token_display = format_token_count(compact_tokens)
@@ -2512,11 +2576,13 @@ def main():
         # Calculate common values
         total_messages = user_messages + assistant_messages
 
-        # Calculate cache ratio
+        # Calculate cache ratio (with API current_usage fallback)
         cache_ratio = 0
-        if cache_read > 0 or cache_creation > 0:
-            all_tokens = compact_tokens + cache_read + cache_creation
-            cache_ratio = (cache_read / all_tokens * 100) if all_tokens > 0 else 0
+        eff_cache_read = cache_read if cache_read > 0 else api_current_cache_read
+        eff_cache_creation = cache_creation if cache_creation > 0 else api_current_cache_creation
+        if eff_cache_read > 0 or eff_cache_creation > 0:
+            all_tokens = compact_tokens + eff_cache_read + eff_cache_creation
+            cache_ratio = (eff_cache_read / all_tokens * 100) if all_tokens > 0 else 0
 
         # Calculate block progress
         block_progress = 0
@@ -2587,6 +2653,9 @@ def main():
             'show_line3': SHOW_LINE3,
             'show_line4': SHOW_LINE4,
             'show_schedule': SHOW_SCHEDULE or args.schedule,
+            'exceeds_200k': api_exceeds_200k,
+            'context_size': api_context_size,
+            'percentage_of_full_context': percentage_of_full_context,
         }
 
         # Select formatter based on display mode and terminal height (with hysteresis)
