@@ -6,6 +6,8 @@ Enhanced status line for Claude Code showing token usage, session time, and burn
 
 ## What it does
 
+![screenshot](assets/screenshot.png)
+
 ```
 [Sonnet 4.6] | 🌿 main M2 +1 | 📁 statusline | 💬 254 | 💰 $0.031
 Compact: ████████▒▒▒▒▒▒▒▒▒▒▒▒ [58%] 91.8K/200.0K ♻️  99% cached
