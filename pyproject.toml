@@ -1,0 +1,23 @@
+[project]
+name = "statusline"
+requires-python = ">=3.9"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E402",   # module level import not at top (config vars before imports is intentional)
+    "E501",   # line too long (ANSI escape strings are naturally long)
+    "E701",   # multiple statements on one line (compact flag switches are intentional)
+    "E722",   # bare except (used intentionally for resilience)
+    "W291",   # trailing whitespace
+    "W292",   # no newline at end of file
+    "W293",   # blank line contains whitespace
+    "W605",   # invalid escape sequence (ANSI codes)
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
