@@ -1897,11 +1897,8 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     # Model (normal or tight)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
-    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
-
-    # Context mode badge (1M only - 200K is default, no badge needed)
-    if include_context_badge and ctx.get('context_size', 200000) > 200000:
-        parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
+    ctx_suffix = "(1M)" if include_context_badge and ctx.get('context_size', 200000) > 200000 else ""
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
     # Git branch (no untracked files count)
     if ctx['git_branch']:
@@ -2135,11 +2132,8 @@ def format_output_compact(ctx):
         line1_parts = []
         # Compact mode: use tight model name for space efficiency
         short_model = shorten_model_name(ctx['model'], tight=True)
-        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
-
-        # Context mode badge (1M only)
-        if ctx.get('context_size', 200000) > 200000:
-            line1_parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
+        ctx_suffix = "(1M)" if ctx.get('context_size', 200000) > 200000 else ""
+        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
         if ctx['git_branch']:
             branch = ctx['git_branch']
@@ -2210,11 +2204,8 @@ def format_output_tight(ctx):
     if ctx['show_line1']:
         line1_parts = []
         short_model = shorten_model_name(ctx['model'], tight=True)
-        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
-
-        # Context mode badge (1M only)
-        if ctx.get('context_size', 200000) > 200000:
-            line1_parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
+        ctx_suffix = "(1M)" if ctx.get('context_size', 200000) > 200000 else ""
+        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
         if ctx['git_branch']:
             branch = ctx['git_branch']
