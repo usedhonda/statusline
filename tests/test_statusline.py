@@ -58,6 +58,10 @@ class TestShortenModelName:
         assert statusline.shorten_model_name("Claude Opus 4.6") == "Opus 4.6"
         assert statusline.shorten_model_name("Claude Sonnet 4") == "Sonnet 4"
 
+    def test_context_suffix_stripped(self):
+        assert statusline.shorten_model_name("Claude Sonnet 4.6 (1M context)") == "Sonnet 4.6"
+        assert statusline.shorten_model_name("Sonnet 4.6 (200k context)") == "Sonnet 4.6"
+
     def test_version_before_family(self):
         assert statusline.shorten_model_name("Claude 3.5 Sonnet") == "Sonnet 3.5"
         assert statusline.shorten_model_name("3.5 Haiku") == "Haiku 3.5"
@@ -66,6 +70,7 @@ class TestShortenModelName:
         assert statusline.shorten_model_name("Claude Opus 4.6", tight=True) == "Op4.6"
         assert statusline.shorten_model_name("Claude Sonnet 4", tight=True) == "Son4"
         assert statusline.shorten_model_name("Claude 3.5 Haiku", tight=True) == "Hai3.5"
+        assert statusline.shorten_model_name("Claude Sonnet 4.6 (1M context)", tight=True) == "Son4.6"
 
 
 class TestTruncateText:

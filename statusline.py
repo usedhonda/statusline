@@ -1846,6 +1846,9 @@ def shorten_model_name(model, tight=False):
     # "Claude " プレフィックスを除去
     name = re.sub(r'^Claude\s+', '', model, flags=re.IGNORECASE)
 
+    # "(1M context)" "(200k context)" などのコンテキストサイズ suffix を除去
+    name = re.sub(r'\s*\([\d.]+[kKmM]?\s+context\)', '', name).strip()
+
     # "3.5 Haiku" → "Haiku 3.5" に正規化（バージョンが前にある場合）
     m = re.match(r'^([\d.]+)\s+(Haiku|Sonnet|Opus)', name, re.IGNORECASE)
     if m:
@@ -1898,11 +1901,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     # Context mode badge (1M only - 200K is default, no badge needed)
     if include_context_badge and ctx.get('context_size', 200000) > 200000:
-        ctx_label = format_token_count_short(ctx['context_size'])
-        if tight_model:
-            parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
-        else:
-            parts.append(f"{Colors.BRIGHT_MAGENTA}[{ctx_label}ctx]{Colors.RESET}")
+        parts.append(f"{Colors.BRIGHT_MAGENTA}1M{Colors.RESET}")
 
     # Git branch (no untracked files count)
     if ctx['git_branch']:
