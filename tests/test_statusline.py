@@ -264,6 +264,13 @@ class TestSmoke:
             timeout=10,
         )
 
+    def _assert_output(self, result):
+        """Common assertions: exit 0, meaningful stdout, no stderr errors."""
+        assert result.returncode == 0
+        assert len(result.stdout.strip()) > 20, "stdout is suspiciously empty"
+        assert "AttributeError" not in result.stderr
+        assert "NoneType" not in result.stderr
+
     def test_200k_context(self):
         data = json.dumps({
             "model": {"display_name": "Opus 4.6"},
@@ -273,8 +280,7 @@ class TestSmoke:
             },
         })
         result = self._run(data)
-        assert result.returncode == 0
-        assert len(result.stdout.strip()) > 0
+        self._assert_output(result)
 
     def test_1m_context(self):
         data = json.dumps({
@@ -285,17 +291,17 @@ class TestSmoke:
             },
         })
         result = self._run(data)
-        assert result.returncode == 0
+        self._assert_output(result)
 
     def test_empty_input(self):
         result = self._run("")
-        # Should not crash
+        # Should not crash (empty input is valid — shows default state)
         assert result.returncode == 0
 
     def test_minimal_input(self):
         data = json.dumps({"model": {"display_name": "Opus 4.6"}})
         result = self._run(data)
-        assert result.returncode == 0
+        self._assert_output(result)
 
     def test_exceeds_200k(self):
         data = json.dumps({
@@ -307,5 +313,34 @@ class TestSmoke:
             },
         })
         result = self._run(data)
-        assert result.returncode == 0
-        assert len(result.stdout.strip()) > 0
+        self._assert_output(result)
+
+    def test_null_current_usage(self):
+        """Regression: current_usage=null caused AttributeError (session start state)."""
+        data = json.dumps({
+            "session_id": "test-null-usage",
+            "transcript_path": "/tmp/test.jsonl",
+            "cwd": "/tmp",
+            "model": {"id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6"},
+            "workspace": {"current_dir": "/tmp", "project_dir": "/tmp", "added_dirs": []},
+            "version": "2.1.47",
+            "output_style": {"name": "default"},
+            "cost": {
+                "total_cost_usd": 0,
+                "total_duration_ms": 1800,
+                "total_api_duration_ms": 0,
+                "total_lines_added": 0,
+                "total_lines_removed": 0,
+            },
+            "context_window": {
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "context_window_size": 200000,
+                "current_usage": None,
+                "used_percentage": None,
+                "remaining_percentage": None,
+            },
+            "exceeds_200k_tokens": False,
+        })
+        result = self._run(data)
+        self._assert_output(result)
