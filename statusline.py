@@ -2371,7 +2371,7 @@ def main():
         api_exceeds_200k = data.get('exceeds_200k_tokens', False)
 
         # Current usage cache details (fallback for cache ratio)
-        api_current_usage = api_context.get('current_usage', {})
+        api_current_usage = api_context.get('current_usage') or {}
         api_current_cache_creation = api_current_usage.get('cache_creation_input_tokens', 0)
         api_current_cache_read = api_current_usage.get('cache_read_input_tokens', 0)
 
