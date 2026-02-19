@@ -2083,7 +2083,7 @@ def format_output_full(ctx, terminal_width=None):
         line2_parts.append(compact_label)
         line2_parts.append(get_progress_bar(percentage, width=20))
         line2_parts.append(percentage_display)
-        denom = ctx['context_size'] if ctx['percentage_of_full_context'] else ctx['compaction_threshold']
+        denom = ctx['context_size']
         line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(denom)}{Colors.RESET}")
 
         if ctx['cache_ratio'] >= 50:
@@ -2159,7 +2159,7 @@ def format_output_compact(ctx):
     if ctx['show_line2']:
         percentage = ctx['percentage']
         compact_display = format_token_count_short(ctx['compact_tokens'])
-        denom = ctx['context_size'] if ctx['percentage_of_full_context'] else ctx['compaction_threshold']
+        denom = ctx['context_size']
         threshold_display = format_token_count_short(denom)
         percentage_color = get_percentage_color(percentage)
 
@@ -2258,7 +2258,7 @@ def format_output_minimal(ctx, terminal_width):
     """
     percentage = ctx['percentage']
     compact_display = format_token_count_short(ctx['compact_tokens'])
-    denom = ctx['context_size'] if ctx['percentage_of_full_context'] else ctx['compaction_threshold']
+    denom = ctx['context_size']
     threshold_display = format_token_count_short(denom)
     percentage_color = get_percentage_color(percentage)
 
@@ -2506,8 +2506,8 @@ def main():
             # Fallback: manual calculation for older Claude Code versions
             # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
             # NOT current context window usage. Must use transcript-calculated tokens.
-            # This is relative to compaction_threshold (80% of context_window_size)
-            percentage = min(100, round((compact_tokens / compaction_threshold) * 100))
+            # Use api_context_size (200K) as denominator to match api_used_percentage path
+            percentage = min(100, round((compact_tokens / api_context_size) * 100))
             percentage_of_full_context = False
         
         # Get additional info

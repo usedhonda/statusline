@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -344,3 +345,27 @@ class TestSmoke:
         })
         result = self._run(data)
         self._assert_output(result)
+
+    def test_no_used_percentage_uses_200k_denominator(self):
+        """Regression: fallback display denominator must use context_window_size (200K), not compaction_threshold (160K).
+
+        Verifies that /200K (not /160K) appears in the statusline when used_percentage is absent.
+        """
+        data = json.dumps({
+            "model": {"id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6"},
+            "context_window": {
+                "context_window_size": 200000,
+                "current_usage": None,
+                "used_percentage": None,
+                "remaining_percentage": None,
+            },
+        })
+        result = self._run(data)
+        self._assert_output(result)
+
+        # Strip ANSI codes for numeric checks
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+
+        # Denominator must be 200K (context_window_size), not 160K (compaction_threshold)
+        assert '/200' in plain, f"Expected /200K denominator but got: {plain!r}"
+        assert '/160' not in plain, f"Got /160K denominator leak in: {plain!r}"
