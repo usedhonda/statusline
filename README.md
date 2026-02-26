@@ -11,14 +11,14 @@ Enhanced status line for Claude Code showing context usage, session time, and we
 ```
 [Opus 4.6] | 🌿 main | 📁 statusline | 💬 249 | +24/-45 | 💰 $7.36
 Context:    ████████▒▒▒▒▒▒▒▒▒▒▒▒ [49%] 98.4K/200.0K
-Session:    █████▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 1h34m/5h, 44.3M token(470K t/m) (3am-8am)
-Weekly:     ████████████▒▒▒▒▒▒▒▒ [64%] 25m, Extra: 7% $3.59/$50
+Session:    ▅█▃▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [7%] 67.7M token (5am-10am)
+Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3d0h24m, Extra: 7% $3.59/$50
 ```
 
 - **Line 1**: Model, git branch, directory, message count, lines changed, cost
 - **Line 2**: Context window token usage with progress bar and cache ratio
-- **Line 3**: Session time within 5-hour block, total tokens burned, burn rate
-- **Line 4**: Weekly usage progress, extra usage %, cost vs budget
+- **Line 3**: Session sparkline with 5-hour utilization, token count, and time range
+- **Line 4**: Weekly sparkline with 7-day token distribution, remaining time, extra usage
 
 Supports **1M context** — the model bracket shows `(1M)` when using extended context.
 
@@ -26,15 +26,17 @@ Supports **1M context** — the model bracket shows `(1M)` when using extended c
 
 ### Context Window Monitoring
 - Progress bar for token usage vs context window size (200K or 1M)
-- Color-coded warnings: yellow at 70%, red at 90%
+- Fractional segments shown in dim color for partial fill
+- Color-coded warnings: yellow at 80%, red at 90%
 
 ### 5-Hour Session Blocks
-- Tracks time within 5-hour usage windows
-- Shows burn rate (tokens/minute) and total tokens consumed
-- Displays session time range (e.g., `3am-8am`)
+- Sparkline showing token consumption across 5-hour window (20 segments, 15min each)
+- API-derived time range (e.g., `5am-10am`)
+- Total tokens consumed in the current block
 
-### Weekly Budget Tracking
-- Progress bar for weekly usage limits
+### Weekly Usage Tracking
+- Sparkline showing 7-day token distribution (20 segments, ~8.4h each)
+- Remaining time until weekly reset
 - Extra usage percentage and cost vs budget display
 
 ### Responsive Layout
@@ -81,8 +83,8 @@ Or edit the top of `statusline.py`:
 ```python
 SHOW_LINE1 = True   # Model / git / directory / cost
 SHOW_LINE2 = True   # Context window usage
-SHOW_LINE3 = True   # Session time / burn rate
-SHOW_LINE4 = True   # Weekly usage / budget
+SHOW_LINE3 = True   # Session sparkline / tokens / time range
+SHOW_LINE4 = True   # Weekly sparkline / remaining time / budget
 ```
 
 ### Environment Variables
