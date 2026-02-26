@@ -36,6 +36,14 @@ import time
 
 # CONSTANTS
 
+# Block stats cache settings
+BLOCK_STATS_CACHE_TTL = 30  # 30 seconds
+BLOCK_STATS_CACHE_FILE = None
+
+# Transcript stats cache settings
+TRANSCRIPT_STATS_CACHE_TTL = 15  # 15 seconds
+TRANSCRIPT_STATS_CACHE_FILE = None
+
 # Ratelimit cache settings
 RATELIMIT_CACHE_TTL = 300  # 5 minutes
 RATELIMIT_CACHE_FILE = None
@@ -575,17 +583,26 @@ def get_real_time_burn_data(session_id=None):
 # REMOVED: show_live_burn_graph() - unused function (replaced by get_burn_line)
 def calculate_tokens_from_transcript(file_path):
     """Calculate total tokens from transcript file by summing all message usage data"""
+    # Check 15s file cache (TTL + path + mtime validation)
+    file_path = Path(file_path) if not isinstance(file_path, Path) else file_path
+    cached = _load_transcript_stats_cache(file_path)
+    if cached:
+        return (cached['total_tokens'], cached['message_count'], cached['error_count'],
+                cached['user_messages'], cached['assistant_messages'],
+                cached['input_tokens'], cached['output_tokens'],
+                cached['cache_creation'], cached['cache_read'])
+
     message_count = 0
     error_count = 0
     user_messages = 0
     assistant_messages = 0
-    
+
     # トークンの詳細追跡（全メッセージの合計）
     total_input_tokens = 0
     total_output_tokens = 0
     total_cache_creation = 0
     total_cache_read = 0
-    
+
     try:
         with open(file_path, 'r') as f:
             for line in f:
@@ -636,9 +653,11 @@ def calculate_tokens_from_transcript(file_path):
         'cache_creation_input_tokens': total_cache_creation,
         'cache_read_input_tokens': total_cache_read
     })
-    
-    return (total_tokens, message_count, error_count, user_messages, assistant_messages,
-            total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read)
+
+    result = (total_tokens, message_count, error_count, user_messages, assistant_messages,
+              total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read)
+    _save_transcript_stats_cache(file_path, result)
+    return result
 
 def find_session_transcript(session_id):
     """Find transcript file for the current session"""
@@ -2487,39 +2506,13 @@ def main():
         cache_creation = 0
         cache_read = 0
         
-        # 5時間ブロック検出システム
+        # 5時間ブロック検出システム (cached: 30s TTL)
         block_stats = None
         current_block = None  # 初期化して変数スコープ問題を回避
         if session_id:
             try:
-                # 全メッセージを時系列で読み込み
-                all_messages = load_all_messages_chronologically()
-                
-                # 5時間ブロックを検出
-                try:
-                    blocks = detect_five_hour_blocks(all_messages)
-                except Exception:
-                    blocks = []
-                
-                # 現在のセッションが含まれるブロックを特定
-                current_block = find_current_session_block(blocks, session_id)
-                
-                if current_block:
-                    # ブロック全体の統計を計算
-                    try:
-                        block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
-                    except Exception:
-                        block_stats = None
-                elif blocks:
-                    # セッションが見つからない場合は最新のアクティブブロックを使用
-                    active_blocks = [b for b in blocks if b.get('is_active', False)]
-                    if active_blocks:
-                        current_block = active_blocks[-1]  # 最新のアクティブブロック
-                        try:
-                            block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
-                        except Exception:
-                            block_stats = None
-                
+                block_stats, current_block = _get_cached_block_data(session_id)
+
                 # 統計データを設定 - Compact用は現在セッションのみ
                 # Compact line用: 現在セッションのトークンのみ（block_statsの有無に関わらず計算）
                 # transcript_pathが提供されていればそれを使用、なければsession_idから探す
@@ -2888,6 +2881,174 @@ def calculate_tokens_since_time(start_time, session_id):
 # ============================================
 # Ratelimit cache management (OAuth API)
 # ============================================
+
+def _get_block_stats_cache_file():
+    """Get block stats cache file path (lazy initialization)"""
+    global BLOCK_STATS_CACHE_FILE
+    if BLOCK_STATS_CACHE_FILE is None:
+        BLOCK_STATS_CACHE_FILE = Path.home() / '.claude' / '.block_stats_cache.json'
+    return BLOCK_STATS_CACHE_FILE
+
+def _get_transcript_stats_cache_file():
+    """Get transcript stats cache file path (lazy initialization)"""
+    global TRANSCRIPT_STATS_CACHE_FILE
+    if TRANSCRIPT_STATS_CACHE_FILE is None:
+        TRANSCRIPT_STATS_CACHE_FILE = Path.home() / '.claude' / '.transcript_stats_cache.json'
+    return TRANSCRIPT_STATS_CACHE_FILE
+
+def _serialize_datetime(dt):
+    """Convert datetime to ISO string for JSON cache serialization."""
+    if dt is None:
+        return None
+    if hasattr(dt, 'isoformat'):
+        return dt.isoformat()
+    return str(dt)
+
+def _deserialize_datetime(s):
+    """Convert ISO string back to datetime object."""
+    if s is None:
+        return None
+    if isinstance(s, str):
+        return datetime.fromisoformat(s)
+    return s
+
+def _get_cached_block_data(session_id):
+    """Get block_stats and current_block from 30s file cache or by computing.
+
+    On cache hit:  returns (block_stats, current_block) from disk (<1ms).
+    On cache miss: runs full JSONL scan, saves result, returns data.
+    Returns (None, None) on error.
+    """
+    # --- cache hit path ---
+    cache_file = _get_block_stats_cache_file()
+    try:
+        if cache_file.exists():
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+            if (time.time() - cached.get('timestamp', 0) < BLOCK_STATS_CACHE_TTL
+                    and cached.get('session_id') == session_id):
+                # Deserialize block_stats
+                bs = cached.get('block_stats')
+                if bs:
+                    bs['start_time'] = _deserialize_datetime(bs.get('start_time'))
+                # Deserialize current_block
+                cb = cached.get('current_block')
+                if cb:
+                    cb['start_time'] = _deserialize_datetime(cb.get('start_time'))
+                    cb['end_time'] = _deserialize_datetime(cb.get('end_time'))
+                    cb['actual_end_time'] = _deserialize_datetime(cb.get('actual_end_time'))
+                    for msg in cb.get('messages', []):
+                        msg['timestamp'] = _deserialize_datetime(msg.get('timestamp'))
+                return bs, cb
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    # --- cache miss path ---
+    block_stats = None
+    current_block = None
+    try:
+        all_messages = load_all_messages_chronologically()
+        try:
+            blocks = detect_five_hour_blocks(all_messages)
+        except Exception:
+            blocks = []
+        current_block = find_current_session_block(blocks, session_id)
+        if current_block:
+            try:
+                block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
+            except Exception:
+                block_stats = None
+        elif blocks:
+            active_blocks = [b for b in blocks if b.get('is_active', False)]
+            if active_blocks:
+                current_block = active_blocks[-1]
+                try:
+                    block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
+                except Exception:
+                    block_stats = None
+    except Exception:
+        return None, None
+
+    # --- write cache ---
+    if block_stats is not None or current_block is not None:
+        try:
+            cache_data = {
+                'timestamp': time.time(),
+                'session_id': session_id,
+            }
+            if block_stats:
+                bs_copy = dict(block_stats)
+                bs_copy['start_time'] = _serialize_datetime(bs_copy.get('start_time'))
+                cache_data['block_stats'] = bs_copy
+            if current_block:
+                cb_ser = {
+                    'start_time': _serialize_datetime(current_block.get('start_time')),
+                    'end_time': _serialize_datetime(current_block.get('end_time')),
+                    'actual_end_time': _serialize_datetime(current_block.get('actual_end_time')),
+                    'duration_seconds': current_block.get('duration_seconds'),
+                    'is_active': current_block.get('is_active'),
+                    'messages': [],
+                }
+                for msg in current_block.get('messages', []):
+                    cb_ser['messages'].append({
+                        'timestamp': _serialize_datetime(msg.get('timestamp')),
+                        'session_id': msg.get('session_id'),
+                        'type': msg.get('type'),
+                        'usage': msg.get('usage'),
+                        'uuid': msg.get('uuid'),
+                        'requestId': msg.get('requestId'),
+                    })
+                cache_data['current_block'] = cb_ser
+            tmp = cache_file.with_suffix('.tmp')
+            with open(tmp, 'w') as f:
+                json.dump(cache_data, f)
+            tmp.rename(cache_file)
+        except (OSError, TypeError):
+            pass
+
+    return block_stats, current_block
+
+def _load_transcript_stats_cache(file_path):
+    """Load transcript stats from cache if valid (TTL + path + mtime match).
+    Returns cached data dict or None on miss."""
+    cache_file = _get_transcript_stats_cache_file()
+    try:
+        if cache_file.exists():
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+            if (time.time() - cached.get('timestamp', 0) < TRANSCRIPT_STATS_CACHE_TTL
+                    and cached.get('file_path') == str(file_path)
+                    and cached.get('file_mtime') == file_path.stat().st_mtime):
+                return cached
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+def _save_transcript_stats_cache(file_path, stats_tuple):
+    """Write transcript stats cache atomically."""
+    cache_file = _get_transcript_stats_cache_file()
+    (total_tokens, message_count, error_count, user_messages, assistant_messages,
+     input_tokens, output_tokens, cache_creation, cache_read) = stats_tuple
+    try:
+        tmp = cache_file.with_suffix('.tmp')
+        with open(tmp, 'w') as f:
+            json.dump({
+                'timestamp': time.time(),
+                'file_path': str(file_path),
+                'file_mtime': file_path.stat().st_mtime,
+                'total_tokens': total_tokens,
+                'message_count': message_count,
+                'error_count': error_count,
+                'user_messages': user_messages,
+                'assistant_messages': assistant_messages,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'cache_creation': cache_creation,
+                'cache_read': cache_read,
+            }, f)
+        tmp.rename(cache_file)
+    except OSError:
+        pass
 
 def get_ratelimit_cache_file():
     """Get rate limit cache file path (lazy initialization)"""

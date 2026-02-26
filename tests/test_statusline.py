@@ -433,3 +433,246 @@ class TestSmoke:
         # Denominator must be 200K (context_window_size), not 160K (compaction_threshold)
         assert '/200' in plain, f"Expected /200K denominator but got: {plain!r}"
         assert '/160' not in plain, f"Got /160K denominator leak in: {plain!r}"
+
+
+# ============================================
+# Cache Tests
+# ============================================
+
+import time
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+from datetime import datetime, timezone
+
+
+class TestBlockStatsCache:
+    """Tests for _get_cached_block_data() 30s TTL file cache."""
+
+    def _make_cache_data(self, session_id="test-session", age=0):
+        """Build valid cache data dict."""
+        return {
+            'timestamp': time.time() - age,
+            'session_id': session_id,
+            'block_stats': {
+                'start_time': '2026-02-26T05:00:00',
+                'duration_seconds': 3600,
+                'total_tokens': 100000,
+                'input_tokens': 60000,
+                'output_tokens': 40000,
+                'cache_creation': 5000,
+                'cache_read': 20000,
+                'total_messages': 50,
+            },
+            'current_block': {
+                'start_time': '2026-02-26T05:00:00',
+                'end_time': '2026-02-26T10:00:00',
+                'actual_end_time': '2026-02-26T06:00:00',
+                'duration_seconds': 3600,
+                'is_active': True,
+                'messages': [
+                    {
+                        'timestamp': '2026-02-26T05:30:00+09:00',
+                        'session_id': 'test-session',
+                        'type': 'assistant',
+                        'usage': {'input_tokens': 1000, 'output_tokens': 500},
+                        'uuid': 'msg-1',
+                        'requestId': 'req-1',
+                    }
+                ],
+            },
+        }
+
+    def test_cache_hit_within_ttl(self, tmp_path):
+        """Fresh cache returns data without recomputation."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+        data = self._make_cache_data(age=5)
+        import json as _json
+        cache_file.write_text(_json.dumps(data))
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+            with patch.object(statusline, 'load_all_messages_chronologically') as mock_load:
+                bs, cb = statusline._get_cached_block_data('test-session')
+                mock_load.assert_not_called()
+
+        assert bs is not None
+        assert bs['total_tokens'] == 100000
+        assert isinstance(bs['start_time'], datetime)
+        assert cb is not None
+        assert len(cb['messages']) == 1
+        assert isinstance(cb['messages'][0]['timestamp'], datetime)
+
+    def test_cache_miss_expired_ttl(self, tmp_path):
+        """Expired cache triggers recomputation."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+        data = self._make_cache_data(age=60)  # well past 30s TTL
+        import json as _json
+        cache_file.write_text(_json.dumps(data))
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+            with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
+                bs, cb = statusline._get_cached_block_data('test-session')
+                mock_load.assert_called_once()
+
+    def test_cache_miss_session_mismatch(self, tmp_path):
+        """Cache for a different session_id triggers recomputation."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+        data = self._make_cache_data(session_id='other-session', age=5)
+        import json as _json
+        cache_file.write_text(_json.dumps(data))
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+            with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
+                bs, cb = statusline._get_cached_block_data('test-session')
+                mock_load.assert_called_once()
+
+    def test_cache_miss_no_file(self, tmp_path):
+        """No cache file triggers recomputation."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+            with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
+                bs, cb = statusline._get_cached_block_data('test-session')
+                mock_load.assert_called_once()
+
+    def test_cache_written_after_computation(self, tmp_path):
+        """Cache file is created after a fresh computation."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+
+        mock_block = {
+            'start_time': datetime(2026, 2, 26, 5, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+            'end_time': datetime(2026, 2, 26, 10, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+            'actual_end_time': datetime(2026, 2, 26, 6, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+            'duration_seconds': 3600,
+            'is_active': True,
+            'messages': [],
+        }
+        mock_stats = {
+            'start_time': datetime(2026, 2, 26, 5, 0),
+            'duration_seconds': 3600,
+            'total_tokens': 5000,
+            'input_tokens': 3000,
+            'output_tokens': 2000,
+            'cache_creation': 0,
+            'cache_read': 0,
+            'total_messages': 10,
+        }
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+            with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]):
+                with patch.object(statusline, 'detect_five_hour_blocks', return_value=[mock_block]):
+                    with patch.object(statusline, 'find_current_session_block', return_value=mock_block):
+                        with patch.object(statusline, 'calculate_block_statistics_with_deduplication', return_value=mock_stats):
+                            bs, cb = statusline._get_cached_block_data('test-session')
+
+        assert cache_file.exists()
+        import json as _json
+        cached = _json.loads(cache_file.read_text())
+        assert cached['session_id'] == 'test-session'
+        assert cached['block_stats']['total_tokens'] == 5000
+
+
+class TestTranscriptStatsCache:
+    """Tests for transcript stats 15s TTL file cache."""
+
+    def _make_transcript(self, tmp_path, content='{"type":"user","timestamp":"2026-02-26T05:00:00Z"}\n'):
+        """Create a temporary transcript file."""
+        f = tmp_path / 'transcript.jsonl'
+        f.write_text(content)
+        return f
+
+    def test_cache_hit_within_ttl(self, tmp_path):
+        """Fresh cache returns data without re-reading the JSONL file."""
+        transcript = self._make_transcript(tmp_path)
+        cache_file = tmp_path / '.transcript_stats_cache.json'
+
+        import json as _json
+        cache_data = {
+            'timestamp': time.time(),
+            'file_path': str(transcript),
+            'file_mtime': transcript.stat().st_mtime,
+            'total_tokens': 9999,
+            'message_count': 5,
+            'error_count': 0,
+            'user_messages': 3,
+            'assistant_messages': 2,
+            'input_tokens': 5000,
+            'output_tokens': 4999,
+            'cache_creation': 0,
+            'cache_read': 0,
+        }
+        cache_file.write_text(_json.dumps(cache_data))
+
+        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
+            result = statusline.calculate_tokens_from_transcript(transcript)
+
+        assert result[0] == 9999  # total_tokens from cache
+
+    def test_cache_miss_mtime_changed(self, tmp_path):
+        """Cache invalidated when file mtime changes (new messages added)."""
+        transcript = self._make_transcript(tmp_path)
+        cache_file = tmp_path / '.transcript_stats_cache.json'
+
+        import json as _json
+        cache_data = {
+            'timestamp': time.time(),
+            'file_path': str(transcript),
+            'file_mtime': transcript.stat().st_mtime - 1,  # stale mtime
+            'total_tokens': 9999,
+            'message_count': 5,
+            'error_count': 0,
+            'user_messages': 3,
+            'assistant_messages': 2,
+            'input_tokens': 5000,
+            'output_tokens': 4999,
+            'cache_creation': 0,
+            'cache_read': 0,
+        }
+        cache_file.write_text(_json.dumps(cache_data))
+
+        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
+            result = statusline.calculate_tokens_from_transcript(transcript)
+
+        # Should re-read file; the simple transcript has no assistant usage -> 0 tokens
+        assert result[0] == 0
+
+    def test_cache_miss_expired_ttl(self, tmp_path):
+        """Expired cache triggers re-read."""
+        transcript = self._make_transcript(tmp_path)
+        cache_file = tmp_path / '.transcript_stats_cache.json'
+
+        import json as _json
+        cache_data = {
+            'timestamp': time.time() - 30,  # expired
+            'file_path': str(transcript),
+            'file_mtime': transcript.stat().st_mtime,
+            'total_tokens': 9999,
+            'message_count': 5,
+            'error_count': 0,
+            'user_messages': 3,
+            'assistant_messages': 2,
+            'input_tokens': 5000,
+            'output_tokens': 4999,
+            'cache_creation': 0,
+            'cache_read': 0,
+        }
+        cache_file.write_text(_json.dumps(cache_data))
+
+        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
+            result = statusline.calculate_tokens_from_transcript(transcript)
+
+        assert result[0] == 0  # re-read: no real tokens in the simple transcript
+
+    def test_cache_written_after_computation(self, tmp_path):
+        """Cache file is created after a fresh computation."""
+        transcript = self._make_transcript(tmp_path)
+        cache_file = tmp_path / '.transcript_stats_cache.json'
+
+        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
+            statusline.calculate_tokens_from_transcript(transcript)
+
+        assert cache_file.exists()
+        import json as _json
+        cached = _json.loads(cache_file.read_text())
+        assert cached['file_path'] == str(transcript)
+        assert cached['file_mtime'] == transcript.stat().st_mtime
