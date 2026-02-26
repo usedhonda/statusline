@@ -146,6 +146,43 @@ class TestGetProgressBar:
         clean = statusline.strip_ansi(bar)
         assert clean.count("█") == 10
 
+    def test_fraction_segment(self):
+        # 49% of 20 = 9.8 -> 9 filled + 1 dim + 10 empty = 20
+        bar = statusline.get_progress_bar(49, width=20)
+        clean = statusline.strip_ansi(bar)
+        assert len(clean) == 20
+        assert clean.count("█") == 10  # 9 bright + 1 dim
+        assert clean.count("▒") == 10
+
+    def test_no_fraction_at_zero(self):
+        bar = statusline.get_progress_bar(0, width=20)
+        clean = statusline.strip_ansi(bar)
+        assert clean.count("█") == 0
+        assert clean.count("▒") == 20
+
+    def test_no_fraction_at_hundred(self):
+        bar = statusline.get_progress_bar(100, width=20)
+        clean = statusline.strip_ansi(bar)
+        assert clean.count("█") == 20
+        assert clean.count("▒") == 0
+
+    def test_fraction_uses_dim_color(self):
+        """Verify fractional segment uses dim color when colors are enabled"""
+        import os
+        saved = os.environ.pop('NO_COLOR', None)
+        try:
+            bar = statusline.get_progress_bar(49, width=20)
+            assert '\033[32m' in bar  # DIM_GREEN (non-bold)
+        finally:
+            if saved is not None:
+                os.environ['NO_COLOR'] = saved
+
+    def test_total_width_consistent(self):
+        for pct in [0, 10, 25, 33, 49, 50, 75, 80, 90, 99, 100]:
+            bar = statusline.get_progress_bar(pct, width=20)
+            clean = statusline.strip_ansi(bar)
+            assert len(clean) == 20, f"Width mismatch at {pct}%: got {len(clean)}"
+
 
 class TestCreateSparkline:
     def test_empty(self):
@@ -168,18 +205,45 @@ class TestCreateSparkline:
 
 
 class TestGetPercentageColor:
-    def test_green_below_70(self):
-        # Below 70 should return green
-        result = statusline.get_percentage_color(69)
+    def test_green_below_80(self):
+        result = statusline.get_percentage_color(79)
         assert result == statusline.Colors.BRIGHT_GREEN
 
-    def test_yellow_at_70(self):
-        result = statusline.get_percentage_color(70)
+    def test_yellow_at_80(self):
+        result = statusline.get_percentage_color(80)
+        assert result == statusline.Colors.BRIGHT_YELLOW
+
+    def test_yellow_at_89(self):
+        result = statusline.get_percentage_color(89)
         assert result == statusline.Colors.BRIGHT_YELLOW
 
     def test_red_at_90(self):
         result = statusline.get_percentage_color(90)
         assert result == "\033[1;91m"
+
+
+class TestGetPercentageColorDim:
+    def test_dim_green_below_80(self):
+        result = statusline.get_percentage_color_dim(79)
+        assert result == statusline.Colors.DIM_GREEN
+
+    def test_dim_yellow_at_80(self):
+        result = statusline.get_percentage_color_dim(80)
+        assert result == statusline.Colors.DIM_YELLOW
+
+    def test_dim_red_at_90(self):
+        result = statusline.get_percentage_color_dim(90)
+        assert result == statusline.Colors.DIM_RED
+
+    def test_dim_differs_from_bright_with_color(self):
+        """Verify dim colors differ from bright when colors are enabled"""
+        import os
+        saved = os.environ.pop('NO_COLOR', None)
+        try:
+            assert statusline.get_percentage_color_dim(50) != statusline.get_percentage_color(50)
+        finally:
+            if saved is not None:
+                os.environ['NO_COLOR'] = saved
 
 
 class TestFormatCost:

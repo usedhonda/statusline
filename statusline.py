@@ -6,9 +6,9 @@
 
 # Display settings (True = show, False = hide)
 SHOW_LINE1    = True   # [Sonnet 4] | 🌿 main M2 | 📁 project | 💬 254
-SHOW_LINE2    = True   # Compact: 91.8K/160.0K ████████▒▒▒ 58%
+SHOW_LINE2    = True   # Context: 91.8K/200.0K ████████▒▒▒ 58%
 SHOW_LINE3    = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒ 25%
-SHOW_LINE4    = True   # Burn: 14.0M ▁▂▃▄▅▆▇█▇▆▅▄▃▂▁
+SHOW_LINE4    = True   # Weekly: [64%] 32m, Extra: 7% $3.59/$50
 SHOW_SCHEDULE = True   # 📅 14:00 Meeting (in 30m) - swaps with Line1
 
 # Schedule settings (requires `gog` command)
@@ -33,8 +33,15 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import time
+import signal
+import tempfile
 
 # CONSTANTS
+
+# Ratelimit cache settings
+RATELIMIT_CACHE_TTL = 300  # 5 minutes
+RATELIMIT_CACHE_FILE = None
+RATELIMIT_LOCK_FILE = None
 
 # Token compaction threshold - FALLBACK VALUE ONLY
 # Dynamic value is now calculated from API: context_window_size * 0.8
@@ -75,7 +82,7 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback). 1M context
 class Colors:
     _colors = {
         'BRIGHT_CYAN': '\033[1;96m',
-        'BRIGHT_BLUE': '\033[1;94m', 
+        'BRIGHT_BLUE': '\033[1;94m',
         'BRIGHT_MAGENTA': '\033[1;95m',
         'BRIGHT_GREEN': '\033[1;92m',
         'BRIGHT_YELLOW': '\033[1;93m',
@@ -83,6 +90,9 @@ class Colors:
         'BRIGHT_WHITE': '\033[1;97m',
         'LIGHT_GRAY': '\033[1;97m',
         'DIM': '\033[1;97m',
+        'DIM_GREEN': '\033[32m',
+        'DIM_YELLOW': '\033[33m',
+        'DIM_RED': '\033[31m',
         'BOLD': '\033[1m',
         'BLINK': '\033[5m',
         'BG_RED': '\033[41m',
@@ -380,16 +390,24 @@ def convert_local_to_utc(local_time):
 def get_percentage_color(percentage):
     """Get color based on percentage threshold"""
     if percentage >= 90:
-        return '\033[1;91m'  # 元の赤色
-    elif percentage >= 70:
+        return '\033[1;91m'  # bright red
+    elif percentage >= 80:
         return Colors.BRIGHT_YELLOW
     return Colors.BRIGHT_GREEN
+
+def get_percentage_color_dim(percentage):
+    """Get dim (non-bold) color for fractional progress bar segments"""
+    if percentage >= 90:
+        return Colors.DIM_RED
+    elif percentage >= 80:
+        return Colors.DIM_YELLOW
+    return Colors.DIM_GREEN
 
 def calculate_dynamic_padding(compact_text, session_text):
     """Calculate dynamic padding to align progress bars
     
     Args:
-        compact_text: Text part of compact line (e.g., "Compact: 111.6K/160.0K")
+        compact_text: Text part of compact line (e.g., "Context: 111.6K/200.0K")
         session_text: Text part of session line (e.g., "Session: 3h26m/5h")
     
     Returns:
@@ -411,23 +429,33 @@ def calculate_dynamic_padding(compact_text, session_text):
         return ' '
 
 def get_progress_bar(percentage, width=20, show_current_segment=False):
-    """Create a visual progress bar with optional current segment highlighting"""
-    filled = int(width * percentage / 100)
-    empty = width - filled
-    
+    """Create a visual progress bar with optional current segment highlighting
+
+    Fractional segments are shown in dim (non-bold) color to indicate partial fill.
+    """
+    filled_exact = width * percentage / 100
+    filled = int(filled_exact)
+    fraction = filled_exact - filled
+    has_fraction = fraction > 0.01 and filled < width
+
     color = get_percentage_color(percentage)
-    
+    dim_color = get_percentage_color_dim(percentage)
+
     if show_current_segment and filled < width:
-        # 完了済みは元の色を保持、現在進行中のセグメントのみ特別表示
         completed_bar = color + '█' * filled if filled > 0 else ''
-        current_bar = Colors.BRIGHT_WHITE + '▓' + Colors.RESET  # 白く点滅風
-        remaining_bar = Colors.LIGHT_GRAY + '▒' * (empty - 1) + Colors.RESET if empty > 1 else ''
-        
+        current_bar = Colors.BRIGHT_WHITE + '▓' + Colors.RESET
+        remaining = width - filled - 1
+        remaining_bar = Colors.LIGHT_GRAY + '▒' * remaining + Colors.RESET if remaining > 0 else ''
         bar = completed_bar + current_bar + remaining_bar
     else:
-        # 従来の表示
-        bar = color + '█' * filled + Colors.LIGHT_GRAY + '▒' * empty + Colors.RESET
-    
+        bar = color + '█' * filled
+        if has_fraction:
+            bar += dim_color + '█'
+            empty = width - filled - 1
+        else:
+            empty = width - filled
+        bar += Colors.LIGHT_GRAY + '▒' * empty + Colors.RESET
+
     return bar
 
 # REMOVED: create_line_graph() - unused function (replaced by create_mini_chart)
@@ -1323,26 +1351,31 @@ def generate_realtime_burn_timeline(block_start_time, duration_seconds):
     
     return timeline
 
-def generate_real_burn_timeline(block_stats, current_block):
+def generate_real_burn_timeline(block_stats, current_block, api_block_start_utc=None):
     """実際のメッセージデータからBurnスパークラインを生成（5時間ウィンドウ全体対応）
-    
+
     CRITICAL: Uses REAL message timing data ONLY. NO fake patterns allowed.
     Distributes tokens based on actual message timestamps across 15-minute segments.
+
+    Args:
+        api_block_start_utc: If provided (from API five_hour.resets_at - 5h),
+            overrides block_stats['start_time'] to align sparkline with API window.
     """
     timeline = [0] * 20  # 20セグメント（各15分）
-    
+
     if not block_stats or not current_block or 'messages' not in current_block:
         return timeline
-    
+
     try:
-        block_start = block_stats['start_time']
-        _ = datetime.now(timezone.utc).replace(tzinfo=None)  # UTC統一 (unused, kept for reference)
-        
-        # 内部処理は全てUTCで統一
-        if hasattr(block_start, 'tzinfo') and block_start.tzinfo:
-            block_start_utc = block_start.astimezone(timezone.utc).replace(tzinfo=None)
+        # Use API-derived start time if available, otherwise fall back to local detection
+        if api_block_start_utc is not None:
+            block_start_utc = api_block_start_utc
         else:
-            block_start_utc = block_start  # 既にUTC前提
+            block_start = block_stats['start_time']
+            if hasattr(block_start, 'tzinfo') and block_start.tzinfo:
+                block_start_utc = block_start.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                block_start_utc = block_start
         
         # デバッグ: メッセージの時間分散を確認 (デバッグ時のみ有効化)
         # import sys
@@ -1978,9 +2011,9 @@ def format_output_full(ctx, terminal_width=None):
 
     Example:
     [Son4] | 🌿 main M2 | 📁 statusline | 💬 254 | 💰 $1.23
-    Compact: ████████▒▒▒▒▒▒▒ [58%] 91.8K/160.0K ♻️ 99%
-    Session: ███▒▒▒▒▒▒▒▒▒▒▒▒ [25%] 1h15m/5h (08:00-13:00)
-    Burn:    ▁▂▃▄▅▆▇█▇▆▅▄▃▂▁ 14.0M tok
+    Context: ████████▒▒▒▒▒▒▒ [58%] 91.8K/200.0K ♻️ 99%
+    Session: █▇▁▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 1h27m/5h, 40.3M token(462K t/m) (3am-8am)
+    Weekly:  ████████████▒▒▒▒▒▒▒▒ [64%] 32m, Extra: 7% $3.59/$50
 
     Args:
         ctx: コンテキスト辞書
@@ -2075,9 +2108,9 @@ def format_output_full(ctx, terminal_width=None):
         if percentage >= 85:
             title_color = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}"
             percentage_display = f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
-            compact_label = f"{title_color}Compact:{Colors.RESET}"
+            compact_label = f"{title_color}Context:{Colors.RESET}"
         else:
-            compact_label = f"{Colors.BRIGHT_CYAN}Compact:{Colors.RESET}"
+            compact_label = f"{Colors.BRIGHT_CYAN}Context:{Colors.RESET}"
             percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
 
         line2_parts.append(compact_label)
@@ -2097,22 +2130,34 @@ def format_output_full(ctx, terminal_width=None):
 
         lines.append(" ".join(line2_parts))
 
-    # Line 3: Session time
-    if ctx['show_line3'] and ctx['session_duration']:
+    # Line 3: Session (sparkline + 5h utilization + tokens + API time range)
+    if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
         line3_parts = []
         line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
-        line3_parts.append(get_progress_bar(ctx['block_progress'], width=20, show_current_segment=True))
-        line3_parts.append(f"{Colors.BRIGHT_WHITE}[{int(ctx['block_progress'])}%]{Colors.RESET}")
-        line3_parts.append(f"{Colors.BRIGHT_WHITE}{ctx['session_duration']}/5h{Colors.RESET}")
-
-        if ctx['session_time_info']:
-            line3_parts.append(ctx['session_time_info'])
-
+        # Use burn sparkline instead of progress bar
+        if ctx['burn_timeline']:
+            sparkline = create_sparkline(ctx['burn_timeline'], width=20)
+            line3_parts.append(sparkline)
+        else:
+            line3_parts.append(get_progress_bar(ctx['block_progress'], width=20, show_current_segment=True))
+        # 5-hour utilization from API
+        if ctx.get('five_hour_utilization') is not None:
+            util = int(ctx['five_hour_utilization'])
+            util_color = _get_utilization_color(util)
+            line3_parts.append(f"{util_color}[{util}%]{Colors.RESET}")
+        # Token count (without burn rate)
+        if ctx['block_tokens'] > 0:
+            tokens_display = format_token_count_short(ctx['block_tokens'])
+            line3_parts.append(f"{Colors.BRIGHT_WHITE}{tokens_display} token{Colors.RESET}")
+        # Time range from API
+        if ctx.get('api_session_range'):
+            start, end = ctx['api_session_range']
+            line3_parts.append(f"{Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}")
         lines.append(" ".join(line3_parts))
 
-    # Line 4: Burn rate
-    if ctx['show_line4'] and ctx['burn_line']:
-        lines.append(ctx['burn_line'])
+    # Line 4: Weekly usage
+    if ctx['show_line4'] and ctx.get('weekly_line'):
+        lines.append(ctx['weekly_line'])
 
     return lines
 
@@ -2173,19 +2218,28 @@ def format_output_compact(ctx):
                 line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
-    # Line 3: Session (shortened)
-    if ctx['show_line3'] and ctx['session_duration']:
-        line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
-        line3 += f"{Colors.BRIGHT_WHITE}[{int(ctx['block_progress'])}%]{Colors.RESET} "
-        line3 += f"{Colors.BRIGHT_WHITE}{ctx['session_duration']}/5h{Colors.RESET}"
+    # Line 3: Session (shortened with sparkline + tokens)
+    if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
+        if ctx['burn_timeline']:
+            sparkline = create_sparkline(ctx['burn_timeline'], width=12)
+            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+        else:
+            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
+        if ctx['block_tokens'] > 0:
+            line3 += f"{Colors.BRIGHT_WHITE}{format_token_count_short(ctx['block_tokens'])}{Colors.RESET}"
+        if ctx.get('api_session_range'):
+            start, end = ctx['api_session_range']
+            line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
         lines.append(line3)
 
-    # Line 4: Burn (shortened)
-    if ctx['show_line4'] and ctx['burn_timeline']:
-        sparkline = create_sparkline(ctx['burn_timeline'], width=12)
-        tokens_display = format_token_count_short(ctx['block_tokens'])
-        line4 = f"{Colors.BRIGHT_CYAN}B:{Colors.RESET} {sparkline} {Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}"
-        lines.append(line4)
+    # Line 4: Weekly (shortened)
+    if ctx['show_line4'] and ctx.get('weekly_line'):
+        rl = ctx.get('ratelimit_data')
+        if rl and rl.get('seven_day'):
+            util = rl['seven_day'].get('utilization', 0)
+            util_color = _get_utilization_color(util)
+            line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
+            lines.append(line4)
 
     return lines
 
@@ -2235,18 +2289,26 @@ def format_output_tight(ctx):
                 line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
-    # Line 3: Session (ultra short)
-    if ctx['show_line3'] and ctx['session_duration']:
-        line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
-        line3 += f"{Colors.BRIGHT_WHITE}[{int(ctx['block_progress'])}%]{Colors.RESET} {Colors.BRIGHT_WHITE}{ctx['session_duration']}{Colors.RESET}"
+    # Line 3: Session (ultra short with sparkline)
+    if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
+        if ctx['burn_timeline']:
+            sparkline = create_sparkline(ctx['burn_timeline'], width=8)
+            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+        else:
+            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
+        if ctx.get('api_session_range'):
+            start, end = ctx['api_session_range']
+            line3 += f"{Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
         lines.append(line3)
 
-    # Line 4: Burn (ultra short)
-    if ctx['show_line4'] and ctx['burn_timeline']:
-        sparkline = create_sparkline(ctx['burn_timeline'], width=8)
-        tokens_display = format_token_count_short(ctx['block_tokens'])
-        line4 = f"{Colors.BRIGHT_CYAN}B:{Colors.RESET} {sparkline} {Colors.BRIGHT_WHITE}{tokens_display}{Colors.RESET}"
-        lines.append(line4)
+    # Line 4: Weekly (ultra short)
+    if ctx['show_line4'] and ctx.get('weekly_line'):
+        rl = ctx.get('ratelimit_data')
+        if rl and rl.get('seven_day'):
+            util = rl['seven_day'].get('utilization', 0)
+            util_color = _get_utilization_color(util)
+            line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
+            lines.append(line4)
 
     return lines
 
@@ -2598,11 +2660,30 @@ def main():
             except Exception:
                 session_time_info = f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}"
 
+        # Get ratelimit data first (needed for sparkline alignment and Weekly line)
+        # Wrapped in try/except so failures don't crash the entire statusline
+        ratelimit_data = None
+        api_session_range = None
+        weekly_line = None
+        api_block_start_utc = None
+        try:
+            ratelimit_data = get_ratelimit_info() if SHOW_LINE4 or SHOW_LINE3 else None
+            api_session_range = get_api_session_time_range(ratelimit_data) if ratelimit_data else None
+            weekly_line = get_weekly_line(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
+            # Derive API block start time (UTC, naive) for sparkline alignment
+            if ratelimit_data and ratelimit_data.get('five_hour', {}).get('resets_at'):
+                resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
+                api_start = resets_at - timedelta(hours=5)
+                api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            pass
+
         # Generate burn line and timeline for context
+        # burn_timeline is needed by Line 3 (Session sparkline)
         burn_line = ""
         burn_timeline = []
         block_tokens = 0
-        if SHOW_LINE4 and block_stats:
+        if (SHOW_LINE3 or SHOW_LINE4) and block_stats:
             session_data = {
                 'total_tokens': block_stats['total_tokens'],
                 'duration_seconds': duration_seconds if duration_seconds and duration_seconds > 0 else 1,
@@ -2611,7 +2692,7 @@ def main():
                 'current_cost': session_cost
             }
             burn_line = get_burn_line(session_data, session_id, block_stats, current_block)
-            burn_timeline = generate_real_burn_timeline(block_stats, current_block)
+            burn_timeline = generate_real_burn_timeline(block_stats, current_block, api_block_start_utc)
             block_tokens = block_stats.get('total_tokens', 0)
 
         # Build context dictionary for formatters
@@ -2638,6 +2719,11 @@ def main():
             'burn_line': burn_line,
             'burn_timeline': burn_timeline,
             'block_tokens': block_tokens,
+            'weekly_line': weekly_line,
+            'ratelimit_data': ratelimit_data,
+            'api_session_range': api_session_range,
+            'five_hour_utilization': ratelimit_data.get('five_hour', {}).get('utilization') if ratelimit_data else None,
+            'session_duration_seconds': duration_seconds,
             'show_line1': SHOW_LINE1,
             'show_line2': SHOW_LINE2,
             'show_line3': SHOW_LINE3,
@@ -2779,6 +2865,470 @@ def calculate_tokens_since_time(start_time, session_id):
 # REMOVED: calculate_true_session_cumulative() - unused function (replaced by calculate_tokens_since_time)
 
 # REMOVED: get_session_cumulative_usage() - unused function (5th line display not implemented)
+
+# ============================================
+# Ratelimit cache management (OAuth API)
+# ============================================
+
+def get_ratelimit_cache_file():
+    """Get rate limit cache file path (lazy initialization)"""
+    global RATELIMIT_CACHE_FILE
+    if RATELIMIT_CACHE_FILE is None:
+        RATELIMIT_CACHE_FILE = Path.home() / '.claude' / '.ratelimit_cache.json'
+    return RATELIMIT_CACHE_FILE
+
+def get_ratelimit_lock_file():
+    """Get rate limit lock file path (lazy initialization)"""
+    global RATELIMIT_LOCK_FILE
+    if RATELIMIT_LOCK_FILE is None:
+        RATELIMIT_LOCK_FILE = Path.home() / '.claude' / '.ratelimit_lock.json'
+    return RATELIMIT_LOCK_FILE
+
+def load_ratelimit_cache():
+    """Load ratelimit cache from disk."""
+    cache_file = get_ratelimit_cache_file()
+    try:
+        if cache_file.exists():
+            with open(cache_file) as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        pass
+    return None
+
+def _acquire_pid_lock():
+    """Acquire PID lock for probe mutual exclusion."""
+    lock_file = get_ratelimit_lock_file()
+    try:
+        if lock_file.exists():
+            with open(lock_file) as f:
+                lock_data = json.load(f)
+            pid = lock_data.get('pid')
+            start_time_val = lock_data.get('start_time', 0)
+            # Check if process is still alive and lock is not stale (60s)
+            if pid and time.time() - start_time_val < 60:
+                try:
+                    os.kill(pid, 0)
+                    return False  # Process alive, lock held
+                except OSError:
+                    pass  # Process dead, steal lock
+    except (json.JSONDecodeError, IOError, OSError):
+        pass
+    return True
+
+def _write_pid_lock(pid):
+    """Write PID to lock file."""
+    lock_file = get_ratelimit_lock_file()
+    try:
+        with open(lock_file, 'w') as f:
+            json.dump({'pid': pid, 'start_time': time.time()}, f)
+    except (IOError, OSError):
+        pass
+
+def _release_pid_lock():
+    """Release PID lock file."""
+    lock_file = get_ratelimit_lock_file()
+    try:
+        lock_file.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+# ============================================
+# OAuth token retrieval (cross-platform)
+# ============================================
+
+def _parse_keychain_content(content):
+    """Parse keychain content: JSON format or raw token."""
+    if content.startswith('{'):
+        try:
+            parsed = json.loads(content)
+            token = parsed.get('claudeAiOauth', {}).get('accessToken')
+            if token and token.startswith('sk-ant-oat'):
+                return token
+        except json.JSONDecodeError:
+            pass
+    if content.startswith('sk-ant-oat'):
+        return content
+    return None
+
+def _get_oauth_token_macos():
+    """macOS: Extract OAuth token from Keychain, including hash-suffixed service names."""
+    try:
+        result = subprocess.run(
+            ['security', 'dump-keychain'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=5
+        )
+        service_names = []
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if 'Claude Code-credentials' in line:
+                    m = re.search(r'"(Claude Code-credentials[^"]*)"', line)
+                    if m:
+                        service_names.append(m.group(1))
+        service_names = sorted(set(service_names), key=len, reverse=True)
+        if not service_names:
+            service_names = ['Claude Code-credentials']
+        for name in service_names:
+            try:
+                result = subprocess.run(
+                    ['security', 'find-generic-password', '-s', name, '-w'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    token = _parse_keychain_content(result.stdout.strip())
+                    if token:
+                        return token
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+def _get_oauth_token_linux():
+    """Linux: Extract OAuth token from GNOME Keyring via secret-tool."""
+    try:
+        result = subprocess.run(
+            ['secret-tool', 'lookup', 'service', 'Claude Code'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            token = _parse_keychain_content(result.stdout.strip())
+            if token:
+                return token
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
+def _get_oauth_token_from_files():
+    """Credential files fallback (all platforms)."""
+    home = Path.home()
+    paths = [
+        home / '.claude' / '.credentials.json',
+        home / '.claude' / 'credentials.json',
+        home / '.config' / 'claude-code' / 'credentials.json',
+    ]
+    if os.name == 'nt':
+        for env_var in ('APPDATA', 'LOCALAPPDATA'):
+            d = os.environ.get(env_var)
+            if d:
+                paths.append(Path(d) / 'Claude Code' / 'credentials.json')
+    for p in paths:
+        try:
+            if not p.exists():
+                continue
+            with open(p) as f:
+                creds = json.load(f)
+            token = creds.get('claudeAiOauth', {}).get('accessToken')
+            if token and token.startswith('sk-ant-oat'):
+                return token
+            for key in ('oauth_token', 'token', 'accessToken'):
+                token = creds.get(key)
+                if token and isinstance(token, str) and token.startswith('sk-ant-oat'):
+                    return token
+        except (json.JSONDecodeError, IOError, OSError):
+            continue
+    return None
+
+def _get_oauth_token():
+    """Extract OAuth access token (cross-platform).
+    Fallback chain: macOS Keychain -> Linux secret-tool -> credential files.
+    """
+    import platform
+    system = platform.system()
+    token = None
+    if system == 'Darwin':
+        token = _get_oauth_token_macos()
+    elif system == 'Linux':
+        token = _get_oauth_token_linux()
+    if token and token.startswith('sk-ant-oat'):
+        return token
+    token = _get_oauth_token_from_files()
+    if token and token.startswith('sk-ant-oat'):
+        return token
+    return None
+
+# ============================================
+# Background probe for OAuth usage API
+# ============================================
+
+def probe_ratelimit_background():
+    """Launch background probe to fetch usage data from Anthropic OAuth API.
+    Cross-platform: macOS Keychain, Linux secret-tool, credential files fallback.
+    """
+    if not _acquire_pid_lock():
+        return
+
+    try:
+        cache_file = str(get_ratelimit_cache_file())
+        lock_file = str(get_ratelimit_lock_file())
+
+        probe_script = f'''
+import json, sys, subprocess, os, time, tempfile, signal, platform, re
+from pathlib import Path
+
+def handler(signum, frame):
+    sys.exit(1)
+
+if hasattr(signal, 'SIGALRM'):
+    signal.signal(signal.SIGALRM, handler)
+    signal.alarm(15)
+else:
+    import threading
+    threading.Timer(15, lambda: os._exit(1)).start()
+
+def parse_keychain_content(content):
+    if content.startswith('{{'):
+        try:
+            parsed = json.loads(content)
+            t = parsed.get('claudeAiOauth', {{}}).get('accessToken')
+            if t and t.startswith('sk-ant-oat'):
+                return t
+        except json.JSONDecodeError:
+            pass
+    if content.startswith('sk-ant-oat'):
+        return content
+    return None
+
+def get_token_macos():
+    try:
+        r = subprocess.run(['security', 'dump-keychain'],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, timeout=5)
+        names = []
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                if 'Claude Code-credentials' in line:
+                    m = re.search(r'"(Claude Code-credentials[^"]*)"', line)
+                    if m:
+                        names.append(m.group(1))
+        names = sorted(set(names), key=len, reverse=True)
+        if not names:
+            names = ['Claude Code-credentials']
+        for name in names:
+            try:
+                r2 = subprocess.run(
+                    ['security', 'find-generic-password', '-s', name, '-w'],
+                    capture_output=True, text=True, timeout=5)
+                if r2.returncode == 0 and r2.stdout.strip():
+                    t = parse_keychain_content(r2.stdout.strip())
+                    if t:
+                        return t
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+def get_token_linux():
+    try:
+        r = subprocess.run(
+            ['secret-tool', 'lookup', 'service', 'Claude Code'],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            t = parse_keychain_content(r.stdout.strip())
+            if t:
+                return t
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
+def get_token_from_files():
+    home = Path.home()
+    paths = [
+        home / '.claude' / '.credentials.json',
+        home / '.claude' / 'credentials.json',
+        home / '.config' / 'claude-code' / 'credentials.json',
+    ]
+    if os.name == 'nt':
+        for ev in ('APPDATA', 'LOCALAPPDATA'):
+            d = os.environ.get(ev)
+            if d:
+                paths.append(Path(d) / 'Claude Code' / 'credentials.json')
+    for p in paths:
+        try:
+            if not p.exists():
+                continue
+            with open(p) as f:
+                creds = json.load(f)
+            t = creds.get('claudeAiOauth', {{}}).get('accessToken')
+            if t and t.startswith('sk-ant-oat'):
+                return t
+            for key in ('oauth_token', 'token', 'accessToken'):
+                t = creds.get(key)
+                if t and isinstance(t, str) and t.startswith('sk-ant-oat'):
+                    return t
+        except (json.JSONDecodeError, IOError, OSError):
+            continue
+    return None
+
+def get_token():
+    system = platform.system()
+    token = None
+    if system == 'Darwin':
+        token = get_token_macos()
+    elif system == 'Linux':
+        token = get_token_linux()
+    if token and token.startswith('sk-ant-oat'):
+        return token
+    token = get_token_from_files()
+    if token and token.startswith('sk-ant-oat'):
+        return token
+    return None
+
+try:
+    token = get_token()
+    if not token:
+        sys.exit(1)
+
+    result = subprocess.run(
+        ['curl', '-s', '--max-time', '10',
+         '-H', f'Authorization: Bearer {{token}}',
+         '-H', 'anthropic-beta: oauth-2025-04-20',
+         'https://api.anthropic.com/api/oauth/usage'],
+        capture_output=True, text=True, timeout=15
+    )
+
+    if result.returncode != 0 or not result.stdout.strip():
+        sys.exit(1)
+
+    usage_data = json.loads(result.stdout.strip())
+
+    cache = {{"timestamp": time.time(), "data": usage_data}}
+    cache_dir = os.path.dirname("{cache_file}")
+    fd, tmp = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(cache, f)
+        os.rename(tmp, "{cache_file}")
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+finally:
+    try:
+        os.unlink("{lock_file}")
+    except (FileNotFoundError, OSError):
+        pass
+'''
+
+        proc = subprocess.Popen(
+            [sys.executable, '-c', probe_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        _write_pid_lock(proc.pid)
+
+    except Exception:
+        _release_pid_lock()
+
+# ============================================
+# Ratelimit data access + display helpers
+# ============================================
+
+def get_ratelimit_info():
+    """Get rate limit info, triggering background probe if stale."""
+    cache = load_ratelimit_cache()
+    if cache:
+        age = time.time() - cache.get('timestamp', 0)
+        if age < RATELIMIT_CACHE_TTL:
+            return cache.get('data')
+        probe_ratelimit_background()
+        return cache.get('data')
+    probe_ratelimit_background()
+    return None
+
+def _get_utilization_color(pct):
+    """Get color based on utilization percentage."""
+    if pct >= 90:
+        return f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}"
+    elif pct >= 75:
+        return Colors.BRIGHT_RED
+    elif pct >= 50:
+        return Colors.BRIGHT_YELLOW
+    return Colors.BRIGHT_GREEN
+
+def get_api_session_time_range(ratelimit_data):
+    """Extract 5-hour session time range from API data.
+    Returns (start_local_str, end_local_str) like ('3am', '8am') or None.
+    """
+    if not ratelimit_data:
+        return None
+    five_hour = ratelimit_data.get('five_hour')
+    if not five_hour or not five_hour.get('resets_at'):
+        return None
+    try:
+        resets_at = datetime.fromisoformat(five_hour['resets_at'])
+        end_local = resets_at.astimezone()  # Convert to local timezone
+        start_local = end_local - timedelta(hours=5)
+
+        def fmt_hour(dt):
+            h = dt.hour
+            suffix = 'am' if h < 12 else 'pm'
+            h12 = h % 12 or 12
+            if dt.minute == 0:
+                return f"{h12}{suffix}"
+            return f"{h12}:{dt.minute:02d}{suffix}"
+
+        return (fmt_hour(start_local), fmt_hour(end_local))
+    except (ValueError, TypeError):
+        return None
+
+def get_weekly_line(ratelimit_data):
+    """Generate Weekly line display (Line 4).
+    Format: Weekly:  ████████████▒▒▒▒▒▒▒▒ [64%] 32m, Extra: 7% $3.59/$50
+    """
+    if not ratelimit_data:
+        return None
+
+    seven_day = ratelimit_data.get('seven_day')
+    if not seven_day:
+        return None
+
+    utilization = seven_day.get('utilization', 0)
+    util_color = _get_utilization_color(utilization)
+
+    parts = []
+    parts.append(f"{Colors.BRIGHT_CYAN}Weekly:  {Colors.RESET}")
+    parts.append(get_progress_bar(utilization, width=20))
+    parts.append(f" {util_color}[{int(utilization)}%]{Colors.RESET}")
+
+    # Time remaining until reset
+    resets_at_str = seven_day.get('resets_at')
+    if resets_at_str:
+        try:
+            resets_at = datetime.fromisoformat(resets_at_str)
+            now = datetime.now(timezone.utc)
+            remaining = resets_at - now
+            remaining_seconds = max(0, remaining.total_seconds())
+            if remaining_seconds < 3600:
+                parts.append(f" {Colors.BRIGHT_WHITE}{int(remaining_seconds / 60)}m{Colors.RESET}")
+            elif remaining_seconds < 86400:
+                hours = int(remaining_seconds / 3600)
+                mins = int((remaining_seconds % 3600) / 60)
+                parts.append(f" {Colors.BRIGHT_WHITE}{hours}h{mins:02d}m{Colors.RESET}")
+            else:
+                days = int(remaining_seconds / 86400)
+                hours = int((remaining_seconds % 86400) / 3600)
+                mins = int((remaining_seconds % 3600) / 60)
+                parts.append(f" {Colors.BRIGHT_WHITE}{days}d{hours}h{mins:02d}m{Colors.RESET}")
+        except (ValueError, TypeError):
+            pass
+
+    # Extra usage info
+    extra = ratelimit_data.get('extra_usage')
+    if extra and extra.get('is_enabled'):
+        extra_pct = extra.get('utilization', 0)
+        used = extra.get('used_credits', 0)
+        limit = extra.get('monthly_limit', 0)
+        # Credits are in cents - convert to dollars
+        used_str = f"${used / 100:.2f}" if used >= 100 else f"${used:.2f}"
+        limit_str = f"${limit / 100:.0f}" if limit >= 100 else f"${limit:.0f}"
+        parts.append(f", {Colors.BRIGHT_YELLOW}Extra: {int(extra_pct)}%{Colors.RESET}")
+        parts.append(f" {Colors.BRIGHT_WHITE}{used_str}/{limit_str}{Colors.RESET}")
+
+    return "".join(parts)
 
 def get_burn_line(current_session_data=None, session_id=None, block_stats=None, current_block=None):
     """Generate burn line display (Line 4)
