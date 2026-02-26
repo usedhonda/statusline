@@ -33,8 +33,6 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import time
-import signal
-import tempfile
 
 # CONSTANTS
 
