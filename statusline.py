@@ -2314,7 +2314,7 @@ def format_output_tight(ctx):
             util_color = _get_utilization_color(util)
             wt = ctx.get('weekly_timeline')
             if wt and any(v > 0 for v in wt):
-                spark = create_sparkline(wt, width=7)
+                spark = create_sparkline(wt, width=8)
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
             else:
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
