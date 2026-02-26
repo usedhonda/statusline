@@ -2352,6 +2352,13 @@ def format_output_minimal(ctx, terminal_width):
     return [line]
 
 def main():
+    # Force line-buffered stdout to prevent partial output when piped to Claude Code
+    # Without this, Python uses block buffering for pipes, causing intermittent display issues
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:
+        pass  # Python < 3.7
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
     parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
@@ -2766,14 +2773,16 @@ def main():
             warning = f"{Colors.BRIGHT_RED}\u26a0\ufe0f DEAD: {dead_names}{Colors.RESET}"
             lines.insert(0, warning)
 
-        # Output lines
-        for line in lines:
-            print(f"\033[0m\033[1;97m{line}\033[0m")
-        
+        # Output lines (flush=True to avoid partial reads when piped to Claude Code)
+        output = "\n".join(f"\033[0m\033[1;97m{line}\033[0m" for line in lines)
+        sys.stdout.write(output + "\n")
+        sys.stdout.flush()
+
     except Exception as e:
         # Fallback status line on error
-        print(f"{Colors.BRIGHT_RED}[Error]{Colors.RESET} . | 0 | 0%")
-        print(f"{Colors.LIGHT_GRAY}Check ~/.claude/statusline-error.log{Colors.RESET}")
+        sys.stdout.write(f"{Colors.BRIGHT_RED}[Error]{Colors.RESET} . | 0 | 0%\n")
+        sys.stdout.write(f"{Colors.LIGHT_GRAY}Check ~/.claude/statusline-error.log{Colors.RESET}\n")
+        sys.stdout.flush()
         
         # Debug logging
         with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
