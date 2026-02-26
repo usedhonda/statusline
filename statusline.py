@@ -2238,7 +2238,12 @@ def format_output_compact(ctx):
         if rl and rl.get('seven_day'):
             util = rl['seven_day'].get('utilization', 0)
             util_color = _get_utilization_color(util)
-            line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
+            wt = ctx.get('weekly_timeline')
+            if wt and any(v > 0 for v in wt):
+                spark = create_sparkline(wt, width=12)
+                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
+            else:
+                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
             lines.append(line4)
 
     return lines
@@ -2307,7 +2312,12 @@ def format_output_tight(ctx):
         if rl and rl.get('seven_day'):
             util = rl['seven_day'].get('utilization', 0)
             util_color = _get_utilization_color(util)
-            line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
+            wt = ctx.get('weekly_timeline')
+            if wt and any(v > 0 for v in wt):
+                spark = create_sparkline(wt, width=7)
+                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
+            else:
+                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
             lines.append(line4)
 
     return lines
@@ -2669,7 +2679,8 @@ def main():
         try:
             ratelimit_data = get_ratelimit_info() if SHOW_LINE4 or SHOW_LINE3 else None
             api_session_range = get_api_session_time_range(ratelimit_data) if ratelimit_data else None
-            weekly_line = get_weekly_line(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
+            weekly_timeline = generate_weekly_timeline(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
+            weekly_line = get_weekly_line(ratelimit_data, weekly_timeline) if SHOW_LINE4 and ratelimit_data else None
             # Derive API block start time (UTC, naive) for sparkline alignment
             if ratelimit_data and ratelimit_data.get('five_hour', {}).get('resets_at'):
                 resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
@@ -2720,6 +2731,7 @@ def main():
             'burn_timeline': burn_timeline,
             'block_tokens': block_tokens,
             'weekly_line': weekly_line,
+            'weekly_timeline': weekly_timeline if SHOW_LINE4 else None,
             'ratelimit_data': ratelimit_data,
             'api_session_range': api_session_range,
             'five_hour_utilization': ratelimit_data.get('five_hour', {}).get('utilization') if ratelimit_data else None,
@@ -3275,9 +3287,121 @@ def get_api_session_time_range(ratelimit_data):
     except (ValueError, TypeError):
         return None
 
-def get_weekly_line(ratelimit_data):
+WEEKLY_TIMELINE_CACHE_TTL = 300  # 5 minutes
+
+def _get_weekly_timeline_cache_file():
+    return Path.home() / '.claude' / '.weekly_timeline_cache.json'
+
+def generate_weekly_timeline(ratelimit_data, num_segments=20):
+    """Generate timeline of token consumption across the 7-day window.
+
+    Uses resets_at from the API to determine the window, then scans JSONL transcripts
+    for token usage in each segment. 20 segments across 7 days (~8.4h each) to match
+    Session sparkline width.
+
+    Results are cached with a 5-minute TTL to avoid slow 7-day transcript scans.
+
+    Returns:
+        list: num_segments values representing token consumption per segment (oldest to newest)
+    """
+    empty = [0] * num_segments
+
+    seven_day = ratelimit_data.get('seven_day') if ratelimit_data else None
+    if not seven_day or not seven_day.get('resets_at'):
+        return empty
+
+    # Check cache first
+    cache_file = _get_weekly_timeline_cache_file()
+    try:
+        if cache_file.exists():
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+            if time.time() - cached.get('timestamp', 0) < WEEKLY_TIMELINE_CACHE_TTL:
+                tl = cached.get('timeline', empty)
+                if len(tl) == num_segments:
+                    return tl
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    # Generate fresh timeline
+    timeline = _scan_weekly_timeline(seven_day['resets_at'], num_segments)
+
+    # Write cache (atomic)
+    try:
+        tmp = cache_file.with_suffix('.tmp')
+        with open(tmp, 'w') as f:
+            json.dump({'timestamp': time.time(), 'timeline': timeline}, f)
+        tmp.rename(cache_file)
+    except OSError:
+        pass
+
+    return timeline
+
+def _scan_weekly_timeline(resets_at_str, num_segments):
+    """Scan JSONL transcripts and build token timeline for the 7-day window."""
+    timeline = [0] * num_segments
+    total_seconds = 7 * 86400
+    seg_seconds = total_seconds / num_segments
+
+    try:
+        resets_at = datetime.fromisoformat(resets_at_str)
+        window_start = resets_at - timedelta(days=7)
+        window_start_utc = window_start.astimezone(timezone.utc).replace(tzinfo=None)
+
+        transcript_files = find_all_transcript_files(hours_limit=168)
+        processed_hashes = set()
+
+        for transcript_file in transcript_files:
+            try:
+                with open(transcript_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if not entry.get('timestamp'):
+                                continue
+
+                            entry_type = entry.get('type')
+                            usage = None
+                            if entry_type == 'assistant':
+                                msg = entry.get('message', {})
+                                usage = msg.get('usage') if msg else entry.get('usage')
+                            if not usage:
+                                continue
+
+                            msg_id = entry.get('uuid') or (entry.get('message', {}) or {}).get('id')
+                            req_id = entry.get('requestId')
+                            if msg_id and req_id:
+                                h = f"{msg_id}:{req_id}"
+                                if h in processed_hashes:
+                                    continue
+                                processed_hashes.add(h)
+
+                            ts = datetime.fromisoformat(
+                                entry['timestamp'].replace('Z', '+00:00')
+                            ).astimezone(timezone.utc).replace(tzinfo=None)
+
+                            if ts < window_start_utc:
+                                continue
+
+                            elapsed = (ts - window_start_utc).total_seconds()
+                            seg = min(num_segments - 1, int(elapsed / seg_seconds))
+
+                            tokens = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+                            timeline[seg] += tokens
+
+                        except (json.JSONDecodeError, ValueError, KeyError):
+                            continue
+            except (FileNotFoundError, PermissionError):
+                continue
+
+    except (ValueError, TypeError):
+        pass
+
+    return timeline
+
+def get_weekly_line(ratelimit_data, weekly_timeline=None):
     """Generate Weekly line display (Line 4).
-    Format: Weekly:  ████████████▒▒▒▒▒▒▒▒ [64%] 32m, Extra: 7% $3.59/$50
+    Format: Weekly:  ▁▂▃▅▆▇█▃ [64%] 32m, Extra: 7% $3.59/$50
     """
     if not ratelimit_data:
         return None
@@ -3291,7 +3415,10 @@ def get_weekly_line(ratelimit_data):
 
     parts = []
     parts.append(f"{Colors.BRIGHT_CYAN}Weekly:  {Colors.RESET}")
-    parts.append(get_progress_bar(utilization, width=20))
+    if weekly_timeline and any(v > 0 for v in weekly_timeline):
+        parts.append(create_sparkline(weekly_timeline, width=20))
+    else:
+        parts.append(get_progress_bar(utilization, width=20))
     parts.append(f" {util_color}[{int(utilization)}%]{Colors.RESET}")
 
     # Time remaining until reset
