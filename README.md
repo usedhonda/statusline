@@ -41,8 +41,8 @@ Supports **1M context** — the model bracket shows `(1M)` when using extended c
 
 ### Responsive Layout
 Automatically adapts to terminal width:
-- **Full** (≥68 cols): All details with full labels
-- **Compact** (35–67 cols): Abbreviated labels
+- **Full** (≥55 cols): All details with full labels, graph width scales smoothly with terminal width
+- **Compact** (35–54 cols): Abbreviated labels
 - **Tight** (<35 cols): Ultra-minimal display
 
 Also adapts to terminal height — switches to single-line minimal mode for short terminals.

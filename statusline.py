@@ -1925,7 +1925,8 @@ def truncate_text(text, max_len):
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_active_files=True, include_messages=True,
                       include_lines=True, include_errors=True, include_cost=True,
-                      tight_model=False, include_context_badge=True):
+                      tight_model=False, include_context_badge=True,
+                      include_dir=True):
     """Line 1の各パーツを構築する
 
     Args:
@@ -1939,6 +1940,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         include_cost: コストを含めるか
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
         include_context_badge: 1Mコンテキストバッジを表示するか
+        include_dir: ディレクトリを含めるか
 
     Returns:
         list: Line 1のパーツのリスト
@@ -1962,10 +1964,11 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         parts.append(git_display)
 
     # Directory
-    dir_name = ctx['current_dir']
-    if max_dir_len and len(dir_name) > max_dir_len:
-        dir_name = truncate_text(dir_name, max_dir_len)
-    parts.append(f"{Colors.BRIGHT_CYAN}📁 {dir_name}{Colors.RESET}")
+    if include_dir:
+        dir_name = ctx['current_dir']
+        if max_dir_len and len(dir_name) > max_dir_len:
+            dir_name = truncate_text(dir_name, max_dir_len)
+        parts.append(f"{Colors.BRIGHT_CYAN}📁 {dir_name}{Colors.RESET}")
 
     # Active files
     if include_active_files and ctx['active_files'] > 0:
@@ -2071,60 +2074,47 @@ def format_output_full(ctx, terminal_width=None):
         if show_schedule_now and schedule_line:
             lines.append(schedule_line)
         else:
-            # Normal Line 1: Model/Git/Dir/Messages
-            # Step 1: 全要素で構築（ブランチ名をやや短めに）
-            line1_parts = build_line1_parts(ctx, max_branch_len=15)
-            line1 = " | ".join(line1_parts)
-
-            if get_display_width(line1) <= terminal_width:
-                lines.append(line1)
-            else:
-                # Step 2: 低優先度要素を削除（コスト、行変更、エラー）
-                line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                                include_errors=False)
-                line1 = " | ".join(line1_parts)
-
+            # Normal Line 1: progressive shrinking by priority
+            #
+            # 優先度（高→低）: モデル > ブランチ > git status > 💬メッセージ > 📁ディレクトリ > 💰コスト > +/-行数 > ⚠️エラー > 📝ファイル > (1M)バッジ
+            #
+            # 段階:
+            #  1. 全要素（ブランチ15文字）
+            #  2. 💰コスト・+/-行数・⚠️エラー削除
+            #  3. 📝ファイル削除・モデル名短縮
+            #  4. ブランチ12・ディレクトリ12に短縮
+            #  5. ブランチ10・(1M)バッジ削除
+            #  6. 💬メッセージ削除・ディレクトリ10
+            #  7. 📁ディレクトリ削除（ブランチのほうが重要）
+            #  8. セパレータ " | " → " "（compact風）
+            shrink_steps = [
+                # (separator, build_line1_parts kwargs)
+                (" | ", dict(max_branch_len=15)),
+                (" | ", dict(include_cost=False, include_lines=False, include_errors=False)),
+                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
+                             include_active_files=False, tight_model=True, max_branch_len=15)),
+                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
+                             include_active_files=False, tight_model=True,
+                             max_branch_len=12, max_dir_len=12)),
+                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
+                             include_active_files=False, tight_model=True,
+                             max_branch_len=10, max_dir_len=12, include_context_badge=False)),
+                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
+                             include_active_files=False, include_messages=False, tight_model=True,
+                             max_branch_len=10, max_dir_len=10, include_context_badge=False)),
+                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
+                             include_active_files=False, include_messages=False, include_dir=False,
+                             tight_model=True, max_branch_len=10, include_context_badge=False)),
+                (" ",   dict(include_cost=False, include_lines=False, include_errors=False,
+                             include_active_files=False, include_messages=False, include_dir=False,
+                             tight_model=True, max_branch_len=8, include_context_badge=False)),
+            ]
+            for sep, kwargs in shrink_steps:
+                line1_parts = build_line1_parts(ctx, **kwargs)
+                line1 = sep.join(line1_parts)
                 if get_display_width(line1) <= terminal_width:
-                    lines.append(line1)
-                else:
-                    # Step 3: アクティブファイル削除 + モデル名短縮
-                    line1_parts = build_line1_parts(ctx, max_branch_len=15,
-                                                    include_cost=False, include_lines=False,
-                                                    include_errors=False, include_active_files=False,
-                                                    tight_model=True)
-                    line1 = " | ".join(line1_parts)
-
-                    if get_display_width(line1) <= terminal_width:
-                        lines.append(line1)
-                    else:
-                        # Step 4: ブランチ名とディレクトリ名を短縮
-                        line1_parts = build_line1_parts(ctx, max_branch_len=12,
-                                                        include_cost=False, include_lines=False,
-                                                        include_errors=False, include_active_files=False,
-                                                        max_dir_len=12,
-                                                        tight_model=True)
-                        line1 = " | ".join(line1_parts)
-
-                        if get_display_width(line1) <= terminal_width:
-                            lines.append(line1)
-                        else:
-                            # Step 5: ブランチ名をさらに短縮 + コンテキストバッジ削除
-                            line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                                            include_errors=False, include_active_files=False,
-                                                            max_branch_len=10, max_dir_len=12,
-                                                            tight_model=True, include_context_badge=False)
-                            line1 = " | ".join(line1_parts)
-
-                            if get_display_width(line1) <= terminal_width:
-                                lines.append(line1)
-                            else:
-                                # Step 6: メッセージも削除、最小構成
-                                line1_parts = build_line1_parts(ctx, include_cost=False, include_lines=False,
-                                                                include_errors=False, include_active_files=False,
-                                                                include_messages=False,
-                                                                max_branch_len=10, max_dir_len=10,
-                                                                tight_model=True, include_context_badge=False)
-                                lines.append(" | ".join(line1_parts))
+                    break
+            lines.append(line1)
 
     # Line 2: Compact tokens
     if ctx['show_line2']:
