@@ -93,10 +93,11 @@ class TestGetDisplayMode:
     def test_full(self):
         assert statusline.get_display_mode(68) == "full"
         assert statusline.get_display_mode(120) == "full"
+        assert statusline.get_display_mode(55) == "full"
 
     def test_compact(self):
         assert statusline.get_display_mode(35) == "compact"
-        assert statusline.get_display_mode(67) == "compact"
+        assert statusline.get_display_mode(54) == "compact"
 
     def test_tight(self):
         assert statusline.get_display_mode(34) == "tight"

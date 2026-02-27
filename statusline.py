@@ -291,8 +291,8 @@ def get_display_mode(width):
 
     | モード | 幅 | 最長行 | 表示内容 |
     |--------|-----|--------|---------|
-    | full | >= 68 | 66文字 | 4行・全項目・装飾あり |
-    | compact | 35-67 | 30文字 | 4行・ラベル短縮・装飾削減 |
+    | full | >= 55 | 可変 | 4行・全項目・装飾あり・グラフ幅可変 |
+    | compact | 35-54 | 30文字 | 4行・ラベル短縮・装飾削減 |
     | tight | < 35 | 23文字 | 4行・最短表示 |
 
     Args:
@@ -300,7 +300,7 @@ def get_display_mode(width):
     Returns:
         str: 'full', 'compact', or 'tight'
     """
-    if width >= 68:
+    if width >= 55:
         return 'full'
     elif width >= 35:
         return 'compact'
@@ -2024,13 +2024,19 @@ def format_agent_line(ctx, agent_name):
     return " | ".join(parts)
 
 def format_output_full(ctx, terminal_width=None):
-    """Full mode (>= 68 chars): 4行・全項目・装飾あり
+    """Full mode (>= 55 chars): 4行・全項目・装飾あり・グラフ幅可変
 
-    Example:
+    Example (width >= 68):
     [Son4] | 🌿 main M2 | 📁 statusline | 💬 254 | 💰 $1.23
     Context: ████████▒▒▒▒▒▒▒ [58%] 91.8K/200.0K ♻️ 99%
     Session: █▇▁▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 1h27m/5h, 40.3M token(462K t/m) (3am-8am)
     Weekly:  ████████████▒▒▒▒▒▒▒▒ [64%] 32m, Extra: 7% $3.59/$50
+
+    Example (width 55-67):
+    [Son4] | 🌿 main M2 | 📁 statusline
+    Context: ████▒▒▒▒▒ [58%] 91.8K/200.0K ♻️ 99%
+    Session: █▇▁▁▂▄▁▁▁ 1h27m/5h, 40.3M token (3am-8am)
+    Weekly:  ████████▒▒ [64%] 32m, Extra: 7% $3.59/$50
 
     Args:
         ctx: コンテキスト辞書
@@ -2040,10 +2046,15 @@ def format_output_full(ctx, terminal_width=None):
 
     # Line 1: Model/Git/Dir/Messages (with dynamic length adjustment)
     # Or schedule display if --schedule is enabled (time-based swap)
-    if ctx['show_line1']:
-        if terminal_width is None:
-            terminal_width = get_terminal_width()
+    if terminal_width is None:
+        terminal_width = get_terminal_width()
 
+    # Determine graph width: smoothly scale with terminal width
+    # Non-graph content of longest line (L4 Weekly) is ~39 chars + ~4 margin,
+    # so graph_width = terminal_width - 43, clamped to [8, 20]
+    graph_width = min(20, max(8, terminal_width - 43))
+
+    if ctx['show_line1']:
         # Check if we should show schedule line (swap every SCHEDULE_SWAP_INTERVAL seconds)
         show_schedule_now = False
         schedule_line = None
@@ -2131,7 +2142,7 @@ def format_output_full(ctx, terminal_width=None):
             percentage_display = f"{percentage_color}{Colors.BOLD}[{percentage}%]{Colors.RESET}"
 
         line2_parts.append(compact_label)
-        line2_parts.append(get_progress_bar(percentage, width=20))
+        line2_parts.append(get_progress_bar(percentage, width=graph_width))
         line2_parts.append(percentage_display)
         denom = ctx['context_size']
         line2_parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{format_token_count(denom)}{Colors.RESET}")
@@ -2153,10 +2164,10 @@ def format_output_full(ctx, terminal_width=None):
         line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
         # Use burn sparkline instead of progress bar
         if ctx['burn_timeline']:
-            sparkline = create_sparkline(ctx['burn_timeline'], width=20)
+            sparkline = create_sparkline(ctx['burn_timeline'], width=graph_width)
             line3_parts.append(sparkline)
         else:
-            line3_parts.append(get_progress_bar(ctx['block_progress'], width=20, show_current_segment=True))
+            line3_parts.append(get_progress_bar(ctx['block_progress'], width=graph_width, show_current_segment=True))
         # 5-hour utilization from API
         if ctx.get('five_hour_utilization') is not None:
             util = int(ctx['five_hour_utilization'])
@@ -2174,12 +2185,21 @@ def format_output_full(ctx, terminal_width=None):
 
     # Line 4: Weekly usage
     if ctx['show_line4'] and ctx.get('weekly_line'):
-        lines.append(ctx['weekly_line'])
+        if graph_width != 20 and ctx.get('ratelimit_data'):
+            # Regenerate weekly line with narrower graph width
+            weekly_line = get_weekly_line(ctx['ratelimit_data'], ctx.get('weekly_timeline'),
+                                         sparkline_width=graph_width)
+            if weekly_line:
+                lines.append(weekly_line)
+            else:
+                lines.append(ctx['weekly_line'])
+        else:
+            lines.append(ctx['weekly_line'])
 
     return lines
 
 def format_output_compact(ctx):
-    """Compact mode (55-71 chars): 4行・ラベル短縮・装飾削減
+    """Compact mode (35-54 chars): 4行・ラベル短縮・装飾削減
 
     Example:
     [Son4] main M2+1 statusline 💬254
@@ -2235,21 +2255,23 @@ def format_output_compact(ctx):
                 line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
-    # Line 3: Session (shortened with sparkline + tokens)
+    # Line 3: Session (shortened with sparkline + utilization% + time range)
     if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
         if ctx['burn_timeline']:
             sparkline = create_sparkline(ctx['burn_timeline'], width=12)
             line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
         else:
             line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
-        if ctx['block_tokens'] > 0:
-            line3 += f"{Colors.BRIGHT_WHITE}{format_token_count_short(ctx['block_tokens'])}{Colors.RESET}"
+        if ctx.get('five_hour_utilization') is not None:
+            util = int(ctx['five_hour_utilization'])
+            util_color = _get_utilization_color(util)
+            line3 += f"{util_color}[{util}%]{Colors.RESET}"
         if ctx.get('api_session_range'):
             start, end = ctx['api_session_range']
             line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
         lines.append(line3)
 
-    # Line 4: Weekly (shortened)
+    # Line 4: Weekly (shortened with remaining time)
     if ctx['show_line4'] and ctx.get('weekly_line'):
         rl = ctx.get('ratelimit_data')
         if rl and rl.get('seven_day'):
@@ -2261,6 +2283,25 @@ def format_output_compact(ctx):
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
             else:
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
+            # Add remaining time (e.g. "6d10h07m")
+            resets_at_str = rl['seven_day'].get('resets_at')
+            if resets_at_str:
+                try:
+                    resets_at = datetime.fromisoformat(resets_at_str)
+                    remaining_s = max(0, (resets_at - datetime.now(timezone.utc)).total_seconds())
+                    if remaining_s < 3600:
+                        line4 += f" {Colors.BRIGHT_WHITE}{int(remaining_s / 60)}m{Colors.RESET}"
+                    elif remaining_s < 86400:
+                        h = int(remaining_s / 3600)
+                        m = int((remaining_s % 3600) / 60)
+                        line4 += f" {Colors.BRIGHT_WHITE}{h}h{m:02d}m{Colors.RESET}"
+                    else:
+                        d = int(remaining_s / 86400)
+                        h = int((remaining_s % 86400) / 3600)
+                        m = int((remaining_s % 3600) / 60)
+                        line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
+                except (ValueError, TypeError):
+                    pass
             lines.append(line4)
 
     return lines
@@ -2311,19 +2352,23 @@ def format_output_tight(ctx):
                 line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
-    # Line 3: Session (ultra short with sparkline)
+    # Line 3: Session (ultra short with sparkline + utilization%)
     if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
         if ctx['burn_timeline']:
             sparkline = create_sparkline(ctx['burn_timeline'], width=8)
             line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
         else:
             line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
+        if ctx.get('five_hour_utilization') is not None:
+            util = int(ctx['five_hour_utilization'])
+            util_color = _get_utilization_color(util)
+            line3 += f"{util_color}[{util}%]{Colors.RESET}"
         if ctx.get('api_session_range'):
             start, end = ctx['api_session_range']
-            line3 += f"{Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+            line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
         lines.append(line3)
 
-    # Line 4: Weekly (ultra short)
+    # Line 4: Weekly (ultra short with remaining time)
     if ctx['show_line4'] and ctx.get('weekly_line'):
         rl = ctx.get('ratelimit_data')
         if rl and rl.get('seven_day'):
@@ -2335,6 +2380,25 @@ def format_output_tight(ctx):
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
             else:
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
+            # Add remaining time (e.g. "6d10h07m")
+            resets_at_str = rl['seven_day'].get('resets_at')
+            if resets_at_str:
+                try:
+                    resets_at = datetime.fromisoformat(resets_at_str)
+                    remaining_s = max(0, (resets_at - datetime.now(timezone.utc)).total_seconds())
+                    if remaining_s < 3600:
+                        line4 += f" {Colors.BRIGHT_WHITE}{int(remaining_s / 60)}m{Colors.RESET}"
+                    elif remaining_s < 86400:
+                        h = int(remaining_s / 3600)
+                        m = int((remaining_s % 3600) / 60)
+                        line4 += f" {Colors.BRIGHT_WHITE}{h}h{m:02d}m{Colors.RESET}"
+                    else:
+                        d = int(remaining_s / 86400)
+                        h = int((remaining_s % 86400) / 3600)
+                        m = int((remaining_s % 3600) / 60)
+                        line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
+                except (ValueError, TypeError):
+                    pass
             lines.append(line4)
 
     return lines
@@ -3567,9 +3631,14 @@ def _scan_weekly_timeline(resets_at_str, num_segments):
 
     return timeline
 
-def get_weekly_line(ratelimit_data, weekly_timeline=None):
+def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
     """Generate Weekly line display (Line 4).
     Format: Weekly:  ▁▂▃▅▆▇█▃ [64%] 32m, Extra: 7% $3.59/$50
+
+    Args:
+        ratelimit_data: Rate limit data dict
+        weekly_timeline: Weekly timeline data for sparkline
+        sparkline_width: Width of sparkline/progress bar (default: 20)
     """
     if not ratelimit_data:
         return None
@@ -3584,9 +3653,9 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None):
     parts = []
     parts.append(f"{Colors.BRIGHT_CYAN}Weekly:  {Colors.RESET}")
     if weekly_timeline and any(v > 0 for v in weekly_timeline):
-        parts.append(create_sparkline(weekly_timeline, width=20))
+        parts.append(create_sparkline(weekly_timeline, width=sparkline_width))
     else:
-        parts.append(get_progress_bar(utilization, width=20))
+        parts.append(get_progress_bar(utilization, width=sparkline_width))
     parts.append(f" {util_color}[{int(utilization)}%]{Colors.RESET}")
 
     # Time remaining until reset
@@ -3620,7 +3689,7 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None):
         # Credits are in cents - convert to dollars
         used_str = f"${used / 100:.2f}" if used >= 100 else f"${used:.2f}"
         limit_str = f"${limit / 100:.0f}" if limit >= 100 else f"${limit:.0f}"
-        parts.append(f", {Colors.BRIGHT_YELLOW}Extra: {int(extra_pct)}%{Colors.RESET}")
+        parts.append(f", {Colors.BRIGHT_YELLOW}Ext:{Colors.RESET}")
         parts.append(f" {Colors.BRIGHT_WHITE}{used_str}/{limit_str}{Colors.RESET}")
 
     return "".join(parts)
