@@ -2734,7 +2734,7 @@ def main():
             weekly_timeline = generate_weekly_timeline(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
             weekly_line = get_weekly_line(ratelimit_data, weekly_timeline) if SHOW_LINE4 and ratelimit_data else None
             # Derive API block start time (UTC, naive) for sparkline alignment
-            if ratelimit_data and ratelimit_data.get('five_hour', {}).get('resets_at'):
+            if ratelimit_data and (ratelimit_data.get('five_hour') or {}).get('resets_at'):
                 resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
                 api_start = resets_at - timedelta(hours=5)
                 api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
@@ -2786,7 +2786,7 @@ def main():
             'weekly_timeline': weekly_timeline if SHOW_LINE4 else None,
             'ratelimit_data': ratelimit_data,
             'api_session_range': api_session_range,
-            'five_hour_utilization': ratelimit_data.get('five_hour', {}).get('utilization') if ratelimit_data else None,
+            'five_hour_utilization': (ratelimit_data.get('five_hour') or {}).get('utilization') if ratelimit_data else None,
             'session_duration_seconds': duration_seconds,
             'show_line1': SHOW_LINE1,
             'show_line2': SHOW_LINE2,
@@ -2831,9 +2831,11 @@ def main():
         sys.stdout.write(f"{Colors.LIGHT_GRAY}Check ~/.claude/statusline-error.log{Colors.RESET}\n")
         sys.stdout.flush()
         
-        # Debug logging
+        # Debug logging with traceback
+        import traceback
         with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
             f.write(f"{datetime.now()}: {e}\n")
+            f.write(traceback.format_exc() + "\n")
             f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
 
 def calculate_tokens_since_time(start_time, session_id):
