@@ -2560,12 +2560,26 @@ def main():
         cache_creation = 0
         cache_read = 0
         
+        # Pre-fetch ratelimit data for accurate 5-hour window alignment
+        # This must happen BEFORE _get_cached_block_data() so we can pass
+        # the API-derived window start time for precise message filtering
+        ratelimit_data = None
+        api_block_start_utc = None
+        try:
+            ratelimit_data = get_ratelimit_info() if SHOW_LINE4 or SHOW_LINE3 else None
+            if ratelimit_data and (ratelimit_data.get('five_hour') or {}).get('resets_at'):
+                resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
+                api_start = resets_at - timedelta(hours=5)
+                api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            pass
+
         # 5時間ブロック検出システム (cached: 30s TTL)
         block_stats = None
         current_block = None  # 初期化して変数スコープ問題を回避
         if session_id:
             try:
-                block_stats, current_block = _get_cached_block_data(session_id)
+                block_stats, current_block = _get_cached_block_data(session_id, api_block_start_utc)
 
                 # 統計データを設定 - Compact用は現在セッションのみ
                 # Compact line用: 現在セッションのトークンのみ（block_statsの有無に関わらず計算）
@@ -2722,22 +2736,14 @@ def main():
             except Exception:
                 session_time_info = f"{Colors.BRIGHT_WHITE}{current_time}{Colors.RESET}"
 
-        # Get ratelimit data first (needed for sparkline alignment and Weekly line)
-        # Wrapped in try/except so failures don't crash the entire statusline
-        ratelimit_data = None
+        # ratelimit_data and api_block_start_utc already fetched above (before block data)
+        # Compute downstream values that depend on ratelimit_data
         api_session_range = None
         weekly_line = None
-        api_block_start_utc = None
         try:
-            ratelimit_data = get_ratelimit_info() if SHOW_LINE4 or SHOW_LINE3 else None
             api_session_range = get_api_session_time_range(ratelimit_data) if ratelimit_data else None
             weekly_timeline = generate_weekly_timeline(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
             weekly_line = get_weekly_line(ratelimit_data, weekly_timeline) if SHOW_LINE4 and ratelimit_data else None
-            # Derive API block start time (UTC, naive) for sparkline alignment
-            if ratelimit_data and (ratelimit_data.get('five_hour') or {}).get('resets_at'):
-                resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
-                api_start = resets_at - timedelta(hours=5)
-                api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
         except Exception:
             pass
 
@@ -2968,21 +2974,26 @@ def _deserialize_datetime(s):
         return datetime.fromisoformat(s)
     return s
 
-def _get_cached_block_data(session_id):
+def _get_cached_block_data(session_id, api_block_start_utc=None):
     """Get block_stats and current_block from 30s file cache or by computing.
 
     On cache hit:  returns (block_stats, current_block) from disk (<1ms).
     On cache miss: runs full JSONL scan, saves result, returns data.
+    When api_block_start_utc is provided, uses API-derived 5-hour window
+    instead of local floor_to_hour() detection for accurate message coverage.
     Returns (None, None) on error.
     """
     # --- cache hit path ---
     cache_file = _get_block_stats_cache_file()
+    current_api_start_str = _serialize_datetime(api_block_start_utc) if api_block_start_utc else None
     try:
         if cache_file.exists():
             with open(cache_file, 'r') as f:
                 cached = json.load(f)
+            cached_api_start = cached.get('api_block_start_utc')
             if (time.time() - cached.get('timestamp', 0) < BLOCK_STATS_CACHE_TTL
-                    and cached.get('session_id') == session_id):
+                    and cached.get('session_id') == session_id
+                    and cached_api_start == current_api_start_str):
                 # Deserialize block_stats
                 bs = cached.get('block_stats')
                 if bs:
@@ -3004,24 +3015,48 @@ def _get_cached_block_data(session_id):
     current_block = None
     try:
         all_messages = load_all_messages_chronologically()
-        try:
-            blocks = detect_five_hour_blocks(all_messages)
-        except Exception:
-            blocks = []
-        current_block = find_current_session_block(blocks, session_id)
-        if current_block:
-            try:
-                block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
-            except Exception:
-                block_stats = None
-        elif blocks:
-            active_blocks = [b for b in blocks if b.get('is_active', False)]
-            if active_blocks:
-                current_block = active_blocks[-1]
+
+        if api_block_start_utc is not None:
+            # Use API-derived window for precise message filtering (bypasses floor_to_hour drift)
+            api_block_end_utc = api_block_start_utc + timedelta(hours=5)
+            window_messages = []
+            for msg in all_messages:
+                msg_time = msg['timestamp']
+                if hasattr(msg_time, 'tzinfo') and msg_time.tzinfo:
+                    msg_time = msg_time.astimezone(timezone.utc).replace(tzinfo=None)
+                if api_block_start_utc <= msg_time < api_block_end_utc:
+                    window_messages.append(msg)
+
+            if window_messages:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                current_block = create_session_block(
+                    api_block_start_utc, window_messages, now,
+                    5 * 60 * 60 * 1000
+                )
                 try:
                     block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
                 except Exception:
                     block_stats = None
+        else:
+            # Fallback: local block detection when API data is unavailable
+            try:
+                blocks = detect_five_hour_blocks(all_messages)
+            except Exception:
+                blocks = []
+            current_block = find_current_session_block(blocks, session_id)
+            if current_block:
+                try:
+                    block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
+                except Exception:
+                    block_stats = None
+            elif blocks:
+                active_blocks = [b for b in blocks if b.get('is_active', False)]
+                if active_blocks:
+                    current_block = active_blocks[-1]
+                    try:
+                        block_stats = calculate_block_statistics_with_deduplication(current_block, session_id)
+                    except Exception:
+                        block_stats = None
     except Exception:
         return None, None
 
@@ -3031,6 +3066,7 @@ def _get_cached_block_data(session_id):
             cache_data = {
                 'timestamp': time.time(),
                 'session_id': session_id,
+                'api_block_start_utc': current_api_start_str,
             }
             if block_stats:
                 bs_copy = dict(block_stats)
