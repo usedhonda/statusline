@@ -2265,7 +2265,8 @@ def format_output_compact(ctx):
     if ctx['show_line4'] and ctx.get('weekly_line'):
         rl = ctx.get('ratelimit_data')
         if rl and rl.get('seven_day'):
-            util = rl['seven_day'].get('utilization', 0)
+            seven_day = rl.get('seven_day') or {}
+            util = seven_day.get('utilization', 0)
             util_color = _get_utilization_color(util)
             wt = ctx.get('weekly_timeline')
             if wt and any(v > 0 for v in wt):
@@ -2274,7 +2275,7 @@ def format_output_compact(ctx):
             else:
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
             # Add remaining time (e.g. "6d10h07m")
-            resets_at_str = rl['seven_day'].get('resets_at')
+            resets_at_str = seven_day.get('resets_at')
             if resets_at_str:
                 try:
                     resets_at = datetime.fromisoformat(resets_at_str)
@@ -2362,7 +2363,8 @@ def format_output_tight(ctx):
     if ctx['show_line4'] and ctx.get('weekly_line'):
         rl = ctx.get('ratelimit_data')
         if rl and rl.get('seven_day'):
-            util = rl['seven_day'].get('utilization', 0)
+            seven_day = rl.get('seven_day') or {}
+            util = seven_day.get('utilization', 0)
             util_color = _get_utilization_color(util)
             wt = ctx.get('weekly_timeline')
             if wt and any(v > 0 for v in wt):
@@ -2371,7 +2373,7 @@ def format_output_tight(ctx):
             else:
                 line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
             # Add remaining time (e.g. "6d10h07m")
-            resets_at_str = rl['seven_day'].get('resets_at')
+            resets_at_str = seven_day.get('resets_at')
             if resets_at_str:
                 try:
                     resets_at = datetime.fromisoformat(resets_at_str)
@@ -2568,7 +2570,8 @@ def main():
         try:
             ratelimit_data = get_ratelimit_info() if SHOW_LINE4 or SHOW_LINE3 else None
             if ratelimit_data and (ratelimit_data.get('five_hour') or {}).get('resets_at'):
-                resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
+                five_hour = ratelimit_data.get('five_hour') or {}
+                resets_at = datetime.fromisoformat(five_hour['resets_at'])
                 api_start = resets_at - timedelta(hours=5)
                 api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
         except Exception:
