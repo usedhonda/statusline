@@ -24,3 +24,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install pytest
       - run: pytest -v
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and verify package
+        run: |
+          pip install build
+          python -m build
+          pip install dist/ccsl-*.whl
+          ccsl --version
+          ccsl --help

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+__version__ = "1.0.0"
+
 # ============================================
 # 📝 CONFIGURATION - Edit these values
 # ============================================
@@ -48,6 +50,12 @@ TRANSCRIPT_STATS_CACHE_FILE = None
 RATELIMIT_CACHE_TTL = 300  # 5 minutes
 RATELIMIT_CACHE_FILE = None
 RATELIMIT_LOCK_FILE = None
+
+# Auto-update settings
+AUTO_UPDATE_CHECK_TTL = 14400  # 4 hours
+AUTO_UPDATE_CACHE_FILE = None
+AUTO_UPDATE_LOCK_FILE = None
+AUTO_UPDATE_URL = "https://raw.githubusercontent.com/usedhonda/statusline/main/statusline.py"
 
 # Token compaction threshold - FALLBACK VALUE ONLY
 # Dynamic value is now calculated from API: context_window_size * 0.8
@@ -254,11 +262,10 @@ def get_height_mode(height):
     - normal -> minimal: 高さ <= 7 で切替（すぐには戻さない）
     - 8, 9 は前回モード維持（デッドゾーン）
 
-    ファイルが存在しない場合は閾値 8 で従来通り判定（初回互換）。
-
     Returns: 'minimal' or 'normal'
     """
     state_file = Path.home() / '.claude' / 'statusline-height-mode.txt'
+
     prev_mode = None
     try:
         prev_mode = state_file.read_text().strip()
@@ -2149,42 +2156,48 @@ def format_output_full(ctx, terminal_width=None):
         lines.append(" ".join(line2_parts))
 
     # Line 3: Session (sparkline + 5h utilization + tokens + API time range)
-    if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
-        line3_parts = []
-        line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
-        # Use burn sparkline instead of progress bar
-        if ctx['burn_timeline']:
-            sparkline = create_sparkline(ctx['burn_timeline'], width=graph_width)
-            line3_parts.append(sparkline)
+    if ctx['show_line3']:
+        if ctx['session_duration'] or ctx.get('api_session_range'):
+            line3_parts = []
+            line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
+            # Use burn sparkline instead of progress bar
+            if ctx['burn_timeline']:
+                sparkline = create_sparkline(ctx['burn_timeline'], width=graph_width)
+                line3_parts.append(sparkline)
+            else:
+                line3_parts.append(get_progress_bar(ctx['block_progress'], width=graph_width, show_current_segment=True))
+            # 5-hour utilization from API
+            if ctx.get('five_hour_utilization') is not None:
+                util = int(ctx['five_hour_utilization'])
+                util_color = _get_utilization_color(util)
+                line3_parts.append(f"{util_color}[{util}%]{Colors.RESET}")
+            # Token count (without burn rate)
+            if ctx['block_tokens'] > 0:
+                tokens_display = format_token_count_short(ctx['block_tokens'])
+                line3_parts.append(f"{Colors.BRIGHT_WHITE}{tokens_display} token{Colors.RESET}")
+            # Time range from API
+            if ctx.get('api_session_range'):
+                start, end = ctx['api_session_range']
+                line3_parts.append(f"{Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}")
+            lines.append(" ".join(line3_parts))
         else:
-            line3_parts.append(get_progress_bar(ctx['block_progress'], width=graph_width, show_current_segment=True))
-        # 5-hour utilization from API
-        if ctx.get('five_hour_utilization') is not None:
-            util = int(ctx['five_hour_utilization'])
-            util_color = _get_utilization_color(util)
-            line3_parts.append(f"{util_color}[{util}%]{Colors.RESET}")
-        # Token count (without burn rate)
-        if ctx['block_tokens'] > 0:
-            tokens_display = format_token_count_short(ctx['block_tokens'])
-            line3_parts.append(f"{Colors.BRIGHT_WHITE}{tokens_display} token{Colors.RESET}")
-        # Time range from API
-        if ctx.get('api_session_range'):
-            start, end = ctx['api_session_range']
-            line3_parts.append(f"{Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}")
-        lines.append(" ".join(line3_parts))
+            lines.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET} --")
 
     # Line 4: Weekly usage
-    if ctx['show_line4'] and ctx.get('weekly_line'):
-        if graph_width != 20 and ctx.get('ratelimit_data'):
-            # Regenerate weekly line with narrower graph width
-            weekly_line = get_weekly_line(ctx['ratelimit_data'], ctx.get('weekly_timeline'),
-                                         sparkline_width=graph_width)
-            if weekly_line:
-                lines.append(weekly_line)
+    if ctx['show_line4']:
+        if ctx.get('weekly_line'):
+            if graph_width != 20 and ctx.get('ratelimit_data'):
+                # Regenerate weekly line with narrower graph width
+                weekly_line = get_weekly_line(ctx['ratelimit_data'], ctx.get('weekly_timeline'),
+                                             sparkline_width=graph_width)
+                if weekly_line:
+                    lines.append(weekly_line)
+                else:
+                    lines.append(ctx['weekly_line'])
             else:
                 lines.append(ctx['weekly_line'])
         else:
-            lines.append(ctx['weekly_line'])
+            lines.append(f"{Colors.BRIGHT_CYAN}Weekly: {Colors.RESET} --")
 
     return lines
 
@@ -2246,54 +2259,62 @@ def format_output_compact(ctx):
         lines.append(line2)
 
     # Line 3: Session (shortened with sparkline + utilization% + time range)
-    if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
-        if ctx['burn_timeline']:
-            sparkline = create_sparkline(ctx['burn_timeline'], width=12)
-            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+    if ctx['show_line3']:
+        if ctx['session_duration'] or ctx.get('api_session_range'):
+            if ctx['burn_timeline']:
+                sparkline = create_sparkline(ctx['burn_timeline'], width=12)
+                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+            else:
+                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
+            if ctx.get('five_hour_utilization') is not None:
+                util = int(ctx['five_hour_utilization'])
+                util_color = _get_utilization_color(util)
+                line3 += f"{util_color}[{util}%]{Colors.RESET}"
+            if ctx.get('api_session_range'):
+                start, end = ctx['api_session_range']
+                line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+            lines.append(line3)
         else:
-            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
-        if ctx.get('five_hour_utilization') is not None:
-            util = int(ctx['five_hour_utilization'])
-            util_color = _get_utilization_color(util)
-            line3 += f"{util_color}[{util}%]{Colors.RESET}"
-        if ctx.get('api_session_range'):
-            start, end = ctx['api_session_range']
-            line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
-        lines.append(line3)
+            lines.append(f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} --")
 
     # Line 4: Weekly (shortened with remaining time)
-    if ctx['show_line4'] and ctx.get('weekly_line'):
-        rl = ctx.get('ratelimit_data')
-        if rl and rl.get('seven_day'):
-            seven_day = rl.get('seven_day') or {}
-            util = seven_day.get('utilization', 0)
-            util_color = _get_utilization_color(util)
-            wt = ctx.get('weekly_timeline')
-            if wt and any(v > 0 for v in wt):
-                spark = create_sparkline(wt, width=12)
-                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
+    if ctx['show_line4']:
+        if ctx.get('weekly_line'):
+            rl = ctx.get('ratelimit_data')
+            if rl and rl.get('seven_day'):
+                seven_day = rl.get('seven_day') or {}
+                util = seven_day.get('utilization', 0)
+                util_color = _get_utilization_color(util)
+                wt = ctx.get('weekly_timeline')
+                if wt and any(v > 0 for v in wt):
+                    spark = create_sparkline(wt, width=12)
+                    line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
+                else:
+                    line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
+                # Add remaining time (e.g. "6d10h07m")
+                resets_at_str = seven_day.get('resets_at')
+                if resets_at_str:
+                    try:
+                        resets_at = datetime.fromisoformat(resets_at_str)
+                        remaining_s = max(0, (resets_at - datetime.now(timezone.utc)).total_seconds())
+                        if remaining_s < 3600:
+                            line4 += f" {Colors.BRIGHT_WHITE}{int(remaining_s / 60)}m{Colors.RESET}"
+                        elif remaining_s < 86400:
+                            h = int(remaining_s / 3600)
+                            m = int((remaining_s % 3600) / 60)
+                            line4 += f" {Colors.BRIGHT_WHITE}{h}h{m:02d}m{Colors.RESET}"
+                        else:
+                            d = int(remaining_s / 86400)
+                            h = int((remaining_s % 86400) / 3600)
+                            m = int((remaining_s % 3600) / 60)
+                            line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
+                    except (ValueError, TypeError):
+                        pass
+                lines.append(line4)
             else:
-                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
-            # Add remaining time (e.g. "6d10h07m")
-            resets_at_str = seven_day.get('resets_at')
-            if resets_at_str:
-                try:
-                    resets_at = datetime.fromisoformat(resets_at_str)
-                    remaining_s = max(0, (resets_at - datetime.now(timezone.utc)).total_seconds())
-                    if remaining_s < 3600:
-                        line4 += f" {Colors.BRIGHT_WHITE}{int(remaining_s / 60)}m{Colors.RESET}"
-                    elif remaining_s < 86400:
-                        h = int(remaining_s / 3600)
-                        m = int((remaining_s % 3600) / 60)
-                        line4 += f" {Colors.BRIGHT_WHITE}{h}h{m:02d}m{Colors.RESET}"
-                    else:
-                        d = int(remaining_s / 86400)
-                        h = int((remaining_s % 86400) / 3600)
-                        m = int((remaining_s % 3600) / 60)
-                        line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
-                except (ValueError, TypeError):
-                    pass
-            lines.append(line4)
+                lines.append(ctx['weekly_line'])
+        else:
+            lines.append(f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} --")
 
     return lines
 
@@ -2344,54 +2365,62 @@ def format_output_tight(ctx):
         lines.append(line2)
 
     # Line 3: Session (ultra short with sparkline + utilization%)
-    if ctx['show_line3'] and (ctx['session_duration'] or ctx.get('api_session_range')):
-        if ctx['burn_timeline']:
-            sparkline = create_sparkline(ctx['burn_timeline'], width=8)
-            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+    if ctx['show_line3']:
+        if ctx['session_duration'] or ctx.get('api_session_range'):
+            if ctx['burn_timeline']:
+                sparkline = create_sparkline(ctx['burn_timeline'], width=8)
+                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+            else:
+                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
+            if ctx.get('five_hour_utilization') is not None:
+                util = int(ctx['five_hour_utilization'])
+                util_color = _get_utilization_color(util)
+                line3 += f"{util_color}[{util}%]{Colors.RESET}"
+            if ctx.get('api_session_range'):
+                start, end = ctx['api_session_range']
+                line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+            lines.append(line3)
         else:
-            line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
-        if ctx.get('five_hour_utilization') is not None:
-            util = int(ctx['five_hour_utilization'])
-            util_color = _get_utilization_color(util)
-            line3 += f"{util_color}[{util}%]{Colors.RESET}"
-        if ctx.get('api_session_range'):
-            start, end = ctx['api_session_range']
-            line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
-        lines.append(line3)
+            lines.append(f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} --")
 
     # Line 4: Weekly (ultra short with remaining time)
-    if ctx['show_line4'] and ctx.get('weekly_line'):
-        rl = ctx.get('ratelimit_data')
-        if rl and rl.get('seven_day'):
-            seven_day = rl.get('seven_day') or {}
-            util = seven_day.get('utilization', 0)
-            util_color = _get_utilization_color(util)
-            wt = ctx.get('weekly_timeline')
-            if wt and any(v > 0 for v in wt):
-                spark = create_sparkline(wt, width=8)
-                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
+    if ctx['show_line4']:
+        if ctx.get('weekly_line'):
+            rl = ctx.get('ratelimit_data')
+            if rl and rl.get('seven_day'):
+                seven_day = rl.get('seven_day') or {}
+                util = seven_day.get('utilization', 0)
+                util_color = _get_utilization_color(util)
+                wt = ctx.get('weekly_timeline')
+                if wt and any(v > 0 for v in wt):
+                    spark = create_sparkline(wt, width=8)
+                    line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
+                else:
+                    line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
+                # Add remaining time (e.g. "6d10h07m")
+                resets_at_str = seven_day.get('resets_at')
+                if resets_at_str:
+                    try:
+                        resets_at = datetime.fromisoformat(resets_at_str)
+                        remaining_s = max(0, (resets_at - datetime.now(timezone.utc)).total_seconds())
+                        if remaining_s < 3600:
+                            line4 += f" {Colors.BRIGHT_WHITE}{int(remaining_s / 60)}m{Colors.RESET}"
+                        elif remaining_s < 86400:
+                            h = int(remaining_s / 3600)
+                            m = int((remaining_s % 3600) / 60)
+                            line4 += f" {Colors.BRIGHT_WHITE}{h}h{m:02d}m{Colors.RESET}"
+                        else:
+                            d = int(remaining_s / 86400)
+                            h = int((remaining_s % 86400) / 3600)
+                            m = int((remaining_s % 3600) / 60)
+                            line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
+                    except (ValueError, TypeError):
+                        pass
+                lines.append(line4)
             else:
-                line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
-            # Add remaining time (e.g. "6d10h07m")
-            resets_at_str = seven_day.get('resets_at')
-            if resets_at_str:
-                try:
-                    resets_at = datetime.fromisoformat(resets_at_str)
-                    remaining_s = max(0, (resets_at - datetime.now(timezone.utc)).total_seconds())
-                    if remaining_s < 3600:
-                        line4 += f" {Colors.BRIGHT_WHITE}{int(remaining_s / 60)}m{Colors.RESET}"
-                    elif remaining_s < 86400:
-                        h = int(remaining_s / 3600)
-                        m = int((remaining_s % 3600) / 60)
-                        line4 += f" {Colors.BRIGHT_WHITE}{h}h{m:02d}m{Colors.RESET}"
-                    else:
-                        d = int(remaining_s / 86400)
-                        h = int((remaining_s % 86400) / 3600)
-                        m = int((remaining_s % 3600) / 60)
-                        line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
-                except (ValueError, TypeError):
-                    pass
-            lines.append(line4)
+                lines.append(ctx['weekly_line'])
+        else:
+            lines.append(f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} --")
 
     return lines
 
@@ -2426,6 +2455,47 @@ def format_output_minimal(ctx, terminal_width):
 
     return [line]
 
+
+def do_setup():
+    """Configure Claude Code settings.json to use PATH-based ccsl command."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(exist_ok=True)
+    settings_path = claude_dir / "settings.json"
+
+    statusline_config = {"type": "command", "command": "ccsl", "padding": 0}
+
+    settings = {}
+    if settings_path.exists():
+        try:
+            with open(settings_path, encoding='utf-8') as f:
+                settings = json.load(f)
+        except json.JSONDecodeError:
+            shutil.copy2(settings_path, settings_path.with_suffix('.json.backup'))
+            settings = {}
+
+    settings['statusLine'] = statusline_config
+    with open(settings_path, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+
+    print(f"Settings updated: {settings_path}")
+
+    # Warn about old file-based install (don't rename - other CC sessions may reference it)
+    old_script = claude_dir / "statusline.py"
+    if old_script.exists():
+        print(f"Note: {old_script} still exists (safe to remove after all CC sessions restart)")
+
+    # Clean up auto-update artifacts
+    for name in ['.statusline_update.json', '.statusline_update_lock.json',
+                 '.statusline_no_update', 'statusline.py.backup']:
+        p = claude_dir / name
+        if p.exists():
+            p.unlink()
+
+    print(f"\nccsl {__version__} configured successfully.")
+    print("Restart Claude Code to see the status line.")
+    print("Test: echo '{\"session_id\":\"test\"}' | ccsl --show all")
+
+
 def main():
     # Force line-buffered stdout to prevent partial output when piped to Claude Code
     # Without this, Python uses block buffering for pipes, causing intermittent display issues
@@ -2438,10 +2508,15 @@ def main():
     parser = argparse.ArgumentParser(description='Claude Code statusline with configurable output', add_help=False)
     parser.add_argument('--show', type=str, help='Lines to show: 1,2,3,4 or all (default: use config settings)')
     parser.add_argument('--schedule', action='store_true', help='Show next calendar event (requires gog command)')
+    parser.add_argument('--update', action='store_true', help='Check for updates now')
+    parser.add_argument('--self-update', action='store_true', dest='self_update', help=argparse.SUPPRESS)
+    parser.add_argument('--rollback', action='store_true', help='Rollback to previous version')
+    parser.add_argument('--setup', action='store_true', help='Configure Claude Code to use this statusline')
+    parser.add_argument('--version', action='store_true', help='Show version')
     parser.add_argument('--help', action='store_true', help='Show help')
 
     # Initialize args with default values first
-    args = argparse.Namespace(show=None, schedule=False, help=False)
+    args = argparse.Namespace(show=None, schedule=False, update=False, self_update=False, rollback=False, setup=False, version=False, help=False)
 
     # Parse arguments, but don't exit on failure (for stdin compatibility)
     try:
@@ -2450,23 +2525,48 @@ def main():
         # Keep the default args initialized above
         pass
     
+    # Handle version
+    if args.version:
+        print(f"ccsl {__version__}")
+        return
+
     # Handle help
     if args.help:
-        print("statusline.py - Claude Code Status Line")
+        print(f"ccsl {__version__} - Claude Code Status Line")
         print("Usage:")
-        print("  echo '{\"session_id\":\"...\"}' | statusline.py")
-        print("  echo '{\"session_id\":\"...\"}' | statusline.py --show 1,2")
-        print("  echo '{\"session_id\":\"...\"}' | statusline.py --show simple")
-        print("  echo '{\"session_id\":\"...\"}' | statusline.py --show all")
+        print("  echo '{\"session_id\":\"...\"}' | ccsl")
+        print("  echo '{\"session_id\":\"...\"}' | ccsl --show 1,2")
+        print("  echo '{\"session_id\":\"...\"}' | ccsl --show simple")
+        print("  echo '{\"session_id\":\"...\"}' | ccsl --show all")
         print()
         print("Options:")
         print("  --show 1,2,3,4    Show specific lines (comma-separated)")
         print("  --show simple     Show compact and session lines (2,3)")
         print("  --show all        Show all lines")
         print("  --schedule        Show next calendar event (swaps with Line 1)")
+        print("  --setup           Configure Claude Code settings.json")
+        print("  --update          Check for updates now")
+        print("  --rollback        Rollback to previous version")
+        print("  --version         Show version")
         print("  --help            Show this help")
         return
-    
+
+    # Handle setup (early exit, no stdin needed)
+    if args.setup:
+        do_setup()
+        return
+
+    # Handle auto-update commands (early exit, no stdin needed)
+    if args.self_update:
+        do_self_update()
+        return
+    if args.update:
+        do_update_foreground()
+        return
+    if args.rollback:
+        do_rollback()
+        return
+
     # Override display settings based on --show argument
     global SHOW_LINE1, SHOW_LINE2, SHOW_LINE3, SHOW_LINE4
     if args.show:
@@ -2833,6 +2933,12 @@ def main():
         output = "\n".join(f"\033[0m\033[1;97m{line}\033[0m" for line in lines)
         sys.stdout.write(output + "\n")
         sys.stdout.flush()
+
+        # Background auto-update check (fire-and-forget, never breaks statusline)
+        try:
+            maybe_check_update()
+        except Exception:
+            pass
 
     except Exception as e:
         # Fallback status line on error
@@ -3499,6 +3605,407 @@ finally:
         _release_pid_lock()
 
 # ============================================
+# Auto-update mechanism
+# ============================================
+
+def get_update_cache_file():
+    """Get auto-update cache file path (lazy initialization)."""
+    global AUTO_UPDATE_CACHE_FILE
+    if AUTO_UPDATE_CACHE_FILE is None:
+        AUTO_UPDATE_CACHE_FILE = Path.home() / '.claude' / '.statusline_update.json'
+    return AUTO_UPDATE_CACHE_FILE
+
+def get_update_lock_file():
+    """Get auto-update lock file path (lazy initialization)."""
+    global AUTO_UPDATE_LOCK_FILE
+    if AUTO_UPDATE_LOCK_FILE is None:
+        AUTO_UPDATE_LOCK_FILE = Path.home() / '.claude' / '.statusline_update_lock.json'
+    return AUTO_UPDATE_LOCK_FILE
+
+def load_update_cache():
+    """Load auto-update cache from disk."""
+    cache_file = get_update_cache_file()
+    try:
+        if cache_file.exists():
+            with open(cache_file) as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        pass
+    return None
+
+def _save_update_cache(data):
+    """Save auto-update cache to disk."""
+    cache_file = get_update_cache_file()
+    try:
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=str(cache_file.parent), suffix='.tmp')
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f)
+        Path(tmp_path).rename(cache_file)
+    except (IOError, OSError):
+        pass
+
+def _acquire_update_lock():
+    """Acquire PID lock for update mutual exclusion."""
+    lock_file = get_update_lock_file()
+    try:
+        if lock_file.exists():
+            with open(lock_file) as f:
+                lock_data = json.load(f)
+            pid = lock_data.get('pid')
+            start_time_val = lock_data.get('start_time', 0)
+            if pid and time.time() - start_time_val < 60:
+                try:
+                    os.kill(pid, 0)
+                    return False  # Process alive, lock held
+                except OSError:
+                    pass  # Process dead, steal lock
+    except (json.JSONDecodeError, IOError, OSError):
+        pass
+    return True
+
+def _write_update_lock(pid):
+    """Write PID to update lock file."""
+    lock_file = get_update_lock_file()
+    try:
+        with open(lock_file, 'w') as f:
+            json.dump({'pid': pid, 'start_time': time.time()}, f)
+    except (IOError, OSError):
+        pass
+
+def _release_update_lock():
+    """Release update lock file."""
+    lock_file = get_update_lock_file()
+    try:
+        lock_file.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+def _is_update_disabled():
+    """Check if auto-update is disabled via env var or marker file."""
+    if os.environ.get('STATUSLINE_AUTO_UPDATE', '1') == '0':
+        return True
+    no_update_file = Path.home() / '.claude' / '.statusline_no_update'
+    if no_update_file.exists():
+        return True
+    # pip/brew install: not running from ~/.claude/statusline.py
+    script_path = Path(__file__).resolve()
+    legacy_path = (Path.home() / '.claude' / 'statusline.py').resolve()
+    if script_path != legacy_path:
+        return True
+    return False
+
+def maybe_check_update():
+    """Check if an update check is due and spawn background process if so."""
+    if _is_update_disabled():
+        return
+    cache = load_update_cache()
+    if cache and (time.time() - cache.get('last_check', 0)) < AUTO_UPDATE_CHECK_TTL:
+        return  # Still fresh
+    if not _acquire_update_lock():
+        return  # Another process is checking
+    try:
+        target = str(Path.home() / '.claude' / 'statusline.py')
+        proc = subprocess.Popen(
+            [sys.executable, target, '--self-update'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        _write_update_lock(proc.pid)
+    except Exception:
+        _release_update_lock()
+
+def do_self_update():
+    """Background self-update handler (--self-update).
+    Downloads latest version from GitHub, validates, and replaces if changed.
+    """
+    import hashlib
+    import tempfile
+    log_file = Path.home() / '.claude' / 'statusline-update.log'
+    target = Path.home() / '.claude' / 'statusline.py'
+
+    def log(msg):
+        try:
+            with open(log_file, 'a') as f:
+                f.write(f"{datetime.now().isoformat()}: {msg}\n")
+        except OSError:
+            pass
+
+    try:
+        # Load cache for ETag
+        cache = load_update_cache() or {}
+        etag = cache.get('etag', '')
+
+        # HTTP GET with conditional request
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError, HTTPError
+        req = Request(AUTO_UPDATE_URL)
+        if etag:
+            req.add_header('If-None-Match', etag)
+        req.add_header('User-Agent', 'statusline-autoupdate/1.0')
+
+        try:
+            resp = urlopen(req, timeout=10)
+        except HTTPError as e:
+            if e.code == 304:
+                # Not modified - just update timestamp
+                cache['last_check'] = time.time()
+                _save_update_cache(cache)
+                _release_update_lock()
+                return
+            raise
+
+        content = resp.read().decode('utf-8')
+        new_etag = resp.headers.get('ETag', '')
+
+        # Validation
+        if len(content) < 1000:
+            log("SKIP: Downloaded content too small ({} bytes)".format(len(content)))
+            cache['last_check'] = time.time()
+            _save_update_cache(cache)
+            _release_update_lock()
+            return
+
+        lines = content.split('\n', 5)
+        has_shebang = any(line.startswith('#!') and 'python' in line for line in lines[:3])
+        if not has_shebang:
+            log("SKIP: No python shebang found")
+            cache['last_check'] = time.time()
+            _save_update_cache(cache)
+            _release_update_lock()
+            return
+
+        if 'def main()' not in content:
+            log("SKIP: No main() function found")
+            cache['last_check'] = time.time()
+            _save_update_cache(cache)
+            _release_update_lock()
+            return
+
+        # Syntax check
+        try:
+            compile(content, '<update>', 'exec')
+        except SyntaxError as e:
+            log("SKIP: Syntax error in downloaded content: {}".format(e))
+            cache['last_check'] = time.time()
+            _save_update_cache(cache)
+            _release_update_lock()
+            return
+
+        # SHA256 comparison
+        new_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+        if new_hash == cache.get('content_hash', ''):
+            # Same content, just update cache
+            cache['last_check'] = time.time()
+            cache['etag'] = new_etag
+            _save_update_cache(cache)
+            _release_update_lock()
+            return
+
+        # Also compare against current file
+        try:
+            current_content = target.read_text(encoding='utf-8')
+            current_hash = hashlib.sha256(current_content.encode('utf-8')).hexdigest()
+            if new_hash == current_hash:
+                cache['last_check'] = time.time()
+                cache['etag'] = new_etag
+                cache['content_hash'] = new_hash
+                _save_update_cache(cache)
+                _release_update_lock()
+                return
+        except (IOError, OSError):
+            pass
+
+        # Backup current file
+        backup_path = target.parent / 'statusline.py.backup'
+        try:
+            import shutil
+            shutil.copy2(str(target), str(backup_path))
+        except (IOError, OSError) as e:
+            log("WARNING: Backup failed: {}".format(e))
+
+        # Atomic write: mkstemp -> write -> chmod -> rename
+        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix='.py.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(content)
+            os.chmod(tmp_path, 0o755)
+            Path(tmp_path).rename(target)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        # Update cache
+        cache['last_check'] = time.time()
+        cache['etag'] = new_etag
+        cache['content_hash'] = new_hash
+        cache['last_update'] = time.time()
+        _save_update_cache(cache)
+
+        log("UPDATED: {} -> hash {}".format(target, new_hash[:12]))
+
+    except Exception as e:
+        try:
+            log("ERROR: {}".format(e))
+        except Exception:
+            pass
+        # Update last_check even on error to avoid rapid retries
+        cache = load_update_cache() or {}
+        cache['last_check'] = time.time()
+        _save_update_cache(cache)
+    finally:
+        _release_update_lock()
+
+def do_update_foreground():
+    """Foreground update handler (--update). Runs synchronously with user feedback."""
+    if _is_update_disabled():
+        print("Auto-update is disabled.")
+        no_update_file = Path.home() / '.claude' / '.statusline_no_update'
+        if no_update_file.exists():
+            print("  Remove ~/.claude/.statusline_no_update to re-enable.")
+        if os.environ.get('STATUSLINE_AUTO_UPDATE', '1') == '0':
+            print("  Unset STATUSLINE_AUTO_UPDATE=0 to re-enable.")
+        return
+
+    import hashlib
+    target = Path.home() / '.claude' / 'statusline.py'
+    cache = load_update_cache() or {}
+    etag = cache.get('etag', '')
+
+    print("Checking for updates...")
+
+    try:
+        from urllib.request import Request, urlopen
+        from urllib.error import HTTPError
+        req = Request(AUTO_UPDATE_URL)
+        if etag:
+            req.add_header('If-None-Match', etag)
+        req.add_header('User-Agent', 'statusline-autoupdate/1.0')
+
+        try:
+            resp = urlopen(req, timeout=10)
+        except HTTPError as e:
+            if e.code == 304:
+                cache['last_check'] = time.time()
+                _save_update_cache(cache)
+                print("Already up to date. (304 Not Modified)")
+                return
+            raise
+
+        content = resp.read().decode('utf-8')
+        new_etag = resp.headers.get('ETag', '')
+
+        # Validate
+        errors = []
+        if len(content) < 1000:
+            errors.append("Content too small ({} bytes)".format(len(content)))
+        lines = content.split('\n', 5)
+        if not any(line.startswith('#!') and 'python' in line for line in lines[:3]):
+            errors.append("No python shebang")
+        if 'def main()' not in content:
+            errors.append("No main() function")
+        try:
+            compile(content, '<update>', 'exec')
+        except SyntaxError as e:
+            errors.append("Syntax error: {}".format(e))
+
+        if errors:
+            print("Update validation failed:")
+            for err in errors:
+                print("  - {}".format(err))
+            return
+
+        # Check if actually different
+        new_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+        try:
+            current_hash = hashlib.sha256(target.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
+        except (IOError, OSError):
+            current_hash = ''
+
+        if new_hash == current_hash:
+            cache['last_check'] = time.time()
+            cache['etag'] = new_etag
+            cache['content_hash'] = new_hash
+            _save_update_cache(cache)
+            print("Already up to date. (same content)")
+            return
+
+        # Backup
+        backup_path = target.parent / 'statusline.py.backup'
+        try:
+            import shutil
+            shutil.copy2(str(target), str(backup_path))
+            print("Backup saved to {}".format(backup_path))
+        except (IOError, OSError) as e:
+            print("Warning: backup failed: {}".format(e))
+
+        # Atomic write
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix='.py.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(content)
+            os.chmod(tmp_path, 0o755)
+            Path(tmp_path).rename(target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        cache['last_check'] = time.time()
+        cache['etag'] = new_etag
+        cache['content_hash'] = new_hash
+        cache['last_update'] = time.time()
+        _save_update_cache(cache)
+
+        print("Updated successfully!")
+        print("  New hash: {}".format(new_hash[:12]))
+        print("  Rollback: python3 ~/.claude/statusline.py --rollback")
+
+    except Exception as e:
+        print("Update failed: {}".format(e))
+
+def do_rollback():
+    """Rollback handler (--rollback). Restores from backup."""
+    target = Path.home() / '.claude' / 'statusline.py'
+    backup_path = target.parent / 'statusline.py.backup'
+
+    if not backup_path.exists():
+        print("No backup found at {}".format(backup_path))
+        return
+
+    try:
+        import shutil
+        # Validate backup first
+        backup_content = backup_path.read_text(encoding='utf-8')
+        try:
+            compile(backup_content, '<backup>', 'exec')
+        except SyntaxError:
+            print("Backup file has syntax errors. Aborting rollback.")
+            return
+
+        shutil.copy2(str(backup_path), str(target))
+        print("Rolled back to backup version.")
+        print("  Source: {}".format(backup_path))
+        print("  Target: {}".format(target))
+
+        # Clear update cache so next check re-evaluates
+        cache = load_update_cache() or {}
+        cache['content_hash'] = ''
+        _save_update_cache(cache)
+
+    except Exception as e:
+        print("Rollback failed: {}".format(e))
+
+# ============================================
 # Ratelimit data access + display helpers
 # ============================================
 
@@ -3536,6 +4043,11 @@ def get_api_session_time_range(ratelimit_data):
     try:
         resets_at = datetime.fromisoformat(five_hour['resets_at'])
         end_local = resets_at.astimezone()  # Convert to local timezone
+        # Round to nearest hour (>=30min -> next hour, <30min -> current hour)
+        if end_local.minute >= 30:
+            end_local = end_local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        else:
+            end_local = end_local.replace(minute=0, second=0, microsecond=0)
         start_local = end_local - timedelta(hours=5)
 
         def fmt_hour(dt):

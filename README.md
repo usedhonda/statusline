@@ -55,6 +55,22 @@ Line 1 can swap with a calendar event display showing upcoming events with time-
 
 ## Installation
 
+### pip (recommended)
+
+```bash
+pip install ccsl
+ccsl --setup
+```
+
+### Homebrew (macOS)
+
+```bash
+brew install usedhonda/tap/ccsl
+ccsl --setup
+```
+
+### From source
+
 ```bash
 git clone https://github.com/usedhonda/statusline.git
 cd statusline
@@ -74,9 +90,9 @@ Restart Claude Code. Done.
 
 Use `--show` to control which lines are displayed:
 ```bash
-~/.claude/statusline.py --show all      # All 4 lines (default)
-~/.claude/statusline.py --show simple   # Lines 2 and 3 only
-~/.claude/statusline.py --show 1,2      # Specific lines
+ccsl --show all      # All 4 lines (default)
+ccsl --show simple   # Lines 2 and 3 only
+ccsl --show 1,2      # Specific lines
 ```
 
 Or edit the top of `statusline.py`:
