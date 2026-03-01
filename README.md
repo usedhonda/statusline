@@ -18,6 +18,7 @@ Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3
 
 ```bash
 brew install usedhonda/tap/ccsl
+ccsl --setup
 ```
 
 Restart Claude Code. Done.
