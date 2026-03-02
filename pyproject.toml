@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ccsl"
-version = "1.0.0"
+version = "1.0.1"
 description = "Enhanced status line for Claude Code"
 readme = "README.md"
 requires-python = ">=3.9"
