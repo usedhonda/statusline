@@ -441,8 +441,6 @@ class TestSmoke:
 # ============================================
 
 import time
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timezone
 

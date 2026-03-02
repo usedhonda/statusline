@@ -3740,7 +3740,7 @@ def do_self_update():
 
         # HTTP GET with conditional request
         from urllib.request import Request, urlopen
-        from urllib.error import URLError, HTTPError
+        from urllib.error import HTTPError
         req = Request(AUTO_UPDATE_URL)
         if etag:
             req.add_header('If-None-Match', etag)
@@ -4226,7 +4226,6 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
     # Extra usage info
     extra = ratelimit_data.get('extra_usage')
     if extra and extra.get('is_enabled'):
-        extra_pct = extra.get('utilization', 0)
         used = extra.get('used_credits', 0)
         limit = extra.get('monthly_limit', 0)
         # Credits are in cents - convert to dollars
