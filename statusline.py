@@ -475,36 +475,59 @@ def get_progress_bar(percentage, width=20, show_current_segment=False):
 
 # REMOVED: create_bar_chart() - unused function (replaced by create_horizontal_chart)
 
-def create_sparkline(values, width=20):
-    """Create a compact sparkline graph"""
+def create_sparkline(values, width=20, current_pos=None):
+    """Create a compact sparkline graph.
+
+    Args:
+        values: List of numeric values to plot
+        width: Display width in characters
+        current_pos: Optional float 0.0-1.0 indicating current time position.
+                     Segments after current_pos are rendered as future (▒).
+    """
     if not values:
         return ""
-    
+
     # Use unicode block characters for sparkline
     chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-    
+
+    data_width = min(width, len(values))
+
+    # Calculate current segment boundary
+    current_segment = data_width  # default: all segments are "past"
+    if current_pos is not None:
+        current_segment = int(current_pos * data_width)
+        # Clamp to valid range
+        current_segment = max(0, min(data_width, current_segment))
+
     max_val = max(values)
     min_val = min(values)
-    
+
     if max_val == min_val:
-        # If all values are the same
-        if max_val == 0:
-            # All zeros (idle) - show lowest bars
-            return Colors.LIGHT_GRAY + chars[0] * min(width, len(values)) + Colors.RESET
-        else:
-            # All same non-zero value - show medium bars
-            return Colors.BRIGHT_GREEN + chars[4] * min(width, len(values)) + Colors.RESET
-    
+        # All values are the same
+        sparkline = ""
+        for i in range(data_width):
+            if i >= current_segment:
+                sparkline += Colors.LIGHT_GRAY + '▒' + Colors.RESET
+            elif max_val == 0:
+                sparkline += Colors.LIGHT_GRAY + chars[0] + Colors.RESET
+            else:
+                sparkline += Colors.BRIGHT_GREEN + chars[4] + Colors.RESET
+        return sparkline
+
     sparkline = ""
-    data_width = min(width, len(values))
     step = len(values) / data_width if len(values) > data_width else 1
-    
+
     for i in range(data_width):
+        # Future segments
+        if i >= current_segment:
+            sparkline += Colors.LIGHT_GRAY + '▒' + Colors.RESET
+            continue
+
         idx = int(i * step) if step > 1 else i
         if idx < len(values):
             normalized = (values[idx] - min_val) / (max_val - min_val)
             char_idx = min(len(chars) - 1, int(normalized * len(chars)))
-            
+
             # Color based on value
             if normalized > 0.7:
                 color = Colors.BRIGHT_RED
@@ -512,9 +535,9 @@ def create_sparkline(values, width=20):
                 color = Colors.BRIGHT_YELLOW
             else:
                 color = Colors.BRIGHT_GREEN
-            
+
             sparkline += color + chars[char_idx] + Colors.RESET
-    
+
     return sparkline
 
 # REMOVED: get_all_messages() - unused function (replaced by load_all_messages_chronologically)
@@ -4193,12 +4216,26 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
     utilization = seven_day.get('utilization', 0)
     util_color = _get_utilization_color(utilization)
 
+    # Calculate current position within the 7-day window (0.0 = start, 1.0 = reset)
+    current_pos = None
+    resets_at_str = seven_day.get('resets_at')
+    if resets_at_str:
+        try:
+            resets_at = datetime.fromisoformat(resets_at_str)
+            now = datetime.now(timezone.utc)
+            week_start = resets_at - timedelta(days=7)
+            elapsed = (now - week_start).total_seconds()
+            total = 7 * 86400
+            current_pos = max(0.0, min(1.0, elapsed / total))
+        except (ValueError, TypeError):
+            pass
+
     parts = []
     parts.append(f"{Colors.BRIGHT_CYAN}Weekly:  {Colors.RESET}")
-    if weekly_timeline and any(v > 0 for v in weekly_timeline):
-        parts.append(create_sparkline(weekly_timeline, width=sparkline_width))
+    if weekly_timeline:
+        parts.append(create_sparkline(weekly_timeline, width=sparkline_width, current_pos=current_pos))
     else:
-        parts.append(get_progress_bar(utilization, width=sparkline_width))
+        parts.append(create_sparkline([0] * sparkline_width, width=sparkline_width, current_pos=current_pos))
     parts.append(f" {util_color}[{int(utilization)}%]{Colors.RESET}")
 
     # Time remaining until reset
@@ -4228,9 +4265,9 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
     if extra and extra.get('is_enabled'):
         used = extra.get('used_credits', 0)
         limit = extra.get('monthly_limit', 0)
-        # Credits are in cents - convert to dollars
-        used_str = f"${used / 100:.2f}" if used >= 100 else f"${used:.2f}"
-        limit_str = f"${limit / 100:.0f}" if limit >= 100 else f"${limit:.0f}"
+        # API returns cents — always divide by 100
+        used_str = f"${used / 100:.2f}"
+        limit_str = f"${limit / 100:.0f}"
         parts.append(f", {Colors.BRIGHT_YELLOW}Ext:{Colors.RESET}")
         parts.append(f" {Colors.BRIGHT_WHITE}{used_str}/{limit_str}{Colors.RESET}")
 
