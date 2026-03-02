@@ -208,6 +208,32 @@ class TestCreateSparkline:
         clean = statusline.strip_ansi(result)
         assert len(clean) == 3
 
+    def test_future_style_bar_uses_bar_char(self):
+        """future_style='bar' renders future segments as ▁ in DARK_GRAY."""
+        result = statusline.create_sparkline([10, 20, 30, 40, 50], width=5, current_pos=0.4, future_style="bar")
+        clean = statusline.strip_ansi(result)
+        assert len(clean) == 5
+        # Future segments should be ▁ (the lowest bar char)
+        assert "▁" in clean
+        # Should use DARK_GRAY color for future segments
+        assert statusline.Colors.DARK_GRAY in result
+
+    def test_future_style_block_uses_underbar(self):
+        """future_style='block' (default) renders future segments as ▁ in FUTURE_GRAY."""
+        result = statusline.create_sparkline([10, 20, 30, 40, 50], width=5, current_pos=0.4, future_style="block")
+        clean = statusline.strip_ansi(result)
+        assert len(clean) == 5
+        # Future segments use ▁ (chars[0]) with FUTURE_GRAY, not ▒
+        assert "▒" not in clean
+        assert statusline.Colors.FUTURE_GRAY in result
+
+    def test_future_style_bar_equal_values(self):
+        """future_style='bar' works with equal (non-zero) values."""
+        result = statusline.create_sparkline([5, 5, 5, 5], width=4, current_pos=0.25, future_style="bar")
+        clean = statusline.strip_ansi(result)
+        assert len(clean) == 4
+        assert statusline.Colors.FUTURE_GRAY in result
+
 
 class TestGetPercentageColor:
     def test_green_below_80(self):
@@ -512,8 +538,8 @@ class TestBlockStatsCache:
                 bs, cb = statusline._get_cached_block_data('test-session')
                 mock_load.assert_called_once()
 
-    def test_cache_miss_session_mismatch(self, tmp_path):
-        """Cache for a different session_id triggers recomputation."""
+    def test_cache_hit_different_session(self, tmp_path):
+        """Cache is shared across sessions — different session_id still hits."""
         cache_file = tmp_path / '.block_stats_cache.json'
         data = self._make_cache_data(session_id='other-session', age=5)
         import json as _json
@@ -522,7 +548,8 @@ class TestBlockStatsCache:
         with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
                 bs, cb = statusline._get_cached_block_data('test-session')
-                mock_load.assert_called_once()
+                mock_load.assert_not_called()
+                assert bs is not None
 
     def test_cache_miss_no_file(self, tmp_path):
         """No cache file triggers recomputation."""
@@ -566,7 +593,7 @@ class TestBlockStatsCache:
         assert cache_file.exists()
         import json as _json
         cached = _json.loads(cache_file.read_text())
-        assert cached['session_id'] == 'test-session'
+        assert 'session_id' not in cached
         assert cached['block_stats']['total_tokens'] == 5000
 
 

@@ -111,6 +111,8 @@ class Colors:
         'BLINK': '\033[5m',
         'BG_RED': '\033[41m',
         'BG_YELLOW': '\033[43m',
+        'DARK_GRAY': '\033[38;5;237m',
+        'FUTURE_GRAY': '\033[38;5;242m',
         'RESET': '\033[0m'
     }
     
@@ -475,14 +477,15 @@ def get_progress_bar(percentage, width=20, show_current_segment=False):
 
 # REMOVED: create_bar_chart() - unused function (replaced by create_horizontal_chart)
 
-def create_sparkline(values, width=20, current_pos=None):
+def create_sparkline(values, width=20, current_pos=None, future_style="block"):
     """Create a compact sparkline graph.
 
     Args:
         values: List of numeric values to plot
         width: Display width in characters
         current_pos: Optional float 0.0-1.0 indicating current time position.
-                     Segments after current_pos are rendered as future (▒).
+                     Segments after current_pos are rendered as future.
+        future_style: Legacy param (kept for compat). All future segments use ▁ in FUTURE_GRAY.
     """
     if not values:
         return ""
@@ -507,7 +510,7 @@ def create_sparkline(values, width=20, current_pos=None):
         sparkline = ""
         for i in range(data_width):
             if i > current_segment:
-                sparkline += Colors.LIGHT_GRAY + '▒' + Colors.RESET
+                sparkline += Colors.FUTURE_GRAY + chars[0] + Colors.RESET
             elif max_val == 0:
                 sparkline += Colors.LIGHT_GRAY + chars[0] + Colors.RESET
             else:
@@ -520,7 +523,7 @@ def create_sparkline(values, width=20, current_pos=None):
     for i in range(data_width):
         # Future segments (strictly after current)
         if i > current_segment:
-            sparkline += Colors.LIGHT_GRAY + '▒' + Colors.RESET
+            sparkline += Colors.FUTURE_GRAY + chars[0] + Colors.RESET
             continue
 
         idx = int(i * step) if step > 1 else i
@@ -2185,7 +2188,7 @@ def format_output_full(ctx, terminal_width=None):
             line3_parts.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET}")
             # Use burn sparkline instead of progress bar
             if ctx['burn_timeline']:
-                sparkline = create_sparkline(ctx['burn_timeline'], width=graph_width)
+                sparkline = create_sparkline(ctx['burn_timeline'], width=graph_width, current_pos=ctx.get('burn_current_pos'), future_style="bar")
                 line3_parts.append(sparkline)
             else:
                 line3_parts.append(get_progress_bar(ctx['block_progress'], width=graph_width, show_current_segment=True))
@@ -2285,7 +2288,7 @@ def format_output_compact(ctx):
     if ctx['show_line3']:
         if ctx['session_duration'] or ctx.get('api_session_range'):
             if ctx['burn_timeline']:
-                sparkline = create_sparkline(ctx['burn_timeline'], width=12)
+                sparkline = create_sparkline(ctx['burn_timeline'], width=12, current_pos=ctx.get('burn_current_pos'), future_style="bar")
                 line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
             else:
                 line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
@@ -2310,7 +2313,7 @@ def format_output_compact(ctx):
                 util_color = _get_utilization_color(util)
                 wt = ctx.get('weekly_timeline')
                 if wt and any(v > 0 for v in wt):
-                    spark = create_sparkline(wt, width=12)
+                    spark = create_sparkline(wt, width=12, current_pos=ctx.get('weekly_current_pos'))
                     line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
                 else:
                     line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=12)} {util_color}[{int(util)}%]{Colors.RESET}"
@@ -2391,7 +2394,7 @@ def format_output_tight(ctx):
     if ctx['show_line3']:
         if ctx['session_duration'] or ctx.get('api_session_range'):
             if ctx['burn_timeline']:
-                sparkline = create_sparkline(ctx['burn_timeline'], width=8)
+                sparkline = create_sparkline(ctx['burn_timeline'], width=8, current_pos=ctx.get('burn_current_pos'), future_style="bar")
                 line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
             else:
                 line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
@@ -2416,7 +2419,7 @@ def format_output_tight(ctx):
                 util_color = _get_utilization_color(util)
                 wt = ctx.get('weekly_timeline')
                 if wt and any(v > 0 for v in wt):
-                    spark = create_sparkline(wt, width=8)
+                    spark = create_sparkline(wt, width=8, current_pos=ctx.get('weekly_current_pos'))
                     line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {spark} {util_color}[{int(util)}%]{Colors.RESET}"
                 else:
                     line4 = f"{Colors.BRIGHT_CYAN}W:{Colors.RESET} {get_progress_bar(util, width=8)} {util_color}[{int(util)}%]{Colors.RESET}"
@@ -2697,8 +2700,8 @@ def main():
                 resets_at = datetime.fromisoformat(five_hour['resets_at'])
                 api_start = resets_at - timedelta(hours=5)
                 api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ccsl] ratelimit pre-fetch error: {e}", file=sys.stderr)
 
         # 5時間ブロック検出システム (cached: 30s TTL)
         block_stats = None
@@ -2870,8 +2873,38 @@ def main():
             api_session_range = get_api_session_time_range(ratelimit_data) if ratelimit_data else None
             weekly_timeline = generate_weekly_timeline(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
             weekly_line = get_weekly_line(ratelimit_data, weekly_timeline) if SHOW_LINE4 and ratelimit_data else None
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ccsl] weekly generation error: {e}", file=sys.stderr)
+
+        # Compute burn_current_pos from five_hour.resets_at (same pattern as Weekly)
+        burn_current_pos = None
+        if ratelimit_data:
+            five_hour = ratelimit_data.get('five_hour')
+            if five_hour and five_hour.get('resets_at'):
+                try:
+                    resets_at = datetime.fromisoformat(five_hour['resets_at'])
+                    now = datetime.now(timezone.utc)
+                    block_start = resets_at - timedelta(hours=5)
+                    elapsed = (now - block_start).total_seconds()
+                    total = 5 * 3600
+                    burn_current_pos = max(0.0, min(1.0, elapsed / total))
+                except (ValueError, TypeError):
+                    pass
+
+        # Compute weekly_current_pos from seven_day.resets_at
+        weekly_current_pos = None
+        if ratelimit_data:
+            seven_day = ratelimit_data.get('seven_day')
+            if seven_day and seven_day.get('resets_at'):
+                try:
+                    resets_at = datetime.fromisoformat(seven_day['resets_at'])
+                    now = datetime.now(timezone.utc)
+                    week_start = resets_at - timedelta(days=7)
+                    elapsed = (now - week_start).total_seconds()
+                    total = 7 * 86400
+                    weekly_current_pos = max(0.0, min(1.0, elapsed / total))
+                except (ValueError, TypeError):
+                    pass
 
         # Generate burn line and timeline for context
         # burn_timeline is needed by Line 3 (Session sparkline)
@@ -2886,7 +2919,7 @@ def main():
                 'efficiency_ratio': block_stats.get('efficiency_ratio', 0),
                 'current_cost': session_cost
             }
-            burn_line = get_burn_line(session_data, session_id, block_stats, current_block)
+            burn_line = get_burn_line(session_data, session_id, block_stats, current_block, burn_current_pos)
             burn_timeline = generate_real_burn_timeline(block_stats, current_block, api_block_start_utc)
             block_tokens = block_stats.get('total_tokens', 0)
 
@@ -2913,9 +2946,11 @@ def main():
             'session_time_info': session_time_info,
             'burn_line': burn_line,
             'burn_timeline': burn_timeline,
+            'burn_current_pos': burn_current_pos,
             'block_tokens': block_tokens,
             'weekly_line': weekly_line,
             'weekly_timeline': weekly_timeline if SHOW_LINE4 else None,
+            'weekly_current_pos': weekly_current_pos,
             'ratelimit_data': ratelimit_data,
             'api_session_range': api_session_range,
             'five_hour_utilization': (ratelimit_data.get('five_hour') or {}).get('utilization') if ratelimit_data else None,
@@ -3124,7 +3159,6 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
                 cached = json.load(f)
             cached_api_start = cached.get('api_block_start_utc')
             if (time.time() - cached.get('timestamp', 0) < BLOCK_STATS_CACHE_TTL
-                    and cached.get('session_id') == session_id
                     and cached_api_start == current_api_start_str):
                 # Deserialize block_stats
                 bs = cached.get('block_stats')
@@ -3197,7 +3231,6 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
         try:
             cache_data = {
                 'timestamp': time.time(),
-                'session_id': session_id,
                 'api_block_start_utc': current_api_start_str,
             }
             if block_stats:
@@ -3596,6 +3629,10 @@ try:
         sys.exit(1)
 
     usage_data = json.loads(result.stdout.strip())
+
+    # Validate: API error responses must not overwrite cache
+    if usage_data.get('type') == 'error' or 'seven_day' not in usage_data:
+        sys.exit(1)
 
     cache = {{"timestamp": time.time(), "data": usage_data}}
     cache_dir = os.path.dirname("{cache_file}")
@@ -4036,11 +4073,21 @@ def get_ratelimit_info():
     """Get rate limit info, triggering background probe if stale."""
     cache = load_ratelimit_cache()
     if cache:
+        data = cache.get('data')
+        # Reject cached API error responses (legacy bad cache)
+        if not data or data.get('type') == 'error' or 'seven_day' not in data:
+            # Delete bad cache so next successful probe can write fresh data
+            try:
+                get_ratelimit_cache_file().unlink(missing_ok=True)
+            except OSError:
+                pass
+            probe_ratelimit_background()
+            return None
         age = time.time() - cache.get('timestamp', 0)
         if age < RATELIMIT_CACHE_TTL:
-            return cache.get('data')
+            return data
         probe_ratelimit_background()
-        return cache.get('data')
+        return data
     probe_ratelimit_background()
     return None
 
@@ -4115,9 +4162,10 @@ def generate_weekly_timeline(ratelimit_data, num_segments=20):
             with open(cache_file, 'r') as f:
                 cached = json.load(f)
             if time.time() - cached.get('timestamp', 0) < WEEKLY_TIMELINE_CACHE_TTL:
-                tl = cached.get('timeline', empty)
-                if len(tl) == num_segments:
-                    return tl
+                if cached.get('resets_at') == seven_day.get('resets_at'):
+                    tl = cached.get('timeline', empty)
+                    if len(tl) == num_segments:
+                        return tl
     except (json.JSONDecodeError, OSError):
         pass
 
@@ -4128,7 +4176,7 @@ def generate_weekly_timeline(ratelimit_data, num_segments=20):
     try:
         tmp = cache_file.with_suffix('.tmp')
         with open(tmp, 'w') as f:
-            json.dump({'timestamp': time.time(), 'timeline': timeline}, f)
+            json.dump({'timestamp': time.time(), 'timeline': timeline, 'resets_at': seven_day.get('resets_at')}, f)
         tmp.rename(cache_file)
     except OSError:
         pass
@@ -4192,8 +4240,8 @@ def _scan_weekly_timeline(resets_at_str, num_segments):
             except (FileNotFoundError, PermissionError):
                 continue
 
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        print(f"[ccsl] weekly scan error: {e}", file=sys.stderr)
 
     return timeline
 
@@ -4273,7 +4321,7 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
 
     return "".join(parts)
 
-def get_burn_line(current_session_data=None, session_id=None, block_stats=None, current_block=None):
+def get_burn_line(current_session_data=None, session_id=None, block_stats=None, current_block=None, burn_current_pos=None):
     """Generate burn line display (Line 4)
 
     Creates the Burn line showing session tokens and burn rate.
@@ -4316,12 +4364,13 @@ def get_burn_line(current_session_data=None, session_id=None, block_stats=None, 
         else:
             burn_timeline = [0] * 20
         
-        sparkline = create_sparkline(burn_timeline, width=20)
+        sparkline = create_sparkline(burn_timeline, width=20, current_pos=burn_current_pos, future_style="bar")
         
         return (f"{Colors.BRIGHT_CYAN}Burn:   {Colors.RESET} {sparkline} "
                 f"{Colors.BRIGHT_WHITE}{tokens_formatted} token(w/cache){Colors.RESET}, Rate: {burn_rate_formatted} t/m")
 
-    except Exception:
+    except Exception as e:
+        print(f"[ccsl] burn line error: {e}", file=sys.stderr)
         return f"{Colors.BRIGHT_CYAN}Burn:   {Colors.RESET} {Colors.BRIGHT_WHITE}ERROR{Colors.RESET}"
 if __name__ == "__main__":
     main()
