@@ -506,7 +506,7 @@ def create_sparkline(values, width=20, current_pos=None):
         # All values are the same
         sparkline = ""
         for i in range(data_width):
-            if i >= current_segment:
+            if i > current_segment:
                 sparkline += Colors.LIGHT_GRAY + '▒' + Colors.RESET
             elif max_val == 0:
                 sparkline += Colors.LIGHT_GRAY + chars[0] + Colors.RESET
@@ -518,8 +518,8 @@ def create_sparkline(values, width=20, current_pos=None):
     step = len(values) / data_width if len(values) > data_width else 1
 
     for i in range(data_width):
-        # Future segments
-        if i >= current_segment:
+        # Future segments (strictly after current)
+        if i > current_segment:
             sparkline += Colors.LIGHT_GRAY + '▒' + Colors.RESET
             continue
 
