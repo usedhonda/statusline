@@ -5,6 +5,10 @@ import os
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 # Add project root to path so we can import statusline
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -440,11 +444,6 @@ class TestSmoke:
 # Cache Tests
 # ============================================
 
-import time
-from unittest.mock import patch
-from datetime import datetime, timezone
-
-
 class TestBlockStatsCache:
     """Tests for _get_cached_block_data() 30s TTL file cache."""
 
@@ -675,3 +674,723 @@ class TestTranscriptStatsCache:
         cached = _json.loads(cache_file.read_text())
         assert cached['file_path'] == str(transcript)
         assert cached['file_mtime'] == transcript.stat().st_mtime
+
+
+# ============================================
+# Test Group 1: get_total_tokens() — Token aggregation
+# ============================================
+
+
+class TestGetTotalTokens:
+    def test_none_returns_zero(self):
+        assert statusline.get_total_tokens(None) == 0
+
+    def test_empty_dict_returns_zero(self):
+        assert statusline.get_total_tokens({}) == 0
+
+    def test_input_output_only(self):
+        usage = {'input_tokens': 1000, 'output_tokens': 500}
+        assert statusline.get_total_tokens(usage) == 1500
+
+    def test_cache_snake_case(self):
+        usage = {
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_creation_input_tokens': 200,
+            'cache_read_input_tokens': 300,
+        }
+        assert statusline.get_total_tokens(usage) == 650
+
+    def test_camel_case(self):
+        usage = {
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cacheCreationInputTokens': 200,
+            'cacheReadInputTokens': 300,
+        }
+        assert statusline.get_total_tokens(usage) == 650
+
+    def test_all_fields_mixed(self):
+        """snake_case fields take priority over camelCase."""
+        usage = {
+            'input_tokens': 1000,
+            'output_tokens': 2000,
+            'cache_creation_input_tokens': 500,
+            'cache_read_input_tokens': 300,
+            'cacheCreationInputTokens': 9999,  # should be ignored
+        }
+        assert statusline.get_total_tokens(usage) == 3800
+
+
+# ============================================
+# Test Group 2: get_git_info() — Git integration
+# ============================================
+
+
+class TestGetGitInfo:
+    def test_normal_branch_and_status(self, tmp_path):
+        git_dir = tmp_path / '.git'
+        git_dir.mkdir()
+        (git_dir / 'HEAD').write_text('ref: refs/heads/main\n')
+
+        porcelain = " M file1.py\n M file2.py\n?? new_file.txt\n"
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(stdout=porcelain, returncode=0)
+            branch, modified, untracked = statusline.get_git_info(str(tmp_path))
+
+        assert branch == 'main'
+        assert modified == 2
+        assert untracked == 1
+
+    def test_no_git_dir(self, tmp_path):
+        branch, modified, untracked = statusline.get_git_info(str(tmp_path))
+        assert branch is None
+        assert modified == 0
+        assert untracked == 0
+
+    def test_git_status_timeout(self, tmp_path):
+        git_dir = tmp_path / '.git'
+        git_dir.mkdir()
+        (git_dir / 'HEAD').write_text('ref: refs/heads/feature-x\n')
+
+        with patch('subprocess.run', side_effect=subprocess.TimeoutExpired('git', 1)):
+            branch, modified, untracked = statusline.get_git_info(str(tmp_path))
+
+        assert branch == 'feature-x'
+        assert modified == 0
+        assert untracked == 0
+
+    def test_detached_head(self, tmp_path):
+        git_dir = tmp_path / '.git'
+        git_dir.mkdir()
+        (git_dir / 'HEAD').write_text('abc123def456\n')
+
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(stdout='', returncode=0)
+            branch, modified, untracked = statusline.get_git_info(str(tmp_path))
+
+        assert branch is None  # not a ref: line
+        assert modified == 0
+        assert untracked == 0
+
+
+# ============================================
+# Test Group 3: convert_utc_to_local() / convert_local_to_utc()
+# ============================================
+
+
+class TestTimezoneConversions:
+    def test_aware_utc_to_local(self):
+        utc_time = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        local = statusline.convert_utc_to_local(utc_time)
+        assert local.tzinfo is not None
+        # Round-trip: converting back to UTC should match original
+        back_to_utc = local.astimezone(timezone.utc)
+        assert back_to_utc == utc_time
+
+    def test_naive_datetime_treated_as_utc(self):
+        naive = datetime(2026, 1, 15, 12, 0, 0)
+        local = statusline.convert_utc_to_local(naive)
+        assert local.tzinfo is not None
+
+    def test_roundtrip(self):
+        utc_time = datetime(2026, 6, 15, 18, 30, 0, tzinfo=timezone.utc)
+        local = statusline.convert_utc_to_local(utc_time)
+        back = statusline.convert_local_to_utc(local)
+        assert abs((back - utc_time).total_seconds()) < 1
+
+    def test_convert_local_to_utc_naive(self):
+        naive = datetime(2026, 1, 15, 12, 0, 0)
+        result = statusline.convert_local_to_utc(naive)
+        # Naive is treated as UTC by replace(tzinfo=utc)
+        assert result.tzinfo == timezone.utc
+        assert result.hour == 12
+
+
+# ============================================
+# Test Group 4: detect_five_hour_blocks()
+# ============================================
+
+
+class TestDetectFiveHourBlocks:
+    def _make_msg(self, ts, session_id='s1'):
+        """Build a minimal message dict with a naive UTC timestamp."""
+        return {
+            'timestamp': ts,
+            'session_id': session_id,
+            'type': 'assistant',
+            'usage': {'input_tokens': 100, 'output_tokens': 50},
+        }
+
+    def test_empty_list(self):
+        assert statusline.detect_five_hour_blocks([]) == []
+
+    def test_single_cluster_within_one_hour(self):
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        msgs = [
+            self._make_msg(now - timedelta(minutes=30)),
+            self._make_msg(now - timedelta(minutes=20)),
+            self._make_msg(now - timedelta(minutes=10)),
+        ]
+        blocks = statusline.detect_five_hour_blocks(msgs)
+        assert len(blocks) == 1
+        assert len(blocks[0]['messages']) == 3
+
+    def test_two_groups_with_gap(self):
+        """6-hour gap between groups should produce 2 blocks."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        group1 = [
+            self._make_msg(now - timedelta(hours=5, minutes=50)),
+            self._make_msg(now - timedelta(hours=5, minutes=40)),
+        ]
+        group2 = [
+            self._make_msg(now - timedelta(minutes=20)),
+            self._make_msg(now - timedelta(minutes=10)),
+        ]
+        blocks = statusline.detect_five_hour_blocks(group1 + group2)
+        assert len(blocks) == 2
+
+    def test_boundary_within_five_hours(self):
+        """Messages within 5h of floored block start should stay in one block."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Start within last 4h so all fit in 6h recency + 5h block window
+        start = now - timedelta(hours=3)
+        msgs = [
+            self._make_msg(start),
+            self._make_msg(start + timedelta(hours=1)),
+            self._make_msg(start + timedelta(hours=2, minutes=50)),
+        ]
+        blocks = statusline.detect_five_hour_blocks(msgs)
+        assert len(blocks) == 1
+
+    def test_is_active_flag(self):
+        """Recent messages should mark the block as active."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        msgs = [self._make_msg(now - timedelta(seconds=30))]
+        with patch('statusline.datetime') as mock_dt:
+            # Make sure now() returns our 'now'
+            mock_dt.now.return_value = now.replace(tzinfo=timezone.utc)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            blocks = statusline.detect_five_hour_blocks(msgs)
+        assert len(blocks) == 1
+        assert blocks[0]['is_active'] is True
+
+
+# ============================================
+# Test Group 5: generate_real_burn_timeline()
+# ============================================
+
+
+class TestGenerateRealBurnTimeline:
+    def test_no_messages(self):
+        result = statusline.generate_real_burn_timeline({}, None)
+        assert result == [0] * 20
+
+    def test_single_message(self):
+        start = datetime(2026, 3, 1, 10, 0, 0)  # naive UTC
+        block_stats = {'start_time': start}
+        msg = {
+            'type': 'assistant',
+            'usage': {'input_tokens': 500, 'output_tokens': 200},
+            'timestamp': start + timedelta(minutes=7),  # segment 0
+        }
+        current_block = {'messages': [msg]}
+        result = statusline.generate_real_burn_timeline(block_stats, current_block)
+        assert result[0] == 700  # 500 + 200
+        assert sum(result[1:]) == 0  # all other segments zero
+
+    def test_multiple_segments(self):
+        start = datetime(2026, 3, 1, 10, 0, 0)
+        block_stats = {'start_time': start}
+        msgs = [
+            {
+                'type': 'assistant',
+                'usage': {'input_tokens': 100, 'output_tokens': 50},
+                'timestamp': start + timedelta(minutes=5),  # segment 0
+            },
+            {
+                'type': 'assistant',
+                'usage': {'input_tokens': 200, 'output_tokens': 100},
+                'timestamp': start + timedelta(minutes=20),  # segment 1
+            },
+            {
+                'type': 'assistant',
+                'usage': {'input_tokens': 300, 'output_tokens': 150},
+                'timestamp': start + timedelta(minutes=60),  # segment 4
+            },
+        ]
+        current_block = {'messages': msgs}
+        result = statusline.generate_real_burn_timeline(block_stats, current_block)
+        assert result[0] == 150   # 100+50
+        assert result[1] == 300   # 200+100
+        assert result[4] == 450   # 300+150
+
+    def test_total_matches_message_sum(self):
+        start = datetime(2026, 3, 1, 10, 0, 0)
+        block_stats = {'start_time': start}
+        msgs = []
+        expected_total = 0
+        for i in range(5):
+            tokens = (i + 1) * 100
+            msgs.append({
+                'type': 'assistant',
+                'usage': {'input_tokens': tokens, 'output_tokens': 0},
+                'timestamp': start + timedelta(minutes=i * 20),
+            })
+            expected_total += tokens
+        current_block = {'messages': msgs}
+        result = statusline.generate_real_burn_timeline(block_stats, current_block)
+        assert sum(result) == expected_total
+
+
+# ============================================
+# Test Group 6: build_line1_parts()
+# ============================================
+
+
+class TestBuildLine1Parts:
+    @staticmethod
+    def _make_ctx(**overrides):
+        base = {
+            'model': 'Claude Opus 4.6',
+            'git_branch': 'main',
+            'modified_files': 2,
+            'untracked_files': 1,
+            'current_dir': 'statusline',
+            'active_files': 3,
+            'total_messages': 50,
+            'lines_added': 10,
+            'lines_removed': 5,
+            'error_count': 2,
+            'session_cost': 1.23,
+            'context_size': 200000,
+        }
+        base.update(overrides)
+        return base
+
+    def test_all_flags_true(self):
+        ctx = self._make_ctx()
+        parts = statusline.build_line1_parts(ctx)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert 'Opus 4.6' in joined
+        assert 'main' in joined
+        assert 'statusline' in joined
+        assert '50' in joined  # messages
+        assert '$1.23' in joined  # cost
+
+    def test_all_flags_false(self):
+        ctx = self._make_ctx()
+        parts = statusline.build_line1_parts(
+            ctx,
+            include_active_files=False,
+            include_messages=False,
+            include_lines=False,
+            include_errors=False,
+            include_cost=False,
+            include_dir=False,
+        )
+        joined = statusline.strip_ansi(" ".join(parts))
+        # Model and branch should remain
+        assert 'Opus 4.6' in joined
+        assert 'main' in joined
+        # These should be absent
+        assert '$1.23' not in joined
+        assert 'statusline' not in joined
+
+    def test_tight_model(self):
+        ctx = self._make_ctx()
+        parts = statusline.build_line1_parts(ctx, tight_model=True)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert 'Op4.6' in joined
+
+    def test_truncation(self):
+        ctx = self._make_ctx(git_branch='very-long-branch-name-exceeds-limit')
+        parts = statusline.build_line1_parts(ctx, max_branch_len=10, max_dir_len=5)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert '...' in joined  # truncation applied
+
+
+# ============================================
+# Test Group 7: Formatter smoke tests
+# ============================================
+
+
+class TestFormatters:
+    @staticmethod
+    def _make_full_ctx():
+        return {
+            'model': 'Claude Sonnet 4.6',
+            'git_branch': 'main',
+            'modified_files': 1,
+            'untracked_files': 0,
+            'current_dir': 'project',
+            'active_files': 2,
+            'total_messages': 100,
+            'lines_added': 20,
+            'lines_removed': 5,
+            'error_count': 0,
+            'task_status': None,
+            'session_cost': 2.50,
+            'compact_tokens': 80000,
+            'compaction_threshold': 160000,
+            'percentage': 50,
+            'cache_ratio': 85,
+            'session_duration': '1h30m',
+            'block_progress': 30,
+            'session_time_info': None,
+            'burn_line': None,
+            'burn_timeline': [1000, 2000, 500, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            'block_tokens': 50000,
+            'weekly_line': 'Weekly: [40%]',
+            'weekly_timeline': None,
+            'ratelimit_data': None,
+            'api_session_range': ('10am', '3pm'),
+            'five_hour_utilization': 30,
+            'session_duration_seconds': 5400,
+            'show_line1': True,
+            'show_line2': True,
+            'show_line3': True,
+            'show_line4': True,
+            'show_schedule': False,
+            'exceeds_200k': False,
+            'context_size': 200000,
+            'percentage_of_full_context': 50,
+        }
+
+    def test_format_output_full(self):
+        ctx = self._make_full_ctx()
+        lines = statusline.format_output_full(ctx, terminal_width=80)
+        assert isinstance(lines, list)
+        assert len(lines) == 4
+        for line in lines:
+            assert len(statusline.strip_ansi(line)) > 0
+
+    def test_format_output_compact(self):
+        ctx = self._make_full_ctx()
+        lines = statusline.format_output_compact(ctx)
+        assert isinstance(lines, list)
+        assert len(lines) == 4
+        for line in lines:
+            assert len(statusline.strip_ansi(line)) > 0
+
+    def test_format_output_tight(self):
+        ctx = self._make_full_ctx()
+        lines = statusline.format_output_tight(ctx)
+        assert isinstance(lines, list)
+        assert len(lines) == 4
+        for line in lines:
+            assert len(statusline.strip_ansi(line)) > 0
+
+    def test_format_output_minimal(self):
+        ctx = self._make_full_ctx()
+        lines = statusline.format_output_minimal(ctx, terminal_width=40)
+        assert isinstance(lines, list)
+        assert len(lines) == 1
+        assert len(statusline.strip_ansi(lines[0])) > 0
+
+
+# ============================================
+# Test Group 8: calculate_tokens_from_jsonl_with_dedup()
+# ============================================
+
+
+class TestCalculateTokensFromJsonlWithDedup:
+    def _write_jsonl(self, path, messages):
+        with open(path, 'w') as f:
+            for msg in messages:
+                f.write(json.dumps(msg) + '\n')
+
+    def test_normal_assistant_messages(self, tmp_path):
+        transcript = tmp_path / 'session.jsonl'
+        start = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        msgs = [
+            {
+                'type': 'assistant',
+                'timestamp': (start + timedelta(minutes=5)).isoformat(),
+                'uuid': 'msg-1',
+                'requestId': 'req-1',
+                'usage': {
+                    'input_tokens': 1000,
+                    'output_tokens': 500,
+                    'cache_creation_input_tokens': 0,
+                    'cache_read_input_tokens': 0,
+                },
+            },
+            {
+                'type': 'assistant',
+                'timestamp': (start + timedelta(minutes=10)).isoformat(),
+                'uuid': 'msg-2',
+                'requestId': 'req-2',
+                'usage': {
+                    'input_tokens': 2000,
+                    'output_tokens': 1000,
+                    'cache_creation_input_tokens': 0,
+                    'cache_read_input_tokens': 0,
+                },
+            },
+        ]
+        self._write_jsonl(transcript, msgs)
+        result = statusline.calculate_tokens_from_jsonl_with_dedup(
+            transcript, start, 18000  # 5h
+        )
+        assert result is not None
+        assert result['total_tokens'] == 4500  # 1000+500+2000+1000
+        assert result['assistant_messages'] == 2
+
+    def test_duplicate_uuid_requestid(self, tmp_path):
+        transcript = tmp_path / 'session.jsonl'
+        start = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        msg = {
+            'type': 'assistant',
+            'timestamp': (start + timedelta(minutes=5)).isoformat(),
+            'uuid': 'msg-dup',
+            'requestId': 'req-dup',
+            'usage': {
+                'input_tokens': 1000,
+                'output_tokens': 500,
+                'cache_creation_input_tokens': 0,
+                'cache_read_input_tokens': 0,
+            },
+        }
+        self._write_jsonl(transcript, [msg, msg, msg])  # 3 copies
+        result = statusline.calculate_tokens_from_jsonl_with_dedup(
+            transcript, start, 18000
+        )
+        assert result is not None
+        assert result['total_tokens'] == 1500  # only 1 counted
+        assert result['skipped_duplicates'] == 2
+
+    def test_outside_time_window(self, tmp_path):
+        transcript = tmp_path / 'session.jsonl'
+        start = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        msg = {
+            'type': 'assistant',
+            'timestamp': (start - timedelta(hours=2)).isoformat(),  # before window
+            'uuid': 'msg-old',
+            'requestId': 'req-old',
+            'usage': {
+                'input_tokens': 9999,
+                'output_tokens': 9999,
+                'cache_creation_input_tokens': 0,
+                'cache_read_input_tokens': 0,
+            },
+        }
+        self._write_jsonl(transcript, [msg])
+        result = statusline.calculate_tokens_from_jsonl_with_dedup(
+            transcript, start, 18000
+        )
+        assert result is not None
+        assert result['total_tokens'] == 0
+
+    def test_empty_file(self, tmp_path):
+        transcript = tmp_path / 'session.jsonl'
+        transcript.write_text('')
+        result = statusline.calculate_tokens_from_jsonl_with_dedup(
+            transcript, datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc), 18000
+        )
+        assert result is not None
+        assert result['total_tokens'] == 0
+        assert result['total_messages'] == 0
+
+
+# ============================================
+# Test Group 9: find_session_transcript()
+# ============================================
+
+
+class TestFindSessionTranscript:
+    def test_none_session_id(self):
+        assert statusline.find_session_transcript(None) is None
+
+    def test_existing_session(self, tmp_path):
+        projects_dir = tmp_path / '.claude' / 'projects' / 'test-project'
+        projects_dir.mkdir(parents=True)
+        transcript = projects_dir / 'abc-123.jsonl'
+        transcript.write_text('{"type":"user"}\n')
+
+        with patch.object(Path, 'home', return_value=tmp_path):
+            result = statusline.find_session_transcript('abc-123')
+        assert result is not None
+        assert result.name == 'abc-123.jsonl'
+
+    def test_nonexistent_session(self, tmp_path):
+        projects_dir = tmp_path / '.claude' / 'projects' / 'test-project'
+        projects_dir.mkdir(parents=True)
+
+        with patch.object(Path, 'home', return_value=tmp_path):
+            result = statusline.find_session_transcript('nonexistent-id')
+        assert result is None
+
+
+# ============================================
+# Test Group 10: format_schedule_line()
+# ============================================
+
+
+class TestFormatScheduleLine:
+    def test_normal_event(self):
+        event = {
+            'time': '14:00',
+            'summary': 'Meeting',
+            'minutes_until': 30,
+            'is_all_day': False,
+        }
+        result = statusline.format_schedule_line(event, 60)
+        assert result is not None
+        clean = statusline.strip_ansi(result)
+        assert '14:00' in clean
+        assert 'Meeting' in clean
+        assert '30m' in clean
+
+    def test_narrow_width_truncates(self):
+        event = {
+            'time': '14:00',
+            'summary': 'Very Long Meeting Summary That Exceeds Width',
+            'minutes_until': 30,
+            'is_all_day': False,
+        }
+        result = statusline.format_schedule_line(event, 30)
+        assert result is not None
+        clean = statusline.strip_ansi(result)
+        # Should be truncated to fit
+        assert len(clean) <= 35  # some margin for emoji width
+
+    def test_cjk_summary(self):
+        event = {
+            'time': '14:00',
+            'summary': '\u30df\u30fc\u30c6\u30a3\u30f3\u30b0\u306e\u4e88\u5b9a\u304c\u3042\u308a\u307e\u3059',
+            'minutes_until': 60,
+            'is_all_day': False,
+        }
+        result = statusline.format_schedule_line(event, 40)
+        assert result is not None
+        # Just verify it doesn't crash with CJK
+
+
+# ============================================
+# Test Group 11: format_agent_line() / get_dead_agents()
+# ============================================
+
+
+class TestAgentFunctions:
+    def test_format_agent_line(self):
+        ctx = {
+            'model': 'Claude Sonnet 4.6',
+            'total_messages': 25,
+            'percentage': 40,
+            'session_cost': 0.50,
+        }
+        result = statusline.format_agent_line(ctx, 'researcher')
+        clean = statusline.strip_ansi(result)
+        assert 'researcher' in clean
+        assert 'Sonnet 4.6' in clean
+
+    def test_get_dead_agents_no_file(self):
+        with patch('builtins.open', side_effect=FileNotFoundError):
+            assert statusline.get_dead_agents() == []
+
+    def test_get_dead_agents_with_file(self, tmp_path):
+        dead_file = tmp_path / 'tproj-dead-agents'
+        dead_file.write_text('agent-1\nagent-2\n')
+        with patch('builtins.open', return_value=open(dead_file, 'r')):
+            agents = statusline.get_dead_agents()
+        assert agents == ['agent-1', 'agent-2']
+
+
+# ============================================
+# Test Group 12: E2E smoke additions
+# ============================================
+
+
+class TestSmokeExtended:
+    """Extended smoke tests with realistic input data."""
+
+    def _run(self, input_data):
+        return subprocess.run(
+            [sys.executable, STATUSLINE_PATH],
+            input=input_data,
+            capture_output=True, text=True,
+            timeout=10,
+        )
+
+    def test_full_input_with_ratelimit(self):
+        data = json.dumps({
+            "session_id": "test-full",
+            "transcript_path": "/tmp/nonexistent.jsonl",
+            "cwd": "/tmp/project",
+            "model": {"id": "claude-opus-4-6", "display_name": "Opus 4.6"},
+            "workspace": {"current_dir": "/tmp/project", "project_dir": "/tmp", "added_dirs": []},
+            "version": "2.2.0",
+            "output_style": {"name": "default"},
+            "cost": {
+                "total_cost_usd": 1.5,
+                "total_duration_ms": 360000,
+                "total_api_duration_ms": 120000,
+                "total_lines_added": 50,
+                "total_lines_removed": 10,
+            },
+            "context_window": {
+                "total_input_tokens": 50000,
+                "total_output_tokens": 20000,
+                "context_window_size": 200000,
+                "current_usage": {
+                    "input_tokens": 60000,
+                    "output_tokens": 20000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+                "used_percentage": 40,
+                "remaining_percentage": 60,
+            },
+            "ratelimit": {
+                "five_hour": {
+                    "utilization": 25,
+                    "resets_at": "2026-03-02T15:00:00+00:00",
+                },
+                "seven_day": {
+                    "utilization": 40,
+                    "resets_at": "2026-03-08T00:00:00+00:00",
+                },
+            },
+            "exceeds_200k_tokens": False,
+        })
+        result = self._run(data)
+        assert result.returncode == 0
+        lines = result.stdout.strip().split('\n')
+        assert len(lines) >= 4, f"Expected >= 4 lines, got {len(lines)}: {result.stdout!r}"
+
+    def test_show_simple(self):
+        data = json.dumps({
+            "model": {"display_name": "Sonnet 4.6"},
+            "context_window": {
+                "context_window_size": 200000,
+                "used_percentage": 30,
+            },
+        })
+        result = subprocess.run(
+            [sys.executable, STATUSLINE_PATH, '--show', 'simple'],
+            input=data,
+            capture_output=True, text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        lines = result.stdout.strip().split('\n')
+        assert len(lines) <= 2, f"Simple mode should be <= 2 lines, got {len(lines)}"
+
+    def test_show_specific_lines(self):
+        data = json.dumps({
+            "model": {"display_name": "Opus 4.6"},
+            "context_window": {
+                "context_window_size": 200000,
+                "used_percentage": 50,
+            },
+        })
+        result = subprocess.run(
+            [sys.executable, STATUSLINE_PATH, '--show', '1,2'],
+            input=data,
+            capture_output=True, text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        lines = result.stdout.strip().split('\n')
+        assert len(lines) <= 2, f"--show 1,2 should be <= 2 lines, got {len(lines)}"
