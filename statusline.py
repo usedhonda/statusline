@@ -734,14 +734,16 @@ def find_all_transcript_files(hours_limit=6):
 
     return transcript_files
 
-def load_all_messages_chronologically(hours_limit=6):
+def load_all_messages_chronologically(hours_limit=6, transcript_files=None):
     """Load messages from recently updated transcripts in chronological order
 
     Args:
         hours_limit: Only load from files modified within this many hours (default: 6)
+        transcript_files: Pre-found file list to skip redundant find_all_transcript_files()
     """
     all_messages = []
-    transcript_files = find_all_transcript_files(hours_limit=hours_limit)
+    if transcript_files is None:
+        transcript_files = find_all_transcript_files(hours_limit=hours_limit)
 
     for transcript_file in transcript_files:
         try:
@@ -3141,6 +3143,25 @@ def _deserialize_datetime(s):
         return datetime.fromisoformat(s)
     return s
 
+def _get_transcript_fingerprint(hours_limit=6):
+    """Get per-file fingerprint of transcript files (stat() only, no parsing).
+
+    Returns: (fingerprint_dict, file_list)
+      fingerprint_dict: {str(path): [mtime_ns, size], ...}
+      file_list: [Path, ...] for reuse by load_all_messages_chronologically
+    """
+    files = find_all_transcript_files(hours_limit=hours_limit)
+    if not files:
+        return {}, []
+    fp = {}
+    for f in files:
+        try:
+            st = f.stat()
+            fp[str(f)] = [st.st_mtime_ns, st.st_size]
+        except OSError:
+            continue
+    return fp, files
+
 def _get_cached_block_data(session_id, api_block_start_utc=None):
     """Get block_stats and current_block from 30s file cache or by computing.
 
@@ -3150,6 +3171,9 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
     instead of local floor_to_hour() detection for accurate message coverage.
     Returns (None, None) on error.
     """
+    # --- transcript fingerprint (stat() only, <1ms) ---
+    transcript_fp, transcript_files = _get_transcript_fingerprint()
+
     # --- cache hit path ---
     cache_file = _get_block_stats_cache_file()
     current_api_start_str = _serialize_datetime(api_block_start_utc) if api_block_start_utc else None
@@ -3158,8 +3182,11 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
             with open(cache_file, 'r') as f:
                 cached = json.load(f)
             cached_api_start = cached.get('api_block_start_utc')
-            if (time.time() - cached.get('timestamp', 0) < BLOCK_STATS_CACHE_TTL
-                    and cached_api_start == current_api_start_str):
+            cached_fp = cached.get('transcript_fingerprint')
+            if (cached_fp is not None
+                    and time.time() - cached.get('timestamp', 0) < BLOCK_STATS_CACHE_TTL
+                    and cached_api_start == current_api_start_str
+                    and cached_fp == transcript_fp):
                 # Deserialize block_stats
                 bs = cached.get('block_stats')
                 if bs:
@@ -3180,7 +3207,7 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
     block_stats = None
     current_block = None
     try:
-        all_messages = load_all_messages_chronologically()
+        all_messages = load_all_messages_chronologically(transcript_files=transcript_files)
 
         if api_block_start_utc is not None:
             # Use API-derived window for precise message filtering (bypasses floor_to_hour drift)
@@ -3232,6 +3259,7 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
             cache_data = {
                 'timestamp': time.time(),
                 'api_block_start_utc': current_api_start_str,
+                'transcript_fingerprint': transcript_fp,
             }
             if block_stats:
                 bs_copy = dict(block_stats)
@@ -4069,6 +4097,30 @@ def do_rollback():
 # Ratelimit data access + display helpers
 # ============================================
 
+def _adjust_stale_ratelimit(data):
+    """Adjust ratelimit data when five_hour block has expired.
+    If resets_at is in the past, advance it by 5h increments and clear utilization.
+    """
+    if not data:
+        return data
+    five_hour = data.get('five_hour')
+    if not five_hour or not five_hour.get('resets_at'):
+        return data
+    try:
+        resets_at = datetime.fromisoformat(five_hour['resets_at'])
+        now_utc = datetime.now(timezone.utc)
+        if resets_at < now_utc:
+            # Block expired - advance to current block and clear stale utilization
+            while resets_at < now_utc:
+                resets_at += timedelta(hours=5)
+            data = dict(data)  # shallow copy to avoid mutating cache
+            data['five_hour'] = dict(five_hour)
+            data['five_hour']['resets_at'] = resets_at.isoformat()
+            data['five_hour']['utilization'] = None  # unknown for new block
+    except (ValueError, TypeError):
+        pass
+    return data
+
 def get_ratelimit_info():
     """Get rate limit info, triggering background probe if stale."""
     cache = load_ratelimit_cache()
@@ -4085,9 +4137,9 @@ def get_ratelimit_info():
             return None
         age = time.time() - cache.get('timestamp', 0)
         if age < RATELIMIT_CACHE_TTL:
-            return data
+            return _adjust_stale_ratelimit(data)
         probe_ratelimit_background()
-        return data
+        return _adjust_stale_ratelimit(data)
     probe_ratelimit_background()
     return None
 
