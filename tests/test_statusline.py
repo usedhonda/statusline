@@ -473,11 +473,14 @@ class TestSmoke:
 class TestBlockStatsCache:
     """Tests for _get_cached_block_data() 30s TTL file cache."""
 
+    FAKE_FINGERPRINT = {'/fake/transcript.jsonl': [1234567890, 100]}
+
     def _make_cache_data(self, session_id="test-session", age=0):
         """Build valid cache data dict."""
         return {
             'timestamp': time.time() - age,
             'session_id': session_id,
+            'transcript_fingerprint': self.FAKE_FINGERPRINT,
             'block_stats': {
                 'start_time': '2026-02-26T05:00:00',
                 'duration_seconds': 3600,
@@ -514,7 +517,8 @@ class TestBlockStatsCache:
         import json as _json
         cache_file.write_text(_json.dumps(data))
 
-        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
             with patch.object(statusline, 'load_all_messages_chronologically') as mock_load:
                 bs, cb = statusline._get_cached_block_data('test-session')
                 mock_load.assert_not_called()
@@ -533,7 +537,8 @@ class TestBlockStatsCache:
         import json as _json
         cache_file.write_text(_json.dumps(data))
 
-        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
                 bs, cb = statusline._get_cached_block_data('test-session')
                 mock_load.assert_called_once()
@@ -545,7 +550,8 @@ class TestBlockStatsCache:
         import json as _json
         cache_file.write_text(_json.dumps(data))
 
-        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
                 bs, cb = statusline._get_cached_block_data('test-session')
                 mock_load.assert_not_called()
@@ -555,7 +561,8 @@ class TestBlockStatsCache:
         """No cache file triggers recomputation."""
         cache_file = tmp_path / '.block_stats_cache.json'
 
-        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
                 bs, cb = statusline._get_cached_block_data('test-session')
                 mock_load.assert_called_once()
@@ -583,7 +590,8 @@ class TestBlockStatsCache:
             'total_messages': 10,
         }
 
-        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file):
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]):
                 with patch.object(statusline, 'detect_five_hour_blocks', return_value=[mock_block]):
                     with patch.object(statusline, 'find_current_session_block', return_value=mock_block):
@@ -595,6 +603,7 @@ class TestBlockStatsCache:
         cached = _json.loads(cache_file.read_text())
         assert 'session_id' not in cached
         assert cached['block_stats']['total_tokens'] == 5000
+        assert cached['transcript_fingerprint'] == self.FAKE_FINGERPRINT
 
 
 class TestTranscriptStatsCache:
