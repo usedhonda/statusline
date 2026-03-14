@@ -1949,6 +1949,16 @@ def shorten_model_name(model, tight=False):
 
     return name
 
+def should_show_1m_badge(model, context_size):
+    """1Mバッジを表示すべきか判定。1Mがデフォルトのモデルでは非表示。"""
+    if context_size <= 200000:
+        return False
+    # Opus 4.6 は 1M のみなのでバッジ不要
+    normalized = model.lower()
+    if 'opus' in normalized and '4.6' in normalized:
+        return False
+    return True
+
 def truncate_text(text, max_len):
     """テキストを最大長で切り詰め、...を追加"""
     if len(text) <= max_len:
@@ -1984,7 +1994,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     # Model (normal or tight)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
-    ctx_suffix = "(1M)" if include_context_badge and ctx.get('context_size', 200000) > 200000 else ""
+    ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
     parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
     # Git branch (no untracked files count)
@@ -2245,7 +2255,7 @@ def format_output_compact(ctx):
         line1_parts = []
         # Compact mode: use tight model name for space efficiency
         short_model = shorten_model_name(ctx['model'], tight=True)
-        ctx_suffix = "(1M)" if ctx.get('context_size', 200000) > 200000 else ""
+        ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
         if ctx['git_branch']:
@@ -2361,7 +2371,7 @@ def format_output_tight(ctx):
     if ctx['show_line1']:
         line1_parts = []
         short_model = shorten_model_name(ctx['model'], tight=True)
-        ctx_suffix = "(1M)" if ctx.get('context_size', 200000) > 200000 else ""
+        ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
         if ctx['git_branch']:
