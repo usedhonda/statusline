@@ -309,7 +309,7 @@ def get_display_mode(width):
     Returns:
         str: 'full', 'compact', or 'tight'
     """
-    if width >= 55:
+    if width >= 60:
         return 'full'
     elif width >= 35:
         return 'compact'
@@ -2157,7 +2157,8 @@ def format_output_full(ctx, terminal_width=None):
             for sep, kwargs in shrink_steps:
                 line1_parts = build_line1_parts(ctx, **kwargs)
                 line1 = sep.join(line1_parts)
-                if get_display_width(line1) <= terminal_width:
+                emoji_margin = 2  # emoji幅のターミナル差異を吸収
+                if get_display_width(line1) <= terminal_width - emoji_margin:
                     break
             lines.append(line1)
 
