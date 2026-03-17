@@ -1997,6 +1997,13 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
     parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
+    # Directory (before git branch)
+    if include_dir:
+        dir_name = ctx['current_dir']
+        if max_dir_len and len(dir_name) > max_dir_len:
+            dir_name = truncate_text(dir_name, max_dir_len)
+        parts.append(f"{Colors.BRIGHT_CYAN}📁 {dir_name}{Colors.RESET}")
+
     # Git branch (no untracked files count)
     if ctx['git_branch']:
         branch = ctx['git_branch']
@@ -2008,20 +2015,9 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         git_display += Colors.RESET
         parts.append(git_display)
 
-    # Directory
-    if include_dir:
-        dir_name = ctx['current_dir']
-        if max_dir_len and len(dir_name) > max_dir_len:
-            dir_name = truncate_text(dir_name, max_dir_len)
-        parts.append(f"{Colors.BRIGHT_CYAN}📁 {dir_name}{Colors.RESET}")
-
     # Active files
     if include_active_files and ctx['active_files'] > 0:
         parts.append(f"{Colors.BRIGHT_WHITE}📝 {ctx['active_files']}{Colors.RESET}")
-
-    # Messages
-    if include_messages and ctx['total_messages'] > 0:
-        parts.append(f"{Colors.BRIGHT_CYAN}💬 {ctx['total_messages']}{Colors.RESET}")
 
     # Lines changed
     if include_lines and (ctx['lines_added'] > 0 or ctx['lines_removed'] > 0):
@@ -2031,10 +2027,10 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     if include_errors and ctx['error_count'] > 0:
         parts.append(f"{Colors.BRIGHT_RED}⚠️ {ctx['error_count']}{Colors.RESET}")
 
-    # Cost
+    # Cost (no emoji)
     if include_cost and ctx['session_cost'] > 0:
         cost_color = Colors.BRIGHT_YELLOW if ctx['session_cost'] > 10 else Colors.BRIGHT_WHITE
-        parts.append(f"{cost_color}💰 {format_cost(ctx['session_cost'])}{Colors.RESET}")
+        parts.append(f"{cost_color}{format_cost(ctx['session_cost'])}{Colors.RESET}")
 
     return parts
 
@@ -2058,16 +2054,12 @@ def format_agent_line(ctx, agent_name):
     model_name = shorten_model_name(ctx['model'])
     parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
 
-    # Messages
-    if ctx['total_messages'] > 0:
-        parts.append(f"{Colors.BRIGHT_CYAN}\U0001F4AC {ctx['total_messages']}{Colors.RESET}")
-
     # Compact percentage
     parts.append(f"{ctx['percentage']}%")
 
-    # Cost
+    # Cost (no emoji)
     if ctx['session_cost'] > 0:
-        parts.append(f"\U0001F4B0 ${ctx['session_cost']:.2f}")
+        parts.append(f"${ctx['session_cost']:.2f}")
 
     return " | ".join(parts)
 
@@ -2075,13 +2067,13 @@ def format_output_full(ctx, terminal_width=None):
     """Full mode (>= 55 chars): 4行・全項目・装飾あり・グラフ幅可変
 
     Example (width >= 68):
-    [Son4] | 🌿 main M2 | 📁 statusline | 💬 254 | 💰 $1.23
+    [Son4] | 📁 statusline | 🌿 main M2 | +201/-49 | $1.23
     Context: ████████▒▒▒▒▒▒▒ [58%] 91.8K/200.0K ♻️ 99%
     Session: █▇▁▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 1h27m/5h, 40.3M token(462K t/m) (3am-8am)
     Weekly:  ████████████▒▒▒▒▒▒▒▒ [64%] 32m, Extra: 7% $3.59/$50
 
-    Example (width 55-67):
-    [Son4] | 🌿 main M2 | 📁 statusline
+    Example (width 60-67):
+    [Son4] | 📁 statusline | 🌿 main M2
     Context: ████▒▒▒▒▒ [58%] 91.8K/200.0K ♻️ 99%
     Session: █▇▁▁▂▄▁▁▁ 1h27m/5h, 40.3M token (3am-8am)
     Weekly:  ████████▒▒ [64%] 32m, Extra: 7% $3.59/$50
@@ -2259,6 +2251,8 @@ def format_output_compact(ctx):
         ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
         line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
+        line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
+
         if ctx['git_branch']:
             branch = ctx['git_branch']
             # Compact mode: truncate long branch names
@@ -2271,11 +2265,6 @@ def format_output_compact(ctx):
                 git_display += f"+{ctx['untracked_files']}"
             git_display += Colors.RESET
             line1_parts.append(git_display)
-
-        line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
-
-        if ctx['total_messages'] > 0:
-            line1_parts.append(f"{Colors.BRIGHT_CYAN}💬{ctx['total_messages']}{Colors.RESET}")
 
         lines.append(" ".join(line1_parts))
 
@@ -4377,7 +4366,8 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
         used = extra.get('used_credits', 0)
         limit = extra.get('monthly_limit', 0)
         # API returns cents — always divide by 100
-        used_str = f"${used / 100:.2f}"
+        used_val = used / 100
+        used_str = f"${int(used_val)}" if used_val == int(used_val) else f"${used_val:.2f}"
         limit_str = f"${limit / 100:.0f}"
         parts.append(f", {Colors.BRIGHT_YELLOW}Ext:{Colors.RESET}")
         parts.append(f" {Colors.BRIGHT_WHITE}{used_str}/{limit_str}{Colors.RESET}")

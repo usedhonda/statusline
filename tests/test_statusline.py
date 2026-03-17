@@ -97,11 +97,11 @@ class TestGetDisplayMode:
     def test_full(self):
         assert statusline.get_display_mode(68) == "full"
         assert statusline.get_display_mode(120) == "full"
-        assert statusline.get_display_mode(55) == "full"
+        assert statusline.get_display_mode(60) == "full"
 
     def test_compact(self):
         assert statusline.get_display_mode(35) == "compact"
-        assert statusline.get_display_mode(54) == "compact"
+        assert statusline.get_display_mode(59) == "compact"
 
     def test_tight(self):
         assert statusline.get_display_mode(34) == "tight"
@@ -1011,8 +1011,11 @@ class TestBuildLine1Parts:
         assert 'Opus 4.6' in joined
         assert 'main' in joined
         assert 'statusline' in joined
-        assert '50' in joined  # messages
-        assert '$1.23' in joined  # cost
+        assert '$1.23' in joined  # cost (no 💰 emoji)
+        # Directory should appear before git branch
+        dir_pos = joined.index('statusline')
+        branch_pos = joined.index('main')
+        assert dir_pos < branch_pos, "Directory should appear before git branch"
 
     def test_all_flags_false(self):
         ctx = self._make_ctx()
