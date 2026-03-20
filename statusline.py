@@ -2691,18 +2691,26 @@ def main():
         ratelimit_data = None
         api_block_start_utc = None
         if api_rate_limits and (SHOW_LINE4 or SHOW_LINE3):
+            def _to_iso(val):
+                """Convert resets_at to ISO 8601 string (handles Unix timestamp or ISO string)."""
+                if val is None:
+                    return None
+                if isinstance(val, (int, float)):
+                    return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+                return str(val)
+
             ratelimit_data = {}
             fh = api_rate_limits.get('five_hour')
             if fh:
                 ratelimit_data['five_hour'] = {
                     'utilization': fh.get('used_percentage'),
-                    'resets_at': fh.get('resets_at'),
+                    'resets_at': _to_iso(fh.get('resets_at')),
                 }
             sd = api_rate_limits.get('seven_day')
             if sd:
                 ratelimit_data['seven_day'] = {
                     'utilization': sd.get('used_percentage'),
-                    'resets_at': sd.get('resets_at'),
+                    'resets_at': _to_iso(sd.get('resets_at')),
                 }
             if not ratelimit_data:
                 ratelimit_data = None
