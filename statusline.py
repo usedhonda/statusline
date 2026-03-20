@@ -46,10 +46,6 @@ BLOCK_STATS_CACHE_FILE = None
 TRANSCRIPT_STATS_CACHE_TTL = 15  # 15 seconds
 TRANSCRIPT_STATS_CACHE_FILE = None
 
-# Ratelimit cache settings
-RATELIMIT_CACHE_TTL = 300  # 5 minutes
-RATELIMIT_CACHE_FILE = None
-RATELIMIT_LOCK_FILE = None
 
 # Auto-update settings
 AUTO_UPDATE_CHECK_TTL = 14400  # 4 hours
@@ -2633,6 +2629,7 @@ def main():
         # ========================================
         api_cost = data.get('cost', {})
         api_context = data.get('context_window', {})
+        api_rate_limits = data.get('rate_limits', {})
 
         # API provided values (use these instead of manual calculation where possible)
         api_total_cost = api_cost.get('total_cost_usd', 0)
@@ -2690,20 +2687,33 @@ def main():
         cache_creation = 0
         cache_read = 0
         
-        # Pre-fetch ratelimit data for accurate 5-hour window alignment
-        # This must happen BEFORE _get_cached_block_data() so we can pass
-        # the API-derived window start time for precise message filtering
+        # Build ratelimit_data from stdin rate_limits (CC v2.1.80+)
         ratelimit_data = None
         api_block_start_utc = None
-        try:
-            ratelimit_data = get_ratelimit_info() if SHOW_LINE4 or SHOW_LINE3 else None
+        if api_rate_limits and (SHOW_LINE4 or SHOW_LINE3):
+            ratelimit_data = {}
+            fh = api_rate_limits.get('five_hour')
+            if fh:
+                ratelimit_data['five_hour'] = {
+                    'utilization': fh.get('used_percentage'),
+                    'resets_at': fh.get('resets_at'),
+                }
+            sd = api_rate_limits.get('seven_day')
+            if sd:
+                ratelimit_data['seven_day'] = {
+                    'utilization': sd.get('used_percentage'),
+                    'resets_at': sd.get('resets_at'),
+                }
+            if not ratelimit_data:
+                ratelimit_data = None
+            # Compute api_block_start_utc from five_hour resets_at
             if ratelimit_data and (ratelimit_data.get('five_hour') or {}).get('resets_at'):
-                five_hour = ratelimit_data.get('five_hour') or {}
-                resets_at = datetime.fromisoformat(five_hour['resets_at'])
-                api_start = resets_at - timedelta(hours=5)
-                api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
-        except Exception as e:
-            print(f"[ccsl] ratelimit pre-fetch error: {e}", file=sys.stderr)
+                try:
+                    resets_at = datetime.fromisoformat(ratelimit_data['five_hour']['resets_at'])
+                    api_start = resets_at - timedelta(hours=5)
+                    api_block_start_utc = api_start.astimezone(timezone.utc).replace(tzinfo=None)
+                except (ValueError, TypeError):
+                    pass
 
         # 5時間ブロック検出システム (cached: 30s TTL)
         block_stats = None
@@ -3110,7 +3120,7 @@ def calculate_tokens_since_time(start_time, session_id):
 # REMOVED: get_session_cumulative_usage() - unused function (5th line display not implemented)
 
 # ============================================
-# Ratelimit cache management (OAuth API)
+# Block stats / transcript cache management
 # ============================================
 
 def _get_block_stats_cache_file():
@@ -3335,362 +3345,9 @@ def _save_transcript_stats_cache(file_path, stats_tuple):
     except OSError:
         pass
 
-def get_ratelimit_cache_file():
-    """Get rate limit cache file path (lazy initialization)"""
-    global RATELIMIT_CACHE_FILE
-    if RATELIMIT_CACHE_FILE is None:
-        RATELIMIT_CACHE_FILE = Path.home() / '.claude' / '.ratelimit_cache.json'
-    return RATELIMIT_CACHE_FILE
 
-def get_ratelimit_lock_file():
-    """Get rate limit lock file path (lazy initialization)"""
-    global RATELIMIT_LOCK_FILE
-    if RATELIMIT_LOCK_FILE is None:
-        RATELIMIT_LOCK_FILE = Path.home() / '.claude' / '.ratelimit_lock.json'
-    return RATELIMIT_LOCK_FILE
 
-def load_ratelimit_cache():
-    """Load ratelimit cache from disk."""
-    cache_file = get_ratelimit_cache_file()
-    try:
-        if cache_file.exists():
-            with open(cache_file) as f:
-                return json.load(f)
-    except (json.JSONDecodeError, IOError, OSError):
-        pass
-    return None
 
-def _acquire_pid_lock():
-    """Acquire PID lock for probe mutual exclusion."""
-    lock_file = get_ratelimit_lock_file()
-    try:
-        if lock_file.exists():
-            with open(lock_file) as f:
-                lock_data = json.load(f)
-            pid = lock_data.get('pid')
-            start_time_val = lock_data.get('start_time', 0)
-            # Check if process is still alive and lock is not stale (60s)
-            if pid and time.time() - start_time_val < 60:
-                try:
-                    os.kill(pid, 0)
-                    return False  # Process alive, lock held
-                except OSError:
-                    pass  # Process dead, steal lock
-    except (json.JSONDecodeError, IOError, OSError):
-        pass
-    return True
-
-def _write_pid_lock(pid):
-    """Write PID to lock file."""
-    lock_file = get_ratelimit_lock_file()
-    try:
-        with open(lock_file, 'w') as f:
-            json.dump({'pid': pid, 'start_time': time.time()}, f)
-    except (IOError, OSError):
-        pass
-
-def _release_pid_lock():
-    """Release PID lock file."""
-    lock_file = get_ratelimit_lock_file()
-    try:
-        lock_file.unlink()
-    except (FileNotFoundError, OSError):
-        pass
-
-# ============================================
-# OAuth token retrieval (cross-platform)
-# ============================================
-
-def _parse_keychain_content(content):
-    """Parse keychain content: JSON format or raw token."""
-    if content.startswith('{'):
-        try:
-            parsed = json.loads(content)
-            token = parsed.get('claudeAiOauth', {}).get('accessToken')
-            if token and token.startswith('sk-ant-oat'):
-                return token
-        except json.JSONDecodeError:
-            pass
-    if content.startswith('sk-ant-oat'):
-        return content
-    return None
-
-def _get_oauth_token_macos():
-    """macOS: Extract OAuth token from Keychain, including hash-suffixed service names."""
-    try:
-        result = subprocess.run(
-            ['security', 'dump-keychain'],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, timeout=5
-        )
-        service_names = []
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if 'Claude Code-credentials' in line:
-                    m = re.search(r'"(Claude Code-credentials[^"]*)"', line)
-                    if m:
-                        service_names.append(m.group(1))
-        service_names = sorted(set(service_names), key=len, reverse=True)
-        if not service_names:
-            service_names = ['Claude Code-credentials']
-        for name in service_names:
-            try:
-                result = subprocess.run(
-                    ['security', 'find-generic-password', '-s', name, '-w'],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    token = _parse_keychain_content(result.stdout.strip())
-                    if token:
-                        return token
-            except (subprocess.TimeoutExpired, OSError):
-                continue
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return None
-
-def _get_oauth_token_linux():
-    """Linux: Extract OAuth token from GNOME Keyring via secret-tool."""
-    try:
-        result = subprocess.run(
-            ['secret-tool', 'lookup', 'service', 'Claude Code'],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            token = _parse_keychain_content(result.stdout.strip())
-            if token:
-                return token
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
-
-def _get_oauth_token_from_files():
-    """Credential files fallback (all platforms)."""
-    home = Path.home()
-    paths = [
-        home / '.claude' / '.credentials.json',
-        home / '.claude' / 'credentials.json',
-        home / '.config' / 'claude-code' / 'credentials.json',
-    ]
-    if os.name == 'nt':
-        for env_var in ('APPDATA', 'LOCALAPPDATA'):
-            d = os.environ.get(env_var)
-            if d:
-                paths.append(Path(d) / 'Claude Code' / 'credentials.json')
-    for p in paths:
-        try:
-            if not p.exists():
-                continue
-            with open(p) as f:
-                creds = json.load(f)
-            token = creds.get('claudeAiOauth', {}).get('accessToken')
-            if token and token.startswith('sk-ant-oat'):
-                return token
-            for key in ('oauth_token', 'token', 'accessToken'):
-                token = creds.get(key)
-                if token and isinstance(token, str) and token.startswith('sk-ant-oat'):
-                    return token
-        except (json.JSONDecodeError, IOError, OSError):
-            continue
-    return None
-
-def _get_oauth_token():
-    """Extract OAuth access token (cross-platform).
-    Fallback chain: macOS Keychain -> Linux secret-tool -> credential files.
-    """
-    import platform
-    system = platform.system()
-    token = None
-    if system == 'Darwin':
-        token = _get_oauth_token_macos()
-    elif system == 'Linux':
-        token = _get_oauth_token_linux()
-    if token and token.startswith('sk-ant-oat'):
-        return token
-    token = _get_oauth_token_from_files()
-    if token and token.startswith('sk-ant-oat'):
-        return token
-    return None
-
-# ============================================
-# Background probe for OAuth usage API
-# ============================================
-
-def probe_ratelimit_background():
-    """Launch background probe to fetch usage data from Anthropic OAuth API.
-    Cross-platform: macOS Keychain, Linux secret-tool, credential files fallback.
-    """
-    if not _acquire_pid_lock():
-        return
-
-    try:
-        cache_file = str(get_ratelimit_cache_file())
-        lock_file = str(get_ratelimit_lock_file())
-
-        probe_script = f'''
-import json, sys, subprocess, os, time, tempfile, signal, platform, re
-from pathlib import Path
-
-def handler(signum, frame):
-    sys.exit(1)
-
-if hasattr(signal, 'SIGALRM'):
-    signal.signal(signal.SIGALRM, handler)
-    signal.alarm(15)
-else:
-    import threading
-    threading.Timer(15, lambda: os._exit(1)).start()
-
-def parse_keychain_content(content):
-    if content.startswith('{{'):
-        try:
-            parsed = json.loads(content)
-            t = parsed.get('claudeAiOauth', {{}}).get('accessToken')
-            if t and t.startswith('sk-ant-oat'):
-                return t
-        except json.JSONDecodeError:
-            pass
-    if content.startswith('sk-ant-oat'):
-        return content
-    return None
-
-def get_token_macos():
-    try:
-        r = subprocess.run(['security', 'dump-keychain'],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                           text=True, timeout=5)
-        names = []
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                if 'Claude Code-credentials' in line:
-                    m = re.search(r'"(Claude Code-credentials[^"]*)"', line)
-                    if m:
-                        names.append(m.group(1))
-        names = sorted(set(names), key=len, reverse=True)
-        if not names:
-            names = ['Claude Code-credentials']
-        for name in names:
-            try:
-                r2 = subprocess.run(
-                    ['security', 'find-generic-password', '-s', name, '-w'],
-                    capture_output=True, text=True, timeout=5)
-                if r2.returncode == 0 and r2.stdout.strip():
-                    t = parse_keychain_content(r2.stdout.strip())
-                    if t:
-                        return t
-            except (subprocess.TimeoutExpired, OSError):
-                continue
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return None
-
-def get_token_linux():
-    try:
-        r = subprocess.run(
-            ['secret-tool', 'lookup', 'service', 'Claude Code'],
-            capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            t = parse_keychain_content(r.stdout.strip())
-            if t:
-                return t
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
-
-def get_token_from_files():
-    home = Path.home()
-    paths = [
-        home / '.claude' / '.credentials.json',
-        home / '.claude' / 'credentials.json',
-        home / '.config' / 'claude-code' / 'credentials.json',
-    ]
-    if os.name == 'nt':
-        for ev in ('APPDATA', 'LOCALAPPDATA'):
-            d = os.environ.get(ev)
-            if d:
-                paths.append(Path(d) / 'Claude Code' / 'credentials.json')
-    for p in paths:
-        try:
-            if not p.exists():
-                continue
-            with open(p) as f:
-                creds = json.load(f)
-            t = creds.get('claudeAiOauth', {{}}).get('accessToken')
-            if t and t.startswith('sk-ant-oat'):
-                return t
-            for key in ('oauth_token', 'token', 'accessToken'):
-                t = creds.get(key)
-                if t and isinstance(t, str) and t.startswith('sk-ant-oat'):
-                    return t
-        except (json.JSONDecodeError, IOError, OSError):
-            continue
-    return None
-
-def get_token():
-    system = platform.system()
-    token = None
-    if system == 'Darwin':
-        token = get_token_macos()
-    elif system == 'Linux':
-        token = get_token_linux()
-    if token and token.startswith('sk-ant-oat'):
-        return token
-    token = get_token_from_files()
-    if token and token.startswith('sk-ant-oat'):
-        return token
-    return None
-
-try:
-    token = get_token()
-    if not token:
-        sys.exit(1)
-
-    result = subprocess.run(
-        ['curl', '-s', '--max-time', '10',
-         '-H', f'Authorization: Bearer {{token}}',
-         '-H', 'anthropic-beta: oauth-2025-04-20',
-         'https://api.anthropic.com/api/oauth/usage'],
-        capture_output=True, text=True, timeout=15
-    )
-
-    if result.returncode != 0 or not result.stdout.strip():
-        sys.exit(1)
-
-    usage_data = json.loads(result.stdout.strip())
-
-    # Validate: API error responses must not overwrite cache
-    if usage_data.get('type') == 'error' or 'seven_day' not in usage_data:
-        sys.exit(1)
-
-    cache = {{"timestamp": time.time(), "data": usage_data}}
-    cache_dir = os.path.dirname("{cache_file}")
-    fd, tmp = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(cache, f)
-        os.rename(tmp, "{cache_file}")
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-finally:
-    try:
-        os.unlink("{lock_file}")
-    except (FileNotFoundError, OSError):
-        pass
-'''
-
-        proc = subprocess.Popen(
-            [sys.executable, '-c', probe_script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        _write_pid_lock(proc.pid)
-
-    except Exception:
-        _release_pid_lock()
 
 # ============================================
 # Auto-update mechanism
@@ -4094,54 +3751,8 @@ def do_rollback():
         print("Rollback failed: {}".format(e))
 
 # ============================================
-# Ratelimit data access + display helpers
+# Ratelimit display helpers
 # ============================================
-
-def _adjust_stale_ratelimit(data):
-    """Adjust ratelimit data when five_hour block has expired.
-    If resets_at is in the past, advance it by 5h increments and clear utilization.
-    """
-    if not data:
-        return data
-    five_hour = data.get('five_hour')
-    if not five_hour or not five_hour.get('resets_at'):
-        return data
-    try:
-        resets_at = datetime.fromisoformat(five_hour['resets_at'])
-        now_utc = datetime.now(timezone.utc)
-        if resets_at < now_utc:
-            # Block expired - advance to current block and clear stale utilization
-            while resets_at < now_utc:
-                resets_at += timedelta(hours=5)
-            data = dict(data)  # shallow copy to avoid mutating cache
-            data['five_hour'] = dict(five_hour)
-            data['five_hour']['resets_at'] = resets_at.isoformat()
-            data['five_hour']['utilization'] = None  # unknown for new block
-    except (ValueError, TypeError):
-        pass
-    return data
-
-def get_ratelimit_info():
-    """Get rate limit info, triggering background probe if stale."""
-    cache = load_ratelimit_cache()
-    if cache:
-        data = cache.get('data')
-        # Reject cached API error responses (legacy bad cache)
-        if not data or data.get('type') == 'error' or 'seven_day' not in data:
-            # Delete bad cache so next successful probe can write fresh data
-            try:
-                get_ratelimit_cache_file().unlink(missing_ok=True)
-            except OSError:
-                pass
-            probe_ratelimit_background()
-            return None
-        age = time.time() - cache.get('timestamp', 0)
-        if age < RATELIMIT_CACHE_TTL:
-            return _adjust_stale_ratelimit(data)
-        probe_ratelimit_background()
-        return _adjust_stale_ratelimit(data)
-    probe_ratelimit_background()
-    return None
 
 def _get_utilization_color(pct):
     """Get color based on utilization percentage."""
