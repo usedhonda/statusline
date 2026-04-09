@@ -7,19 +7,21 @@ import sys
 from pathlib import Path
 
 COMMAND = "~/.claude/statusline.py"
-SCHEDULE_IDLE_HOOK_CMD = "echo idle > ~/.claude/.schedule_swap_state"
 
 
-def _add_schedule_stop_hook(settings):
-    """Add Stop hook for schedule idle guard (skip if already present)."""
+def _add_schedule_hooks(settings):
+    """Add Stop + UserPromptSubmit hooks for schedule idle guard."""
     hooks = settings.setdefault('hooks', {})
+
+    idle_cmd = "echo idle > ~/.claude/.schedule_swap_state"
     stop_hooks = hooks.setdefault('Stop', [])
-    # Check if already installed
-    for entry in stop_hooks:
-        for h in entry.get('hooks', []):
-            if SCHEDULE_IDLE_HOOK_CMD in h.get('command', ''):
-                return
-    stop_hooks.append({"hooks": [{"type": "command", "command": SCHEDULE_IDLE_HOOK_CMD}]})
+    if not any(idle_cmd in h.get('command', '') for entry in stop_hooks for h in entry.get('hooks', [])):
+        stop_hooks.append({"hooks": [{"type": "command", "command": idle_cmd}]})
+
+    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
+    ups_hooks = hooks.setdefault('UserPromptSubmit', [])
+    if not any(active_cmd in h.get('command', '') for entry in ups_hooks for h in entry.get('hooks', [])):
+        ups_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
 
 
 def main():
@@ -68,7 +70,7 @@ def main():
         settings['statusLine'] = statusline_config
 
     # Add Stop hook for schedule idle guard
-    _add_schedule_stop_hook(settings)
+    _add_schedule_hooks(settings)
 
     with open(settings_path, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)

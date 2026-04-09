@@ -20,7 +20,7 @@ SHOW_LINE4    = True   # Weekly: [64%] 32m, Extra: 7% $3.59/$50
 SHOW_SCHEDULE = True   # 📅 14:00 Meeting (in 30m) - swaps with Line1
 
 # Schedule settings (requires `gog` command)
-SCHEDULE_SWAP_INTERVAL = 5    # Swap interval (seconds) — match refreshInterval
+SCHEDULE_SWAP_INTERVAL = 2    # Swap interval (seconds)
 SCHEDULE_CACHE_TTL     = 300  # Cache time (seconds)
 
 # ============================================
@@ -2106,33 +2106,16 @@ def format_output_full(ctx, terminal_width=None):
 
     if ctx['show_line1']:
         # Check if we should show schedule line (swap with Line1)
-        # Stop hook writes "idle" to state file → calendar suppressed until next active call
         show_schedule_now = False
         schedule_line = None
         if ctx.get('show_schedule'):
-            state_file = Path.home() / '.claude' / '.schedule_swap_state'
-            is_idle = False
-            try:
-                if state_file.exists():
-                    with open(state_file, 'r') as f:
-                        is_idle = f.read().strip() == 'idle'
-            except IOError:
-                pass
-            # Clear idle flag on each call (we're active now)
-            try:
-                with open(state_file, 'w') as f:
-                    f.write('active')
-            except IOError:
-                pass
-
-            if not is_idle:
-                is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
-                if is_schedule_turn:
-                    event = get_next_event()
-                    if event:
-                        schedule_line = format_schedule_line(event, terminal_width)
-                        if schedule_line:
-                            show_schedule_now = True
+            is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
+            if is_schedule_turn:
+                event = get_next_event()
+                if event:
+                    schedule_line = format_schedule_line(event, terminal_width)
+                    if schedule_line:
+                        show_schedule_now = True
 
         if show_schedule_now and schedule_line:
             lines.append(schedule_line)
@@ -2510,16 +2493,21 @@ def format_output_minimal(ctx, terminal_width):
     return [line]
 
 
-def _add_schedule_stop_hook(settings):
-    """Add Stop hook for schedule idle guard (skip if already present)."""
-    hook_cmd = "echo idle > ~/.claude/.schedule_swap_state"
+def _add_schedule_hooks(settings):
+    """Add Stop + UserPromptSubmit hooks for schedule idle guard."""
     hooks = settings.setdefault('hooks', {})
+
+    # Stop hook: mark idle (suppress calendar)
+    idle_cmd = "echo idle > ~/.claude/.schedule_swap_state"
     stop_hooks = hooks.setdefault('Stop', [])
-    for entry in stop_hooks:
-        for h in entry.get('hooks', []):
-            if hook_cmd in h.get('command', ''):
-                return
-    stop_hooks.append({"hooks": [{"type": "command", "command": hook_cmd}]})
+    if not any(idle_cmd in h.get('command', '') for entry in stop_hooks for h in entry.get('hooks', [])):
+        stop_hooks.append({"hooks": [{"type": "command", "command": idle_cmd}]})
+
+    # UserPromptSubmit hook: mark active (allow calendar)
+    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
+    ups_hooks = hooks.setdefault('UserPromptSubmit', [])
+    if not any(active_cmd in h.get('command', '') for entry in ups_hooks for h in entry.get('hooks', [])):
+        ups_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
 
 
 def do_setup():
@@ -2548,7 +2536,7 @@ def do_setup():
         settings['statusLine'] = statusline_config
 
     # Add Stop hook for schedule idle guard
-    _add_schedule_stop_hook(settings)
+    _add_schedule_hooks(settings)
 
     with open(settings_path, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
@@ -2997,6 +2985,16 @@ def main():
             block_tokens = block_stats.get('total_tokens', 0)
 
         # Build context dictionary for formatters
+        # Schedule idle guard: suppress calendar when assistant has stopped
+        show_schedule = SHOW_SCHEDULE or args.schedule
+        if show_schedule:
+            try:
+                sf = Path.home() / '.claude' / '.schedule_swap_state'
+                if sf.exists() and sf.read_text().strip() == 'idle':
+                    show_schedule = False
+            except (IOError, OSError):
+                pass
+
         ctx = {
             'model': model,
             'git_branch': git_branch,
@@ -3032,7 +3030,7 @@ def main():
             'show_line2': SHOW_LINE2,
             'show_line3': SHOW_LINE3,
             'show_line4': SHOW_LINE4,
-            'show_schedule': SHOW_SCHEDULE or args.schedule,
+            'show_schedule': show_schedule,
             'exceeds_200k': api_exceeds_200k,
             'context_size': api_context_size,
             'percentage_of_full_context': percentage_of_full_context,
