@@ -7,6 +7,20 @@ import sys
 from pathlib import Path
 
 COMMAND = "~/.claude/statusline.py"
+SCHEDULE_IDLE_HOOK_CMD = "echo idle > ~/.claude/.schedule_swap_state"
+
+
+def _add_schedule_stop_hook(settings):
+    """Add Stop hook for schedule idle guard (skip if already present)."""
+    hooks = settings.setdefault('hooks', {})
+    stop_hooks = hooks.setdefault('Stop', [])
+    # Check if already installed
+    for entry in stop_hooks:
+        for h in entry.get('hooks', []):
+            if SCHEDULE_IDLE_HOOK_CMD in h.get('command', ''):
+                return
+    stop_hooks.append({"hooks": [{"type": "command", "command": SCHEDULE_IDLE_HOOK_CMD}]})
+
 
 def main():
     if shutil.which("ccsl"):
@@ -33,7 +47,7 @@ def main():
 
     # Configure settings.json
     settings_path = claude_dir / "settings.json"
-    statusline_config = {"type": "command", "command": COMMAND, "padding": 0}
+    statusline_config = {"type": "command", "command": COMMAND, "padding": 0, "refreshInterval": 5000}
 
     settings = {}
     if settings_path.exists():
@@ -45,7 +59,17 @@ def main():
             shutil.copy2(settings_path, settings_path.with_suffix('.json.backup'))
             settings = {}
 
-    settings['statusLine'] = statusline_config
+    # Merge statusLine (preserve user customizations)
+    existing_sl = settings.get('statusLine', {})
+    if isinstance(existing_sl, dict):
+        existing_sl.update(statusline_config)
+        settings['statusLine'] = existing_sl
+    else:
+        settings['statusLine'] = statusline_config
+
+    # Add Stop hook for schedule idle guard
+    _add_schedule_stop_hook(settings)
+
     with open(settings_path, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
     print(f"Settings updated: {settings_path}")

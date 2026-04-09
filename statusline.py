@@ -20,7 +20,7 @@ SHOW_LINE4    = True   # Weekly: [64%] 32m, Extra: 7% $3.59/$50
 SHOW_SCHEDULE = True   # 📅 14:00 Meeting (in 30m) - swaps with Line1
 
 # Schedule settings (requires `gog` command)
-SCHEDULE_SWAP_INTERVAL = 1    # Swap interval (seconds)
+SCHEDULE_SWAP_INTERVAL = 5    # Swap interval (seconds) — match refreshInterval
 SCHEDULE_CACHE_TTL     = 300  # Cache time (seconds)
 
 # ============================================
@@ -1605,7 +1605,7 @@ def fetch_from_gog():
     try:
         # Fetch multiple events to skip all-day ones
         result = subprocess.run(
-            ['gog', 'calendar', 'events', '--days=1', '--max=10', '--json'],
+            ['gog', 'calendar', 'events', '--days=2', '--max=10', '--json'],
             capture_output=True, text=True, timeout=10
         )
 
@@ -1618,14 +1618,22 @@ def fetch_from_gog():
         if not events:
             return None
 
-        # Find first timed event (skip all-day events)
+        # Find first timed event that hasn't ended (skip all-day events)
+        now = datetime.now().astimezone()
         for event in events:
             start = event.get('start', {})
             # All-day events have 'date' instead of 'dateTime'
-            if 'dateTime' in start:
-                return event
+            if 'dateTime' not in start:
+                continue
+            # Skip events that have already ended
+            end = event.get('end', {})
+            if 'dateTime' in end:
+                end_dt = datetime.fromisoformat(end['dateTime']).astimezone()
+                if now > end_dt:
+                    continue
+            return event
 
-        # No timed events found
+        # No upcoming timed events found
         return None
 
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
@@ -2097,18 +2105,34 @@ def format_output_full(ctx, terminal_width=None):
     graph_width = min(20, max(8, terminal_width - 43))
 
     if ctx['show_line1']:
-        # Check if we should show schedule line (swap every SCHEDULE_SWAP_INTERVAL seconds)
+        # Check if we should show schedule line (swap with Line1)
+        # Stop hook writes "idle" to state file → calendar suppressed until next active call
         show_schedule_now = False
         schedule_line = None
         if ctx.get('show_schedule'):
-            # Time-based swap: 0-4s = normal, 5-9s = schedule
-            is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
-            if is_schedule_turn:
-                event = get_next_event()
-                if event:
-                    schedule_line = format_schedule_line(event, terminal_width)
-                    if schedule_line:
-                        show_schedule_now = True
+            state_file = Path.home() / '.claude' / '.schedule_swap_state'
+            is_idle = False
+            try:
+                if state_file.exists():
+                    with open(state_file, 'r') as f:
+                        is_idle = f.read().strip() == 'idle'
+            except IOError:
+                pass
+            # Clear idle flag on each call (we're active now)
+            try:
+                with open(state_file, 'w') as f:
+                    f.write('active')
+            except IOError:
+                pass
+
+            if not is_idle:
+                is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
+                if is_schedule_turn:
+                    event = get_next_event()
+                    if event:
+                        schedule_line = format_schedule_line(event, terminal_width)
+                        if schedule_line:
+                            show_schedule_now = True
 
         if show_schedule_now and schedule_line:
             lines.append(schedule_line)
@@ -2486,13 +2510,25 @@ def format_output_minimal(ctx, terminal_width):
     return [line]
 
 
+def _add_schedule_stop_hook(settings):
+    """Add Stop hook for schedule idle guard (skip if already present)."""
+    hook_cmd = "echo idle > ~/.claude/.schedule_swap_state"
+    hooks = settings.setdefault('hooks', {})
+    stop_hooks = hooks.setdefault('Stop', [])
+    for entry in stop_hooks:
+        for h in entry.get('hooks', []):
+            if hook_cmd in h.get('command', ''):
+                return
+    stop_hooks.append({"hooks": [{"type": "command", "command": hook_cmd}]})
+
+
 def do_setup():
     """Configure Claude Code settings.json to use PATH-based ccsl command."""
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(exist_ok=True)
     settings_path = claude_dir / "settings.json"
 
-    statusline_config = {"type": "command", "command": "ccsl", "padding": 0}
+    statusline_config = {"type": "command", "command": "ccsl", "padding": 0, "refreshInterval": 5000}
 
     settings = {}
     if settings_path.exists():
@@ -2503,7 +2539,17 @@ def do_setup():
             shutil.copy2(settings_path, settings_path.with_suffix('.json.backup'))
             settings = {}
 
-    settings['statusLine'] = statusline_config
+    # Merge statusLine (preserve user customizations)
+    existing_sl = settings.get('statusLine', {})
+    if isinstance(existing_sl, dict):
+        existing_sl.update(statusline_config)
+        settings['statusLine'] = existing_sl
+    else:
+        settings['statusLine'] = statusline_config
+
+    # Add Stop hook for schedule idle guard
+    _add_schedule_stop_hook(settings)
+
     with open(settings_path, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
 
@@ -2693,6 +2739,7 @@ def main():
         cache_creation = 0
         cache_read = 0
         
+
         # Build ratelimit_data from stdin rate_limits (CC v2.1.80+)
         ratelimit_data = None
         api_block_start_utc = None
