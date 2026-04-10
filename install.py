@@ -10,18 +10,22 @@ COMMAND = "~/.claude/statusline.py"
 
 
 def _add_schedule_hooks(settings):
-    """Add Stop + UserPromptSubmit hooks for schedule idle guard."""
+    """Add Stop + UserPromptSubmit + SessionStart hooks for schedule idle guard."""
     hooks = settings.setdefault('hooks', {})
+    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
 
     idle_cmd = "echo idle > ~/.claude/.schedule_swap_state"
     stop_hooks = hooks.setdefault('Stop', [])
     if not any(idle_cmd in h.get('command', '') for entry in stop_hooks for h in entry.get('hooks', [])):
         stop_hooks.append({"hooks": [{"type": "command", "command": idle_cmd}]})
 
-    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
     ups_hooks = hooks.setdefault('UserPromptSubmit', [])
     if not any(active_cmd in h.get('command', '') for entry in ups_hooks for h in entry.get('hooks', [])):
         ups_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
+
+    ss_hooks = hooks.setdefault('SessionStart', [])
+    if not any(active_cmd in h.get('command', '') for entry in ss_hooks for h in entry.get('hooks', [])):
+        ss_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
 
 
 def main():

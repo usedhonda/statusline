@@ -17,11 +17,11 @@ SHOW_LINE1    = True   # [Sonnet 4] | 🌿 main M2 | 📁 project | 💬 254
 SHOW_LINE2    = True   # Context: 91.8K/200.0K ████████▒▒▒ 58%
 SHOW_LINE3    = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒ 25%
 SHOW_LINE4    = True   # Weekly: [64%] 32m, Extra: 7% $3.59/$50
-SHOW_SCHEDULE = True   # 📅 14:00 Meeting (in 30m) - swaps with Line1
+SHOW_SCHEDULE = False  # 📅 Calendar swap (requires `gog`). Change to True to enable. Hooks auto-installed.
 
 # Schedule settings (requires `gog` command)
 SCHEDULE_SWAP_INTERVAL = 2    # Swap interval (seconds)
-SCHEDULE_CACHE_TTL     = 300  # Cache time (seconds)
+SCHEDULE_CACHE_TTL     = 60   # Cache time (seconds)
 
 # ============================================
 # Internal (don't edit below)
@@ -2252,30 +2252,40 @@ def format_output_compact(ctx):
     """
     lines = []
 
-    # Line 1: Shortened model/git/dir
+    # Line 1: Shortened model/git/dir (or schedule swap)
     if ctx['show_line1']:
-        line1_parts = []
-        # Compact mode: use tight model name for space efficiency
-        short_model = shorten_model_name(ctx['model'], tight=True)
-        ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+        schedule_shown = False
+        if ctx.get('show_schedule'):
+            is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
+            if is_schedule_turn:
+                event = get_next_event()
+                if event:
+                    schedule_line = format_schedule_line(event, get_terminal_width())
+                    if schedule_line:
+                        lines.append(schedule_line)
+                        schedule_shown = True
 
-        line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
+        if not schedule_shown:
+            line1_parts = []
+            short_model = shorten_model_name(ctx['model'], tight=True)
+            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
-        if ctx['git_branch']:
-            branch = ctx['git_branch']
-            # Compact mode: truncate long branch names
-            if len(branch) > 10:
-                branch = truncate_text(branch, 10)
-            git_display = f"{Colors.BRIGHT_GREEN}{branch}"
-            if ctx['modified_files'] > 0:
-                git_display += f" M{ctx['modified_files']}"
-            if ctx['untracked_files'] > 0:
-                git_display += f"+{ctx['untracked_files']}"
-            git_display += Colors.RESET
-            line1_parts.append(git_display)
+            line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
 
-        lines.append(" ".join(line1_parts))
+            if ctx['git_branch']:
+                branch = ctx['git_branch']
+                if len(branch) > 10:
+                    branch = truncate_text(branch, 10)
+                git_display = f"{Colors.BRIGHT_GREEN}{branch}"
+                if ctx['modified_files'] > 0:
+                    git_display += f" M{ctx['modified_files']}"
+                if ctx['untracked_files'] > 0:
+                    git_display += f"+{ctx['untracked_files']}"
+                git_display += Colors.RESET
+                line1_parts.append(git_display)
+
+            lines.append(" ".join(line1_parts))
 
     # Line 2: Compact tokens (shortened)
     if ctx['show_line2']:
@@ -2366,25 +2376,36 @@ def format_output_tight(ctx):
     """
     lines = []
 
-    # Line 1: Model, branch (ultra short)
+    # Line 1: Model, branch (ultra short) or schedule swap
     if ctx['show_line1']:
-        line1_parts = []
-        short_model = shorten_model_name(ctx['model'], tight=True)
-        ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-        line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+        schedule_shown = False
+        if ctx.get('show_schedule'):
+            is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
+            if is_schedule_turn:
+                event = get_next_event()
+                if event:
+                    schedule_line = format_schedule_line(event, get_terminal_width())
+                    if schedule_line:
+                        lines.append(schedule_line)
+                        schedule_shown = True
 
-        if ctx['git_branch']:
-            branch = ctx['git_branch']
-            # Tight mode: truncate long branch names more aggressively
-            if len(branch) > 10:
-                branch = truncate_text(branch, 10)
-            git_display = f"{Colors.BRIGHT_GREEN}{branch}"
-            if ctx['modified_files'] > 0 or ctx['untracked_files'] > 0:
-                git_display += f" M{ctx['modified_files']}+{ctx['untracked_files']}"
-            git_display += Colors.RESET
-            line1_parts.append(git_display)
+        if not schedule_shown:
+            line1_parts = []
+            short_model = shorten_model_name(ctx['model'], tight=True)
+            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
-        lines.append(" ".join(line1_parts))
+            if ctx['git_branch']:
+                branch = ctx['git_branch']
+                if len(branch) > 10:
+                    branch = truncate_text(branch, 10)
+                git_display = f"{Colors.BRIGHT_GREEN}{branch}"
+                if ctx['modified_files'] > 0 or ctx['untracked_files'] > 0:
+                    git_display += f" M{ctx['modified_files']}+{ctx['untracked_files']}"
+                git_display += Colors.RESET
+                line1_parts.append(git_display)
+
+            lines.append(" ".join(line1_parts))
 
     # Line 2: Compact tokens (ultra short)
     if ctx['show_line2']:
@@ -2467,6 +2488,16 @@ def format_output_minimal(ctx, terminal_width):
     Example:
     Cpt58% 91K/160K ♻99%
     """
+    # Schedule swap: show calendar instead of normal minimal line
+    if ctx.get('show_schedule'):
+        is_schedule_turn = (int(time.time()) // SCHEDULE_SWAP_INTERVAL) % 2 == 1
+        if is_schedule_turn:
+            event = get_next_event()
+            if event:
+                schedule_line = format_schedule_line(event, terminal_width)
+                if schedule_line:
+                    return [schedule_line]
+
     percentage = ctx['percentage']
     compact_display = format_token_count_short(ctx['compact_tokens'])
     denom = ctx['context_size']
@@ -2494,8 +2525,9 @@ def format_output_minimal(ctx, terminal_width):
 
 
 def _add_schedule_hooks(settings):
-    """Add Stop + UserPromptSubmit hooks for schedule idle guard."""
+    """Add Stop + UserPromptSubmit + SessionStart hooks for schedule idle guard."""
     hooks = settings.setdefault('hooks', {})
+    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
 
     # Stop hook: mark idle (suppress calendar)
     idle_cmd = "echo idle > ~/.claude/.schedule_swap_state"
@@ -2504,10 +2536,14 @@ def _add_schedule_hooks(settings):
         stop_hooks.append({"hooks": [{"type": "command", "command": idle_cmd}]})
 
     # UserPromptSubmit hook: mark active (allow calendar)
-    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
     ups_hooks = hooks.setdefault('UserPromptSubmit', [])
     if not any(active_cmd in h.get('command', '') for entry in ups_hooks for h in entry.get('hooks', [])):
         ups_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
+
+    # SessionStart hook: mark active (clear idle from previous session)
+    ss_hooks = hooks.setdefault('SessionStart', [])
+    if not any(active_cmd in h.get('command', '') for entry in ss_hooks for h in entry.get('hooks', [])):
+        ss_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
 
 
 def do_setup():
