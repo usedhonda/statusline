@@ -1,3 +1,7 @@
+# >>> project-bootstrap managed >>>
+.cc-status-bar.voice.json
+# <<< project-bootstrap managed <<<
+
 
 CLAUDE.md
 .claude/
