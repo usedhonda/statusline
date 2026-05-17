@@ -1,6 +1,6 @@
 # ccsl
 
-[![CI](https://github.com/usedhonda/statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/usedhonda/statusline/actions/workflows/ci.yml)
+[![CI](https://github.com/yzhonda/statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/yzhonda/statusline/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ccsl)](https://pypi.org/project/ccsl/)
 
 Enhanced status line for Claude Code showing context usage, session time, and weekly budget.
@@ -17,7 +17,7 @@ Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3
 ## Install
 
 ```bash
-brew install usedhonda/tap/ccsl
+brew install yzhonda/tap/ccsl
 ccsl --setup
 ```
 
@@ -36,7 +36,7 @@ ccsl --setup
 **From source**
 
 ```bash
-git clone https://github.com/usedhonda/statusline.git
+git clone https://github.com/yzhonda/statusline.git
 cd statusline
 python3 install.py
 ```

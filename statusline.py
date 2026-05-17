@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -57,7 +57,7 @@ TRANSCRIPT_STATS_CACHE_FILE = None
 AUTO_UPDATE_CHECK_TTL = 14400  # 4 hours
 AUTO_UPDATE_CACHE_FILE = None
 AUTO_UPDATE_LOCK_FILE = None
-AUTO_UPDATE_URL = "https://raw.githubusercontent.com/usedhonda/statusline/main/statusline.py"
+AUTO_UPDATE_URL = "https://raw.githubusercontent.com/yzhonda/statusline/main/statusline.py"
 
 # Token compaction threshold - FALLBACK VALUE ONLY
 # Dynamic value is now calculated from API: context_window_size * 0.8
