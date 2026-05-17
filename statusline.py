@@ -2803,6 +2803,18 @@ def main():
 
         _diagnose_stdin(data)
 
+        # Optional stdin dump for debugging.
+        # Opt-in via env var STATUSLINE_DUMP_STDIN=<path>, OR by touching ~/.claude/.statusline-dump-stdin
+        # (flag file path is used as dump destination when env not set).
+        _dump_flag = Path.home() / '.claude' / '.statusline-dump-stdin'
+        _dump_dest = os.environ.get('STATUSLINE_DUMP_STDIN') or (str(_dump_flag) + '.log' if _dump_flag.exists() else None)
+        if _dump_dest:
+            try:
+                with open(Path(_dump_dest).expanduser(), 'a') as _f:
+                    _f.write(f"\n--- {datetime.now().isoformat()} ---\n{input_data.rstrip()}\n")
+            except Exception:
+                pass
+
         # ========================================
         # API DATA EXTRACTION (Claude Code stdin)
         # ========================================
@@ -2961,19 +2973,21 @@ def main():
                     (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
-        # Calculate percentage for Compact display (dynamic threshold)
-        # Prefer API-provided percentage (v2.1.6+) for accuracy, fallback to manual calculation
-        compact_tokens = total_tokens
+        # Calculate percentage for Compact display.
+        # In CC 2.1.6+ the API exposes:
+        #   context_window.total_input_tokens  = next-turn context fill (includes cache_read)
+        #   context_window.used_percentage     = total_input_tokens / context_window_size
+        # These two are consistent with each other. The transcript-derived `total_tokens`
+        # is a *cumulative* session metric and does NOT match used_percentage — mixing them
+        # produces nonsense like "[0%] 377K/1.0M" right after auto-compaction.
         if api_used_percentage is not None:
-            # Use Claude Code's pre-calculated percentage (more accurate)
-            # This is relative to full context_window_size (200K or 1M)
+            # Align compact_tokens with used_percentage (both = next-turn context fill).
+            compact_tokens = api_input_tokens + api_output_tokens
             percentage = min(100, round(api_used_percentage))
             percentage_of_full_context = True
         else:
-            # Fallback: manual calculation for older Claude Code versions
-            # NOTE: API tokens (total_input/output_tokens) are CUMULATIVE session totals,
-            # NOT current context window usage. Must use transcript-calculated tokens.
-            # Use api_context_size (200K) as denominator to match api_used_percentage path
+            # Fallback for pre-2.1.6 Claude Code: derive % from transcript cumulative tokens.
+            compact_tokens = total_tokens
             percentage = min(100, round((compact_tokens / api_context_size) * 100))
             percentage_of_full_context = False
         
