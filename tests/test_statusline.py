@@ -340,6 +340,224 @@ class TestCalculateCost:
         # Should detect "sonnet" in model_id
         assert abs(cost - 3.0) < 0.001
 
+    # --- Versioned pricing (Anthropic 2026 pricing snapshot) ---
+
+    def test_opus_4_7_pricing(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Opus 4.7", model_id="claude-opus-4-7",
+        )
+        # Opus 4.7: $5 input + 0.1M * $25 = $5 + $2.5
+        assert abs(cost - 7.5) < 0.001
+
+    def test_opus_4_6_pricing_same_as_4_7(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=0,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Opus 4.6", model_id="claude-opus-4-6",
+        )
+        assert abs(cost - 5.0) < 0.001
+
+    def test_opus_4_5_pricing_same_as_4_7(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=0,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Opus 4.5", model_id="claude-opus-4-5",
+        )
+        assert abs(cost - 5.0) < 0.001
+
+    def test_opus_4_1_keeps_legacy_pricing(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Opus 4.1", model_id="claude-opus-4-1",
+        )
+        # Opus 4.1: $15 + 0.1M * $75 = $22.5
+        assert abs(cost - 22.5) < 0.001
+
+    def test_sonnet_4_6_pricing(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Sonnet 4.6", model_id="claude-sonnet-4-6",
+        )
+        # Sonnet 4.6: $3 + 0.1M * $15 = $4.5
+        assert abs(cost - 4.5) < 0.001
+
+    def test_haiku_4_5_pricing(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Haiku 4.5", model_id="claude-haiku-4-5",
+        )
+        # Haiku 4.5: $1 + 0.1M * $5 = $1.5
+        assert abs(cost - 1.5) < 0.001
+
+    def test_haiku_3_5_legacy_pricing(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Haiku 3.5", model_id="claude-haiku-3-5",
+        )
+        # Haiku 3.5: $0.80 + 0.1M * $4 = $1.20
+        assert abs(cost - 1.20) < 0.001
+
+    def test_unknown_model_falls_back_to_opus_47_tier(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=0,
+            cache_creation=0, cache_read=0,
+            model_name="Made-Up Model", model_id="claude-future-99",
+        )
+        # Default to current flagship Opus pricing ($5 input).
+        assert abs(cost - 5.0) < 0.001
+
+    def test_split_1h_5m_cache_pricing(self):
+        # Opus 4.7: input $5; 5m write = $6.25, 1h write = $10, read = $0.50.
+        cost = statusline.calculate_cost(
+            input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
+            model_name="Claude Opus 4.7", model_id="claude-opus-4-7",
+            cache_creation_5m=1_000_000, cache_creation_1h=1_000_000,
+        )
+        # 1M * $6.25 + 1M * $10 = $16.25
+        assert abs(cost - 16.25) < 0.001
+
+    def test_legacy_cache_path_treated_as_5m(self):
+        # Old callers pass `cache_creation` only — must be billed as 5m write.
+        cost = statusline.calculate_cost(
+            input_tokens=0, output_tokens=0,
+            cache_creation=1_000_000, cache_read=0,
+            model_name="Claude Opus 4.7", model_id="claude-opus-4-7",
+        )
+        # 1M * $6.25 = $6.25
+        assert abs(cost - 6.25) < 0.001
+
+
+class TestFixtureParsing:
+    """Smoke test against the bundled Claude Code 2.1.x transcript fixture."""
+
+    FIXTURE_PATH = Path(__file__).parent / 'fixtures' / 'transcript_cc_2_1_x.jsonl'
+
+    def test_fixture_parses_cleanly(self):
+        with open(self.FIXTURE_PATH, encoding='utf-8') as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        # Must contain the new entry kinds Claude Code 2.1.x emits.
+        types = {e.get('type') for e in entries}
+        assert {'last-prompt', 'permission-mode', 'file-history-snapshot',
+                'ai-title', 'user', 'assistant'} <= types
+
+    def test_fixture_assistant_usage_extracts_correctly(self):
+        with open(self.FIXTURE_PATH, encoding='utf-8') as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        assistants = [e for e in entries if e.get('type') == 'assistant']
+        assert len(assistants) == 2
+
+        # First assistant: 1h-only cache (1024 of 1h, 0 of 5m).
+        u1 = assistants[0]['message']['usage']
+        total1, c5_1, c1_1, cr1 = statusline.extract_cache_breakdown(u1)
+        assert (total1, c5_1, c1_1, cr1) == (1024, 0, 1024, 2048)
+
+        # Second assistant: 5m-only cache (512 of 5m, 0 of 1h).
+        u2 = assistants[1]['message']['usage']
+        total2, c5_2, c1_2, cr2 = statusline.extract_cache_breakdown(u2)
+        assert (total2, c5_2, c1_2, cr2) == (512, 512, 0, 4096)
+
+    def test_fixture_total_cost_with_split_pricing(self):
+        with open(self.FIXTURE_PATH, encoding='utf-8') as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        assistants = [e for e in entries if e.get('type') == 'assistant']
+        model_id = assistants[0]['message']['model']  # claude-opus-4-7
+
+        total = 0.0
+        for a in assistants:
+            u = a['message']['usage']
+            _, c5, c1, cr = statusline.extract_cache_breakdown(u)
+            total += statusline.calculate_cost(
+                input_tokens=u.get('input_tokens', 0),
+                output_tokens=u.get('output_tokens', 0),
+                cache_creation=0,
+                cache_read=cr,
+                model_name='', model_id=model_id,
+                cache_creation_5m=c5, cache_creation_1h=c1,
+            )
+        # Opus 4.7: input $5, output $25, 5m $6.25, 1h $10, read $0.50 (per MTok).
+        # Msg1: 12*5 + 48*25 + 0*6.25 + 1024*10 + 2048*0.5  = 60 + 1200 + 0 + 10240 + 1024  = 12524
+        # Msg2:  6*5 + 24*25 + 512*6.25 + 0*10 + 4096*0.5    = 30 + 600 + 3200 + 0 + 2048   = 5878
+        # Sum (in micro-USD)                                                              = 18402
+        expected = 18_402 / 1_000_000
+        assert abs(total - expected) < 1e-6, f'got {total} expected {expected}'
+
+
+class TestExtractCacheBreakdown:
+    """5m vs 1h cache token split for usage dicts."""
+
+    def test_modern_usage_with_dict_breakdown(self):
+        usage = {
+            'cache_creation': {
+                'ephemeral_5m_input_tokens': 100,
+                'ephemeral_1h_input_tokens': 900,
+            },
+            'cache_creation_input_tokens': 1000,
+            'cache_read_input_tokens': 250,
+        }
+        total, c5, c1, cr = statusline.extract_cache_breakdown(usage)
+        assert (total, c5, c1, cr) == (1000, 100, 900, 250)
+
+    def test_legacy_usage_flat_sum_treated_as_5m(self):
+        usage = {
+            'cache_creation_input_tokens': 500,
+            'cache_read_input_tokens': 0,
+        }
+        total, c5, c1, cr = statusline.extract_cache_breakdown(usage)
+        assert (total, c5, c1, cr) == (500, 500, 0, 0)
+
+    def test_missing_usage_returns_zeros(self):
+        assert statusline.extract_cache_breakdown({}) == (0, 0, 0, 0)
+        assert statusline.extract_cache_breakdown(None) == (0, 0, 0, 0)
+
+    def test_dict_with_null_values_safe(self):
+        usage = {
+            'cache_creation': {
+                'ephemeral_5m_input_tokens': None,
+                'ephemeral_1h_input_tokens': None,
+            },
+            'cache_read_input_tokens': None,
+        }
+        assert statusline.extract_cache_breakdown(usage) == (0, 0, 0, 0)
+
+
+class TestShouldShow1MBadge:
+    """1M context badge visibility — suppressed for models with native 1M default."""
+
+    def test_under_200k_always_hides_badge(self):
+        assert statusline.should_show_1m_badge("Claude Opus 4.7", 200_000) is False
+        assert statusline.should_show_1m_badge("Claude Sonnet 4", 100_000) is False
+
+    def test_opus_4_7_hides_badge(self):
+        assert statusline.should_show_1m_badge("Claude Opus 4.7", 1_000_000) is False
+
+    def test_opus_4_6_hides_badge(self):
+        assert statusline.should_show_1m_badge("Claude Opus 4.6", 1_000_000) is False
+
+    def test_opus_4_5_hides_badge(self):
+        assert statusline.should_show_1m_badge("Claude Opus 4.5", 1_000_000) is False
+
+    def test_sonnet_4_6_hides_badge(self):
+        # Sonnet 4.6 also ships with native 1M.
+        assert statusline.should_show_1m_badge("Claude Sonnet 4.6", 1_000_000) is False
+
+    def test_opus_4_1_shows_badge(self):
+        # Legacy Opus uses 200K by default; 1M is opt-in → show badge.
+        assert statusline.should_show_1m_badge("Claude Opus 4.1", 1_000_000) is True
+
+    def test_unknown_model_shows_badge_when_1m(self):
+        assert statusline.should_show_1m_badge("Mystery Model", 1_000_000) is True
+
+    def test_empty_model_name_safe(self):
+        # Should not crash on None / empty model name.
+        assert statusline.should_show_1m_badge("", 1_000_000) is True
+        assert statusline.should_show_1m_badge(None, 200_000) is False
+
 
 # ============================================
 # Smoke Tests — subprocess end-to-end
@@ -464,6 +682,65 @@ class TestSmoke:
         # Denominator must be 200K (context_window_size), not 160K (compaction_threshold)
         assert '/200' in plain, f"Expected /200K denominator but got: {plain!r}"
         assert '/160' not in plain, f"Got /160K denominator leak in: {plain!r}"
+
+    # --- stdin robustness (T4): schema drift must not crash main() ---
+
+    def test_missing_context_window_block(self):
+        """If Claude Code drops `context_window`, statusline must still produce output."""
+        data = json.dumps({
+            "session_id": "test-no-context-window",
+            "model": {"id": "claude-opus-4-7", "display_name": "Claude Opus 4.7"},
+            "workspace": {"current_dir": "/tmp"},
+            "cost": {"total_cost_usd": 0.0},
+        })
+        result = self._run(data)
+        self._assert_output(result)
+
+    def test_missing_rate_limits_block(self):
+        """rate_limits absent → no sparkline data, but no crash."""
+        data = json.dumps({
+            "session_id": "test-no-rate-limits",
+            "model": {"id": "claude-opus-4-7", "display_name": "Claude Opus 4.7"},
+            "context_window": {"context_window_size": 1000000, "used_percentage": 12},
+            "workspace": {"current_dir": "/tmp"},
+        })
+        result = self._run(data)
+        self._assert_output(result)
+
+    def test_model_id_only_no_display_name(self):
+        """`model.display_name` missing — fallback should still produce output."""
+        data = json.dumps({
+            "session_id": "test-id-only",
+            "model": {"id": "claude-opus-4-7"},
+            "context_window": {"context_window_size": 1000000, "used_percentage": 5},
+        })
+        result = self._run(data)
+        self._assert_output(result)
+
+    def test_schema_drift_emits_stderr_only_when_debug(self):
+        """STATUSLINE_DEBUG=1 surfaces drift; default mode is silent."""
+        # Force a drift (camelCase + missing rate_limits) to trip the diagnostic.
+        bad = json.dumps({
+            "sessionId": "test-camel",  # camelCase only
+            "model": {"id": "claude-opus-4-7"},
+            "contextWindow": {"context_window_size": 200000},  # wrong casing
+        })
+        # Silent by default.
+        silent = subprocess.run(
+            [sys.executable, STATUSLINE_PATH],
+            input=bad, capture_output=True, text=True, timeout=10,
+            env={**os.environ, 'STATUSLINE_DEBUG': '0'},
+        )
+        assert 'stdin schema drift' not in silent.stderr
+
+        # Loud when STATUSLINE_DEBUG=1.
+        loud = subprocess.run(
+            [sys.executable, STATUSLINE_PATH],
+            input=bad, capture_output=True, text=True, timeout=10,
+            env={**os.environ, 'STATUSLINE_DEBUG': '1'},
+        )
+        assert loud.returncode == 0  # crash-free regardless
+        assert 'stdin schema drift' in loud.stderr
 
 
 # ============================================

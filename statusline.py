@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.7"
+__version__ = "1.0.11"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -362,6 +362,85 @@ def get_total_tokens(usage_data):
         )
     
     return input_tokens + output_tokens + cache_creation + cache_read
+
+
+def extract_cache_breakdown(usage_data):
+    """Return (total_5m+1h, 5m, 1h, read) cache token counts from a usage dict.
+
+    Claude API distinguishes 5-minute and 1-hour caches inside
+    `usage.cache_creation = {ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`.
+    `cache_creation_input_tokens` is the sum of both (for backward compatibility).
+
+    This helper exists for cost calculations that need to bill 5m and 1h cache
+    writes at different rates (1.25x vs 2.0x). For aggregate token counting,
+    use `get_total_tokens()` instead.
+    """
+    if not usage_data:
+        return 0, 0, 0, 0
+
+    cc = usage_data.get('cache_creation')
+    if isinstance(cc, dict):
+        c5 = cc.get('ephemeral_5m_input_tokens', 0) or 0
+        c1 = cc.get('ephemeral_1h_input_tokens', 0) or 0
+    else:
+        # Older transcripts only carry the flat sum — treat it as 5m.
+        c5 = usage_data.get('cache_creation_input_tokens', 0) or 0
+        c1 = 0
+
+    total = c5 + c1
+    cache_read = usage_data.get('cache_read_input_tokens', 0) or 0
+    return total, c5, c1, cache_read
+
+
+def _diagnose_stdin(data):
+    """Emit a single stderr warning when the Claude Code stdin contract drifts.
+
+    Silent by default; activate with STATUSLINE_DEBUG=1. Display always degrades
+    gracefully (falls back to defaults / hides bars) — this is purely diagnostic
+    so future Claude Code schema changes surface quickly during dev.
+    """
+    if os.environ.get('STATUSLINE_DEBUG') != '1':
+        return
+    if not isinstance(data, dict):
+        try:
+            print(f"[statusline] stdin not a dict: {type(data).__name__}", file=sys.stderr)
+        except Exception:
+            pass
+        return
+
+    missing = []
+    # Session ID — used as cache key + transcript lookup. Accept both spellings.
+    if not (data.get('session_id') or data.get('sessionId')):
+        missing.append('session_id')
+
+    # Model display name / id — needed by cost + 1M badge.
+    model_block = data.get('model') if isinstance(data.get('model'), dict) else {}
+    if not (model_block.get('display_name') or model_block.get('id')):
+        missing.append('model.display_name/id')
+
+    # Context window — drives Line 2.
+    ctx = data.get('context_window') if isinstance(data.get('context_window'), dict) else {}
+    if 'context_window_size' not in ctx:
+        missing.append('context_window.context_window_size')
+
+    # Rate limits — drives Line 3/4 sparklines (v2.1.80+).
+    if data.get('rate_limits') is None:
+        missing.append('rate_limits')
+
+    # Detect camelCase drift — Claude Code is snake_case as of 2026.
+    camel_seen = [k for k in ('contextWindow', 'rateLimits', 'transcriptPath') if k in data]
+
+    if missing or camel_seen:
+        try:
+            parts = []
+            if missing:
+                parts.append('missing=' + ','.join(missing))
+            if camel_seen:
+                parts.append('camelCase=' + ','.join(camel_seen))
+            print('[statusline] stdin schema drift: ' + ' '.join(parts), file=sys.stderr)
+        except Exception:
+            pass
+
 
 def format_token_count(tokens):
     """Format token count for display"""
@@ -1250,12 +1329,7 @@ def calculate_block_statistics_fallback(block):
             message_data = message[1]
         else:
             message_data = message
-        
-        # メッセージ構造の確認（デバッグ時のみ有効化）
-        # if total_messages <= 3:
-        #     import sys
-        #     print(f"DEBUG: message structure check", file=sys.stderr)
-        
+
         # External tool compatible deduplication (messageId + requestId only)
         message_id = message_data.get('uuid')  # 実際のメッセージID
         request_id = message_data.get('requestId')  # requestIdは最上位
@@ -1430,69 +1504,35 @@ def generate_real_burn_timeline(block_stats, current_block, api_block_start_utc=
                 block_start_utc = block_start.astimezone(timezone.utc).replace(tzinfo=None)
             else:
                 block_start_utc = block_start
-        
-        # デバッグ: メッセージの時間分散を確認 (デバッグ時のみ有効化)
-        # import sys
-        # print(f"DEBUG: Processing {len(current_block['messages'])} messages for burn timeline", file=sys.stderr)
-        
-        # 実際のメッセージ数を各セグメントで計算
-        message_count_per_segment = [0] * 20
-        total_processed = 0
-        
-        # 5時間ウィンドウ内の全メッセージを処理（Sessionと同じデータソース）
+
         for message in current_block['messages']:
             try:
-                # assistantメッセージのusageデータのみ処理
                 if message.get('type') != 'assistant' or not message.get('usage'):
                     continue
-                
-                # タイムスタンプ取得
+
                 msg_time = message.get('timestamp')
                 if not msg_time:
                     continue
-                
-                # タイムスタンプをUTCに統一
+
                 if hasattr(msg_time, 'tzinfo') and msg_time.tzinfo:
                     msg_time_utc = msg_time.astimezone(timezone.utc).replace(tzinfo=None)
                 else:
-                    msg_time_utc = msg_time  # 既にUTC前提
-                
-                # ブロック開始からの経過時間（分）
+                    msg_time_utc = msg_time
+
                 elapsed_minutes = (msg_time_utc - block_start_utc).total_seconds() / 60
-                
-                # 負の値（ブロック開始前）や5時間超過はスキップ
-                if elapsed_minutes < 0 or elapsed_minutes >= 300:  # 5時間 = 300分
+                if elapsed_minutes < 0 or elapsed_minutes >= 300:  # 5h = 300min
                     continue
-                
-                # 15分セグメントのインデックス（0-19）
+
                 segment_index = int(elapsed_minutes / 15)
                 if 0 <= segment_index < 20:
-                    # 実際のトークン使用量を取得
-                    usage = message['usage']
-                    tokens = get_total_tokens(usage)
-                    timeline[segment_index] += tokens
-                    message_count_per_segment[segment_index] += 1
-                    total_processed += 1
-            
+                    timeline[segment_index] += get_total_tokens(message['usage'])
+
             except (ValueError, KeyError, TypeError):
                 continue
-        
-        # デバッグ: 時間分散を確認 (デバッグ時のみ有効化)
-        # print(f"DEBUG: Processed {total_processed} messages across segments", file=sys.stderr)
-        # active_segments = sum(1 for count in message_count_per_segment if count > 0)
-        # print(f"DEBUG: Active segments: {active_segments}/20, timeline sum: {sum(timeline):,}", file=sys.stderr)
-        # 
-        # # デバッグ: 各セグメントのメッセージ数（最初の10セグメント）
-        # segment_info = [f"{i}:{message_count_per_segment[i]}" for i in range(min(10, len(message_count_per_segment))) if message_count_per_segment[i] > 0]
-        # if segment_info:
-        #     print(f"DEBUG: Segment message counts (first 10): {', '.join(segment_info)}", file=sys.stderr)
-    
+
     except Exception:
-        # import sys
-        # print(f"DEBUG: Error in generate_real_burn_timeline: {e}", file=sys.stderr)
-        # エラー時は空のタイムラインを返す
         pass
-    
+
     return timeline
 
 def get_git_info(directory):
@@ -1861,62 +1901,82 @@ def detect_active_periods(messages, idle_threshold=5*60):
 
 # REMOVED: get_time_progress_bar() - unused function (replaced by get_progress_bar)
 
-def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model_name="Unknown", model_id=""):
-    """Calculate estimated cost based on token usage
-    
-    Pricing (per million tokens) - Claude 4 models (2025):
-    
-    Claude Opus 4 / Opus 4.1:
-    - Input: $15.00
-    - Output: $75.00
-    - Cache write: $18.75 (input * 1.25)
-    - Cache read: $1.50 (input * 0.10)
-    
-    Claude Sonnet 4:
-    - Input: $3.00
-    - Output: $15.00
-    - Cache write: $3.75 (input * 1.25)
-    - Cache read: $0.30 (input * 0.10)
-    
-    Claude 3.5 Haiku (if still used):
-    - Input: $1.00
-    - Output: $5.00
-    - Cache write: $1.25
-    - Cache read: $0.10
-    """
-    
-    # モデル名またはIDからタイプを判定
-    model_lower = model_name.lower()
-    id_lower = model_id.lower() if model_id else ""
+def _resolve_model_rates(model_name="Unknown", model_id=""):
+    """Resolve (input_rate, output_rate) per MTok from Anthropic public pricing.
 
-    if "haiku" in model_lower or "haiku" in id_lower:
-        # Claude 3.5 Haiku pricing (legacy)
-        input_rate = 1.00
-        output_rate = 5.00
-        cache_write_rate = 1.25
-        cache_read_rate = 0.10
-    elif "sonnet" in model_lower or "sonnet" in id_lower:
-        # Claude Sonnet 4 pricing
-        input_rate = 3.00
-        output_rate = 15.00
-        cache_write_rate = 3.75
-        cache_read_rate = 0.30
+    Snapshot: Anthropic pricing page (2026). Cache multipliers are applied separately.
+    Match order: longest / newest version first to avoid Sonnet 4 matching "Sonnet 4.6".
+    """
+    haystack = f"{model_name} {model_id}".lower()
+
+    # --- Haiku ---
+    if "haiku-4-5" in haystack or "haiku 4.5" in haystack:
+        return 1.00, 5.00     # Haiku 4.5
+    if "haiku-3-5" in haystack or "haiku 3.5" in haystack:
+        return 0.80, 4.00     # Haiku 3.5 (retired except Bedrock/Vertex)
+    if "haiku" in haystack:
+        return 1.00, 5.00     # Generic "Haiku" — default to current 4.5 tier
+
+    # --- Sonnet (4 / 4.5 / 4.6 share the same price) ---
+    if "sonnet" in haystack:
+        return 3.00, 15.00
+
+    # --- Opus 4.5 / 4.6 / 4.7 (new pricing tier) ---
+    if (
+        "opus-4-7" in haystack or "opus 4.7" in haystack
+        or "opus-4-6" in haystack or "opus 4.6" in haystack
+        or "opus-4-5" in haystack or "opus 4.5" in haystack
+    ):
+        return 5.00, 25.00
+
+    # --- Opus 4 / 4.1 (legacy pricing) ---
+    if (
+        "opus-4-1" in haystack or "opus 4.1" in haystack
+        or "opus-4" in haystack or "opus 4" in haystack
+    ):
+        return 15.00, 75.00
+
+    # Unknown: default to current Opus flagship pricing (Opus 4.7 tier).
+    return 5.00, 25.00
+
+
+def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
+                   model_name="Unknown", model_id="",
+                   cache_creation_5m=None, cache_creation_1h=None):
+    """Estimate cost in USD from token usage.
+
+    Rates are USD per million tokens (Anthropic public pricing snapshot, 2026).
+    Cache multipliers (relative to base input rate):
+        5m cache write = 1.25x   |   1h cache write = 2.00x   |   cache read = 0.10x
+
+    Args:
+        input_tokens, output_tokens: base usage counts.
+        cache_creation: total cache-creation tokens (5m + 1h combined). Used as a
+            5m write when 5m/1h are not split — preserves legacy callers.
+        cache_read: cache hit tokens.
+        model_name, model_id: from Claude Code stdin (display_name / id).
+        cache_creation_5m, cache_creation_1h: if provided, override `cache_creation`
+            and bill 5m/1h separately. When only one is given, the other defaults
+            to 0; when both are None, the legacy `cache_creation` path is used.
+    """
+    input_rate, output_rate = _resolve_model_rates(model_name, model_id)
+    cache_5m_rate = input_rate * 1.25
+    cache_1h_rate = input_rate * 2.00
+    cache_read_rate = input_rate * 0.10
+
+    if cache_creation_5m is not None or cache_creation_1h is not None:
+        c5 = cache_creation_5m or 0
+        c1 = cache_creation_1h or 0
+        cache_write_cost = (c5 / 1_000_000) * cache_5m_rate + (c1 / 1_000_000) * cache_1h_rate
     else:
-        # Default to Opus 4/4.1 pricing (most expensive, safe default)
-        input_rate = 15.00
-        output_rate = 75.00
-        cache_write_rate = 18.75
-        cache_read_rate = 1.50
-    
-    # コスト計算（per million tokens）
+        # Legacy: treat all cache creation as 5m writes (matches pre-2026 behavior).
+        cache_write_cost = (cache_creation / 1_000_000) * cache_5m_rate
+
     input_cost = (input_tokens / 1_000_000) * input_rate
     output_cost = (output_tokens / 1_000_000) * output_rate
-    cache_write_cost = (cache_creation / 1_000_000) * cache_write_rate
     cache_read_cost = (cache_read / 1_000_000) * cache_read_rate
-    
-    total_cost = input_cost + output_cost + cache_write_cost + cache_read_cost
-    
-    return total_cost
+
+    return input_cost + output_cost + cache_write_cost + cache_read_cost
 
 def format_cost(cost):
     """Format cost for display"""
@@ -1959,13 +2019,22 @@ def shorten_model_name(model, tight=False):
 
     return name
 
+_NATIVE_1M_VERSIONS = ('4.5', '4-5', '4.6', '4-6', '4.7', '4-7')
+
+
 def should_show_1m_badge(model, context_size):
-    """1Mバッジを表示すべきか判定。1Mがデフォルトのモデルでは非表示。"""
+    """Decide whether the `(1M)` badge should be shown next to the model name.
+
+    Anthropic's "Long context pricing" (2026 snapshot) lists Opus 4.5+/Sonnet 4.6+
+    as having the 1M context window at standard pricing. For those models the
+    badge is redundant; show it only when 1M is opt-in (older models or unknown).
+    """
     if context_size <= 200000:
         return False
-    # Opus 4.6 は 1M のみなのでバッジ不要
-    normalized = model.lower()
-    if 'opus' in normalized and '4.6' in normalized:
+    normalized = model.lower() if model else ''
+    if ('opus' in normalized or 'sonnet' in normalized) and any(
+        v in normalized for v in _NATIVE_1M_VERSIONS
+    ):
         return False
     return True
 
@@ -2524,26 +2593,53 @@ def format_output_minimal(ctx, terminal_width):
     return [line]
 
 
+_SCHEDULE_HOOK_ACTIVE_CMD = "echo active > ~/.claude/.schedule_swap_state"
+_SCHEDULE_HOOK_IDLE_CMD = "echo idle > ~/.claude/.schedule_swap_state"
+_SCHEDULE_HOOK_EVENTS = (
+    ('Stop', _SCHEDULE_HOOK_IDLE_CMD),
+    ('UserPromptSubmit', _SCHEDULE_HOOK_ACTIVE_CMD),
+    ('SessionStart', _SCHEDULE_HOOK_ACTIVE_CMD),
+)
+
+
 def _add_schedule_hooks(settings):
     """Add Stop + UserPromptSubmit + SessionStart hooks for schedule idle guard."""
     hooks = settings.setdefault('hooks', {})
-    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
+    for event_name, cmd in _SCHEDULE_HOOK_EVENTS:
+        bucket = hooks.setdefault(event_name, [])
+        already_present = any(
+            cmd in (h.get('command') or '')
+            for entry in bucket
+            for h in (entry.get('hooks') or [])
+        )
+        if not already_present:
+            bucket.append({"hooks": [{"type": "command", "command": cmd}]})
 
-    # Stop hook: mark idle (suppress calendar)
-    idle_cmd = "echo idle > ~/.claude/.schedule_swap_state"
-    stop_hooks = hooks.setdefault('Stop', [])
-    if not any(idle_cmd in h.get('command', '') for entry in stop_hooks for h in entry.get('hooks', [])):
-        stop_hooks.append({"hooks": [{"type": "command", "command": idle_cmd}]})
 
-    # UserPromptSubmit hook: mark active (allow calendar)
-    ups_hooks = hooks.setdefault('UserPromptSubmit', [])
-    if not any(active_cmd in h.get('command', '') for entry in ups_hooks for h in entry.get('hooks', [])):
-        ups_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
+def _verify_schedule_hooks(settings_path):
+    """Re-parse settings.json after writing and assert all schedule hooks landed.
 
-    # SessionStart hook: mark active (clear idle from previous session)
-    ss_hooks = hooks.setdefault('SessionStart', [])
-    if not any(active_cmd in h.get('command', '') for entry in ss_hooks for h in entry.get('hooks', [])):
-        ss_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
+    Returns (ok: bool, missing: list[str]). Used by install paths to catch
+    cases where the JSON write succeeded but the schema doesn't look right.
+    """
+    try:
+        with open(settings_path, encoding='utf-8') as f:
+            parsed = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, [f'unreadable: {exc}']
+
+    hooks = parsed.get('hooks') or {}
+    missing = []
+    for event_name, cmd in _SCHEDULE_HOOK_EVENTS:
+        bucket = hooks.get(event_name) or []
+        found = any(
+            cmd in (h.get('command') or '')
+            for entry in bucket
+            for h in (entry.get('hooks') or [])
+        )
+        if not found:
+            missing.append(f'{event_name}:{cmd}')
+    return (not missing), missing
 
 
 def do_setup():
@@ -2576,6 +2672,11 @@ def do_setup():
 
     with open(settings_path, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
+
+    ok, missing = _verify_schedule_hooks(settings_path)
+    if not ok:
+        print(f"WARNING: Schedule hooks not registered correctly: {', '.join(missing)}",
+              file=sys.stderr)
 
     print(f"Settings updated: {settings_path}")
 
@@ -2699,6 +2800,8 @@ def main():
             # No input provided - just exit silently
             return
         data = json.loads(input_data)
+
+        _diagnose_stdin(data)
 
         # ========================================
         # API DATA EXTRACTION (Claude Code stdin)

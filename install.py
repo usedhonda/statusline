@@ -6,26 +6,11 @@ import shutil
 import sys
 from pathlib import Path
 
+# Reuse hook helpers from the bundled statusline.py to keep behavior in sync.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from statusline import _add_schedule_hooks, _verify_schedule_hooks  # noqa: E402
+
 COMMAND = "~/.claude/statusline.py"
-
-
-def _add_schedule_hooks(settings):
-    """Add Stop + UserPromptSubmit + SessionStart hooks for schedule idle guard."""
-    hooks = settings.setdefault('hooks', {})
-    active_cmd = "echo active > ~/.claude/.schedule_swap_state"
-
-    idle_cmd = "echo idle > ~/.claude/.schedule_swap_state"
-    stop_hooks = hooks.setdefault('Stop', [])
-    if not any(idle_cmd in h.get('command', '') for entry in stop_hooks for h in entry.get('hooks', [])):
-        stop_hooks.append({"hooks": [{"type": "command", "command": idle_cmd}]})
-
-    ups_hooks = hooks.setdefault('UserPromptSubmit', [])
-    if not any(active_cmd in h.get('command', '') for entry in ups_hooks for h in entry.get('hooks', [])):
-        ups_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
-
-    ss_hooks = hooks.setdefault('SessionStart', [])
-    if not any(active_cmd in h.get('command', '') for entry in ss_hooks for h in entry.get('hooks', [])):
-        ss_hooks.append({"hooks": [{"type": "command", "command": active_cmd}]})
 
 
 def main():
@@ -78,6 +63,11 @@ def main():
 
     with open(settings_path, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
+
+    ok, missing = _verify_schedule_hooks(settings_path)
+    if not ok:
+        print(f"WARNING: Schedule hooks not registered correctly: {', '.join(missing)}",
+              file=sys.stderr)
     print(f"Settings updated: {settings_path}")
 
     # Auto-update opt-in/out
