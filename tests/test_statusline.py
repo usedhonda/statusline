@@ -77,6 +77,12 @@ class TestShortenModelName:
         assert statusline.shorten_model_name("Claude 3.5 Haiku", tight=True) == "Hai3.5"
         assert statusline.shorten_model_name("Claude Sonnet 4.6 (1M context)", tight=True) == "Son4.6"
 
+    def test_fable(self):
+        assert statusline.shorten_model_name("Fable 5 (1M context)") == "Fable 5"
+        assert statusline.shorten_model_name("Claude Fable 5") == "Fable 5"
+        assert statusline.shorten_model_name("Fable 5 (1M context)", tight=True) == "Fab5"
+        assert statusline.shorten_model_name("Claude Fable 5", tight=True) == "Fab5"
+
 
 class TestTruncateText:
     def test_short_text(self):
@@ -351,6 +357,25 @@ class TestCalculateCost:
         # Opus 4.7: $5 input + 0.1M * $25 = $5 + $2.5
         assert abs(cost - 7.5) < 0.001
 
+    def test_fable_5_pricing(self):
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Fable 5 (1M context)", model_id="claude-fable-5",
+        )
+        # Fable 5: $10 input + 0.1M * $50 = $10 + $5
+        assert abs(cost - 15.0) < 0.001
+
+    def test_opus_4_8_uses_new_tier_not_legacy(self):
+        # Regression: "opus-4-8" must not be caught by the legacy "opus-4" match ($15/$75).
+        cost = statusline.calculate_cost(
+            input_tokens=1_000_000, output_tokens=100_000,
+            cache_creation=0, cache_read=0,
+            model_name="Claude Opus 4.8", model_id="claude-opus-4-8",
+        )
+        # Opus 4.8: $5 input + 0.1M * $25 = $5 + $2.5
+        assert abs(cost - 7.5) < 0.001
+
     def test_opus_4_6_pricing_same_as_4_7(self):
         cost = statusline.calculate_cost(
             input_tokens=1_000_000, output_tokens=0,
@@ -524,39 +549,6 @@ class TestExtractCacheBreakdown:
             'cache_read_input_tokens': None,
         }
         assert statusline.extract_cache_breakdown(usage) == (0, 0, 0, 0)
-
-
-class TestShouldShow1MBadge:
-    """1M context badge visibility — suppressed for models with native 1M default."""
-
-    def test_under_200k_always_hides_badge(self):
-        assert statusline.should_show_1m_badge("Claude Opus 4.7", 200_000) is False
-        assert statusline.should_show_1m_badge("Claude Sonnet 4", 100_000) is False
-
-    def test_opus_4_7_hides_badge(self):
-        assert statusline.should_show_1m_badge("Claude Opus 4.7", 1_000_000) is False
-
-    def test_opus_4_6_hides_badge(self):
-        assert statusline.should_show_1m_badge("Claude Opus 4.6", 1_000_000) is False
-
-    def test_opus_4_5_hides_badge(self):
-        assert statusline.should_show_1m_badge("Claude Opus 4.5", 1_000_000) is False
-
-    def test_sonnet_4_6_hides_badge(self):
-        # Sonnet 4.6 also ships with native 1M.
-        assert statusline.should_show_1m_badge("Claude Sonnet 4.6", 1_000_000) is False
-
-    def test_opus_4_1_shows_badge(self):
-        # Legacy Opus uses 200K by default; 1M is opt-in → show badge.
-        assert statusline.should_show_1m_badge("Claude Opus 4.1", 1_000_000) is True
-
-    def test_unknown_model_shows_badge_when_1m(self):
-        assert statusline.should_show_1m_badge("Mystery Model", 1_000_000) is True
-
-    def test_empty_model_name_safe(self):
-        # Should not crash on None / empty model name.
-        assert statusline.should_show_1m_badge("", 1_000_000) is True
-        assert statusline.should_show_1m_badge(None, 200_000) is False
 
 
 # ============================================

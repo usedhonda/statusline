@@ -50,7 +50,7 @@ python3 install.py
 - **Line 3** — Session sparkline with 5-hour utilization, token count, and time range
 - **Line 4** — Weekly sparkline with 7-day token distribution, remaining time, extra usage
 
-Supports **1M context** — the model bracket shows `(1M)` when using extended context.
+Supports **1M context** — the context line scales to the active window size (e.g. `122K/1.0M`).
 
 ## Features
 

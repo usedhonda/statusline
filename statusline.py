@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.12"
+__version__ = "1.0.13"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -1909,6 +1909,10 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     """
     haystack = f"{model_name} {model_id}".lower()
 
+    # --- Fable (new top tier above Opus, 2026) ---
+    if "fable" in haystack:
+        return 10.00, 50.00  # Fable 5
+
     # --- Haiku ---
     if "haiku-4-5" in haystack or "haiku 4.5" in haystack:
         return 1.00, 5.00     # Haiku 4.5
@@ -1921,9 +1925,12 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     if "sonnet" in haystack:
         return 3.00, 15.00
 
-    # --- Opus 4.5 / 4.6 / 4.7 (new pricing tier) ---
+    # --- Opus 4.5 / 4.6 / 4.7 / 4.8 (new pricing tier) ---
+    # NOTE: must be checked before the legacy "opus-4" match below,
+    # otherwise e.g. "opus-4-8" would be caught by the "opus-4" substring.
     if (
-        "opus-4-7" in haystack or "opus 4.7" in haystack
+        "opus-4-8" in haystack or "opus 4.8" in haystack
+        or "opus-4-7" in haystack or "opus 4.7" in haystack
         or "opus-4-6" in haystack or "opus 4.6" in haystack
         or "opus-4-5" in haystack or "opus 4.5" in haystack
     ):
@@ -1936,7 +1943,7 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     ):
         return 15.00, 75.00
 
-    # Unknown: default to current Opus flagship pricing (Opus 4.7 tier).
+    # Unknown: default to current Opus tier pricing.
     return 5.00, 25.00
 
 
@@ -2005,7 +2012,7 @@ def shorten_model_name(model, tight=False):
     name = re.sub(r'\s*\([\d.]+[kKmM]?\s+context\)', '', name).strip()
 
     # "3.5 Haiku" → "Haiku 3.5" に正規化（バージョンが前にある場合）
-    m = re.match(r'^([\d.]+)\s+(Haiku|Sonnet|Opus)', name, re.IGNORECASE)
+    m = re.match(r'^([\d.]+)\s+(Haiku|Sonnet|Opus|Fable)', name, re.IGNORECASE)
     if m:
         name = f"{m.group(2)} {m.group(1)}"
 
@@ -2014,29 +2021,11 @@ def shorten_model_name(model, tight=False):
         name = re.sub(r'Opus', 'Op', name, flags=re.IGNORECASE)
         name = re.sub(r'Sonnet', 'Son', name, flags=re.IGNORECASE)
         name = re.sub(r'Haiku', 'Hai', name, flags=re.IGNORECASE)
-        # スペース除去 → "Op4.6", "Son4.5", "Hai3.5"
+        name = re.sub(r'Fable', 'Fab', name, flags=re.IGNORECASE)
+        # スペース除去 → "Op4.6", "Son4.5", "Hai3.5", "Fab5"
         name = name.replace(' ', '')
 
     return name
-
-_NATIVE_1M_VERSIONS = ('4.5', '4-5', '4.6', '4-6', '4.7', '4-7')
-
-
-def should_show_1m_badge(model, context_size):
-    """Decide whether the `(1M)` badge should be shown next to the model name.
-
-    Anthropic's "Long context pricing" (2026 snapshot) lists Opus 4.5+/Sonnet 4.6+
-    as having the 1M context window at standard pricing. For those models the
-    badge is redundant; show it only when 1M is opt-in (older models or unknown).
-    """
-    if context_size <= 200000:
-        return False
-    normalized = model.lower() if model else ''
-    if ('opus' in normalized or 'sonnet' in normalized) and any(
-        v in normalized for v in _NATIVE_1M_VERSIONS
-    ):
-        return False
-    return True
 
 def truncate_text(text, max_len):
     """テキストを最大長で切り詰め、...を追加"""
@@ -2049,7 +2038,7 @@ def truncate_text(text, max_len):
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_active_files=True, include_messages=True,
                       include_lines=True, include_errors=True, include_cost=True,
-                      tight_model=False, include_context_badge=True,
+                      tight_model=False,
                       include_dir=True):
     """Line 1の各パーツを構築する
 
@@ -2063,7 +2052,6 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         include_errors: エラー数を含めるか
         include_cost: コストを含めるか
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
-        include_context_badge: 1Mコンテキストバッジを表示するか
         include_dir: ディレクトリを含めるか
 
     Returns:
@@ -2073,8 +2061,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     # Model (normal or tight)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
-    ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
 
     # Directory (before git branch)
     if include_dir:
@@ -2213,16 +2200,16 @@ def format_output_full(ctx, terminal_width=None):
                              max_branch_len=12, max_dir_len=12)),
                 (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, tight_model=True,
-                             max_branch_len=10, max_dir_len=12, include_context_badge=False)),
+                             max_branch_len=10, max_dir_len=12)),
                 (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, include_messages=False, tight_model=True,
-                             max_branch_len=10, max_dir_len=10, include_context_badge=False)),
+                             max_branch_len=10, max_dir_len=10)),
                 (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, include_messages=False, include_dir=False,
-                             tight_model=True, max_branch_len=10, include_context_badge=False)),
+                             tight_model=True, max_branch_len=10)),
                 (" ",   dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, include_messages=False, include_dir=False,
-                             tight_model=True, max_branch_len=8, include_context_badge=False)),
+                             tight_model=True, max_branch_len=8)),
             ]
             for sep, kwargs in shrink_steps:
                 line1_parts = build_line1_parts(ctx, **kwargs)
@@ -2337,8 +2324,7 @@ def format_output_compact(ctx):
         if not schedule_shown:
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
-            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
             line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
 
@@ -2461,8 +2447,7 @@ def format_output_tight(ctx):
         if not schedule_shown:
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
-            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
 
             if ctx['git_branch']:
                 branch = ctx['git_branch']
