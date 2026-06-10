@@ -83,6 +83,16 @@ class TestShortenModelName:
         assert statusline.shorten_model_name("Fable 5 (1M context)", tight=True) == "Fab5"
         assert statusline.shorten_model_name("Claude Fable 5", tight=True) == "Fab5"
 
+    def test_raw_model_id(self):
+        # Some CC versions pass the raw model id as display_name.
+        assert statusline.shorten_model_name("claude-fable-5[1m]") == "Fable 5"
+        assert statusline.shorten_model_name("claude-fable-5") == "Fable 5"
+        assert statusline.shorten_model_name("claude-opus-4-7[1m]") == "Opus 4.7"
+        assert statusline.shorten_model_name("claude-sonnet-4-6") == "Sonnet 4.6"
+        assert statusline.shorten_model_name("claude-haiku-4-5-20251001") == "Haiku 4.5"
+        assert statusline.shorten_model_name("claude-fable-5[1m]", tight=True) == "Fab5"
+        assert statusline.shorten_model_name("claude-opus-4-7[1m]", tight=True) == "Op4.7"
+
 
 class TestTruncateText:
     def test_short_text(self):
@@ -594,11 +604,18 @@ STATUSLINE_PATH = os.path.join(
 
 class TestSmoke:
     def _run(self, input_data):
+        # Force a deterministic terminal size: statusline prefers the real tmux
+        # pane size (TMUX env), which varies by where the test happens to run.
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('TMUX', 'TMUX_PANE', 'TERM')}
+        env['COLUMNS'] = '200'
+        env['LINES'] = '50'
         return subprocess.run(
             [sys.executable, STATUSLINE_PATH],
             input=input_data,
             capture_output=True, text=True,
             timeout=10,
+            env=env,
         )
 
     def _assert_output(self, result):
@@ -1645,11 +1662,18 @@ class TestSmokeExtended:
     """Extended smoke tests with realistic input data."""
 
     def _run(self, input_data):
+        # Force a deterministic terminal size: statusline prefers the real tmux
+        # pane size (TMUX env), which varies by where the test happens to run.
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('TMUX', 'TMUX_PANE', 'TERM')}
+        env['COLUMNS'] = '200'
+        env['LINES'] = '50'
         return subprocess.run(
             [sys.executable, STATUSLINE_PATH],
             input=input_data,
             capture_output=True, text=True,
             timeout=10,
+            env=env,
         )
 
     def test_full_input_with_ratelimit(self):

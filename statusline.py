@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.14"
+__version__ = "1.0.15"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2003,8 +2003,18 @@ def shorten_model_name(model, tight=False):
 
     tight=False: "Claude " 除去のみ → "Opus 4.6"
     tight=True: ファミリー名も短縮 → "Op4.6"
+    display_name に生の model id が来る CC バージョンにも対応
+    （"claude-fable-5[1m]" → "Fable 5"）
     """
     import re
+    # 生 model id 形式の正規化: "claude-opus-4-7[1m]" → "Opus 4.7", "claude-fable-5" → "Fable 5",
+    # "claude-haiku-4-5-20251001" → "Haiku 4.5" (日付 suffix は捨てる)
+    m = re.match(r'^claude-([a-z]+)-(\d+(?:-\d+)?)(?:-\d{8})?(?:\[\d+m\])?$', model, re.IGNORECASE)
+    if m:
+        family = m.group(1).capitalize()
+        version = m.group(2).replace('-', '.')
+        model = f"{family} {version}"
+
     # "Claude " プレフィックスを除去
     name = re.sub(r'^Claude\s+', '', model, flags=re.IGNORECASE)
 
@@ -3656,10 +3666,15 @@ def _is_update_disabled():
     no_update_file = Path.home() / '.claude' / '.statusline_no_update'
     if no_update_file.exists():
         return True
+    legacy_path_raw = Path.home() / '.claude' / 'statusline.py'
+    # Dev machine: ~/.claude/statusline.py is a symlink into the project checkout.
+    # Self-update would replace the symlink with a regular file (atomic rename),
+    # destroying the dev setup — never update through a symlink.
+    if legacy_path_raw.is_symlink():
+        return True
     # pip/brew install: not running from ~/.claude/statusline.py
     script_path = Path(__file__).resolve()
-    legacy_path = (Path.home() / '.claude' / 'statusline.py').resolve()
-    if script_path != legacy_path:
+    if script_path != legacy_path_raw.resolve():
         return True
     return False
 
