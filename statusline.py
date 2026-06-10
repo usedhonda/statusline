@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2027,6 +2027,28 @@ def shorten_model_name(model, tight=False):
 
     return name
 
+_NATIVE_1M_VERSIONS = ('4.5', '4-5', '4.6', '4-6', '4.7', '4-7', '4.8', '4-8')
+
+
+def should_show_1m_badge(model, context_size):
+    """Decide whether the `(1M)` badge should be shown next to the model name.
+
+    Show the badge only for models where the context size is a *choice*
+    (1M is opt-in: older models or unknown). Models that only ship with 1M
+    (Fable) or default to it (Opus 4.5+/Sonnet 4.6+ per Anthropic's 2026
+    long-context pricing) carry no information in the badge, so hide it.
+    """
+    if context_size <= 200000:
+        return False
+    normalized = model.lower() if model else ''
+    if 'fable' in normalized:
+        return False
+    if ('opus' in normalized or 'sonnet' in normalized) and any(
+        v in normalized for v in _NATIVE_1M_VERSIONS
+    ):
+        return False
+    return True
+
 def truncate_text(text, max_len):
     """テキストを最大長で切り詰め、...を追加"""
     if len(text) <= max_len:
@@ -2038,7 +2060,7 @@ def truncate_text(text, max_len):
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_active_files=True, include_messages=True,
                       include_lines=True, include_errors=True, include_cost=True,
-                      tight_model=False,
+                      tight_model=False, include_context_badge=True,
                       include_dir=True):
     """Line 1の各パーツを構築する
 
@@ -2052,6 +2074,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         include_errors: エラー数を含めるか
         include_cost: コストを含めるか
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
+        include_context_badge: 1Mコンテキストバッジ（opt-in 1M モデルのみ）を表示するか
         include_dir: ディレクトリを含めるか
 
     Returns:
@@ -2061,7 +2084,8 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     # Model (normal or tight)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
-    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}]{Colors.RESET}")
+    ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
     # Directory (before git branch)
     if include_dir:
@@ -2200,16 +2224,16 @@ def format_output_full(ctx, terminal_width=None):
                              max_branch_len=12, max_dir_len=12)),
                 (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, tight_model=True,
-                             max_branch_len=10, max_dir_len=12)),
+                             max_branch_len=10, max_dir_len=12, include_context_badge=False)),
                 (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, include_messages=False, tight_model=True,
-                             max_branch_len=10, max_dir_len=10)),
+                             max_branch_len=10, max_dir_len=10, include_context_badge=False)),
                 (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, include_messages=False, include_dir=False,
-                             tight_model=True, max_branch_len=10)),
+                             tight_model=True, max_branch_len=10, include_context_badge=False)),
                 (" ",   dict(include_cost=False, include_lines=False, include_errors=False,
                              include_active_files=False, include_messages=False, include_dir=False,
-                             tight_model=True, max_branch_len=8)),
+                             tight_model=True, max_branch_len=8, include_context_badge=False)),
             ]
             for sep, kwargs in shrink_steps:
                 line1_parts = build_line1_parts(ctx, **kwargs)
@@ -2324,7 +2348,8 @@ def format_output_compact(ctx):
         if not schedule_shown:
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
+            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
             line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
 
@@ -2447,7 +2472,8 @@ def format_output_tight(ctx):
         if not schedule_shown:
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}]{Colors.RESET}")
+            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
             if ctx['git_branch']:
                 branch = ctx['git_branch']

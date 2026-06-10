@@ -551,6 +551,37 @@ class TestExtractCacheBreakdown:
         assert statusline.extract_cache_breakdown(usage) == (0, 0, 0, 0)
 
 
+class TestShouldShow1MBadge:
+    """(1M) badge: shown only when 1M is a *choice* (opt-in models); hidden when 1M is the only/default size."""
+
+    def test_under_200k_always_hides_badge(self):
+        assert statusline.should_show_1m_badge("Claude Opus 4.7", 200_000) is False
+        assert statusline.should_show_1m_badge("Claude Sonnet 4", 100_000) is False
+
+    def test_native_1m_flagships_hide_badge(self):
+        assert statusline.should_show_1m_badge("Claude Opus 4.8", 1_000_000) is False
+        assert statusline.should_show_1m_badge("Claude Opus 4.7", 1_000_000) is False
+        assert statusline.should_show_1m_badge("Claude Opus 4.6", 1_000_000) is False
+        assert statusline.should_show_1m_badge("Claude Opus 4.5", 1_000_000) is False
+        assert statusline.should_show_1m_badge("Claude Sonnet 4.6", 1_000_000) is False
+
+    def test_fable_always_hides_badge(self):
+        # Fable ships 1M-only — the badge carries no information.
+        assert statusline.should_show_1m_badge("Fable 5 (1M context)", 1_000_000) is False
+        assert statusline.should_show_1m_badge("Claude Fable 5", 1_000_000) is False
+
+    def test_opt_in_1m_shows_badge(self):
+        # Legacy Opus defaults to 200K; running at 1M is a choice → show badge.
+        assert statusline.should_show_1m_badge("Claude Opus 4.1", 1_000_000) is True
+
+    def test_unknown_model_shows_badge_when_1m(self):
+        assert statusline.should_show_1m_badge("Mystery Model", 1_000_000) is True
+
+    def test_empty_model_name_safe(self):
+        assert statusline.should_show_1m_badge("", 1_000_000) is True
+        assert statusline.should_show_1m_badge(None, 200_000) is False
+
+
 # ============================================
 # Smoke Tests — subprocess end-to-end
 # ============================================
