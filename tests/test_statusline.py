@@ -1379,11 +1379,13 @@ class TestBuildLine1Parts:
         assert '$7.36' in joined
         assert 'Ext 23% $11.50/$50' in joined
 
-    def test_metered_tight_badge(self):
+    def test_metered_tight_no_badge(self):
+        """tight モードでは $ バッジを付けない (船長裁定: Fab5$ の $ は余計)"""
         ctx = self._make_ctx(model='Fable 5', metered=True, metered_cost=1.0)
         parts = statusline.build_line1_parts(ctx, tight_model=True)
         joined = statusline.strip_ansi(" ".join(parts))
-        assert '[Fab5$]' in joined
+        assert '[Fab5]' in joined
+        assert 'Fab5$' not in joined
 
     def test_metered_without_extra_usage(self):
         """extra_usage が無効/欠落でも 💰 は出る"""

@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.17"
+__version__ = "1.0.18"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2153,10 +2153,10 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     parts = []
     metered = ctx.get('metered', False)
 
-    # Model (normal or tight) — 従量モデルは ($) / $ バッジ付き
+    # Model (normal or tight) — 従量モデルは ($) バッジ付き (tight では省略)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
     ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-    metered_badge = ("$" if tight_model else "($)") if metered else ""
+    metered_badge = "($)" if metered and not tight_model else ""
     parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
     # Directory (before git branch)
@@ -2416,8 +2416,7 @@ def format_output_compact(ctx):
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
             ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            metered_badge = "$" if ctx.get('metered') else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
             line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
 
@@ -2546,8 +2545,7 @@ def format_output_tight(ctx):
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
             ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            metered_badge = "$" if ctx.get('metered') else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
             if ctx['git_branch']:
                 branch = ctx['git_branch']
