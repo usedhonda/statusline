@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.19"
+__version__ = "1.0.20"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -843,6 +843,7 @@ def load_all_messages_chronologically(hours_limit=6, transcript_files=None):
                                 'session_id': entry.get('sessionId'),
                                 'type': entry.get('type'),
                                 'usage': entry.get('message', {}).get('usage') if entry.get('message') else entry.get('usage'),
+                                'model': entry.get('message', {}).get('model') if entry.get('message') else None,
                                 'uuid': entry.get('uuid'),  # For deduplication
                                 'requestId': entry.get('requestId'),  # For deduplication
                                 'file_path': transcript_file
@@ -2051,18 +2052,49 @@ def calculate_metered_cost_from_transcript(transcript_path):
                     if unique_hash in processed_hashes:
                         continue
                     processed_hashes.add(unique_hash)
-                _, cache_5m, cache_1h, cache_read = extract_cache_breakdown(usage)
-                total += calculate_cost(
-                    usage.get('input_tokens', 0) or 0,
-                    usage.get('output_tokens', 0) or 0,
-                    0,
-                    cache_read,
-                    model_name=msg_model,
-                    cache_creation_5m=cache_5m,
-                    cache_creation_1h=cache_1h,
-                )
+                total += _metered_usage_cost(msg_model, usage)
     except OSError:
         return None
+    return total
+
+
+def _metered_usage_cost(model, usage):
+    """1 メッセージ分の従量モデルコスト (非従量・usage なしは 0)。"""
+    if not usage or not is_metered_model(model or ''):
+        return 0.0
+    _, cache_5m, cache_1h, cache_read = extract_cache_breakdown(usage)
+    return calculate_cost(
+        usage.get('input_tokens', 0) or 0,
+        usage.get('output_tokens', 0) or 0,
+        0,
+        cache_read,
+        model_name=model,
+        cache_creation_5m=cache_5m,
+        cache_creation_1h=cache_1h,
+    )
+
+
+def _metered_cost_from_messages(messages):
+    """5h ブロックの message entry 群から従量モデル分のコストを積算する。
+
+    entry は load_all_messages_chronologically() の dict (model/usage/uuid/requestId)。
+    Line 1 (直前ターン) と同じ dedup・単価計算で、窓を 5h ブロックに変えたもの。
+    """
+    total = 0.0
+    processed_hashes = set()
+    for message in messages or []:
+        if isinstance(message, tuple):
+            message = message[1]
+        if not isinstance(message, dict) or message.get('type') != 'assistant':
+            continue
+        message_id = message.get('uuid')
+        request_id = message.get('requestId')
+        if message_id and request_id:
+            unique_hash = f"{message_id}:{request_id}"
+            if unique_hash in processed_hashes:
+                continue
+            processed_hashes.add(unique_hash)
+        total += _metered_usage_cost(message.get('model'), message.get('usage'))
     return total
 
 # ========================================
@@ -2350,12 +2382,6 @@ def format_output_full(ctx, terminal_width=None):
         if ctx['cache_ratio'] >= 50:
             line2_parts.append(f"{Colors.BRIGHT_GREEN}♻️ {int(ctx['cache_ratio'])}% cached{Colors.RESET}")
 
-        if ctx.get('exceeds_200k'):
-            if ctx.get('context_size', 200000) > 200000:
-                line2_parts.append(f"{Colors.BG_YELLOW}{Colors.BOLD} PREMIUM {Colors.RESET}")
-            else:
-                line2_parts.append(f"{Colors.BG_RED}{Colors.BRIGHT_WHITE} >200K {Colors.RESET}")
-
         lines.append(" ".join(line2_parts))
 
     # Line 3: Session (sparkline + 5h utilization + tokens + API time range)
@@ -2382,6 +2408,11 @@ def format_output_full(ctx, terminal_width=None):
             if ctx.get('api_session_range'):
                 start, end = ctx['api_session_range']
                 line3_parts.append(f"{Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}")
+            # 従量モデル使用中: この 5h ブロックの従量分コスト
+            block_cost = ctx.get('block_metered_cost') or 0
+            if ctx.get('metered') and block_cost > 0:
+                cost_color = Colors.BRIGHT_YELLOW if block_cost > 10 else Colors.BRIGHT_WHITE
+                line3_parts.append(f"{cost_color}{format_cost(block_cost)}{Colors.RESET}")
             lines.append(" ".join(line3_parts))
         else:
             lines.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET} --")
@@ -2392,7 +2423,8 @@ def format_output_full(ctx, terminal_width=None):
             if graph_width != 20 and ctx.get('ratelimit_data'):
                 # Regenerate weekly line with narrower graph width
                 weekly_line = get_weekly_line(ctx['ratelimit_data'], ctx.get('weekly_timeline'),
-                                             sparkline_width=graph_width)
+                                             sparkline_width=graph_width,
+                                             metered_cost=ctx.get('weekly_metered_cost') if ctx.get('metered') else None)
                 if weekly_line:
                     lines.append(weekly_line)
                 else:
@@ -2466,11 +2498,6 @@ def format_output_compact(ctx):
         line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=12)} "
         line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} "
         line2 += f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}"
-        if ctx.get('exceeds_200k'):
-            if ctx.get('context_size', 200000) > 200000:
-                line2 += f" {Colors.BG_YELLOW}PRM{Colors.RESET}"
-            else:
-                line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
     # Line 3: Session (shortened with sparkline + utilization% + time range)
@@ -2488,6 +2515,10 @@ def format_output_compact(ctx):
             if ctx.get('api_session_range'):
                 start, end = ctx['api_session_range']
                 line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+            block_cost = ctx.get('block_metered_cost') or 0
+            if ctx.get('metered') and block_cost > 0:
+                cost_color = Colors.BRIGHT_YELLOW if block_cost > 10 else Colors.BRIGHT_WHITE
+                line3 += f" {cost_color}{format_cost(block_cost)}{Colors.RESET}"
             lines.append(line3)
         else:
             lines.append(f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} --")
@@ -2525,6 +2556,10 @@ def format_output_compact(ctx):
                             line4 += f" {Colors.BRIGHT_WHITE}{d}d{h}h{m:02d}m{Colors.RESET}"
                     except (ValueError, TypeError):
                         pass
+                weekly_cost = ctx.get('weekly_metered_cost') or 0
+                if ctx.get('metered') and weekly_cost > 0:
+                    cost_color = Colors.BRIGHT_YELLOW if weekly_cost > 10 else Colors.BRIGHT_WHITE
+                    line4 += f" {cost_color}{format_cost(weekly_cost)}{Colors.RESET}"
                 lines.append(line4)
             else:
                 lines.append(ctx['weekly_line'])
@@ -2583,11 +2618,6 @@ def format_output_tight(ctx):
 
         line2 = f"{Colors.BRIGHT_CYAN}C:{Colors.RESET} {get_progress_bar(percentage, width=8)} "
         line2 += f"{percentage_color}[{percentage}%]{Colors.RESET} {Colors.BRIGHT_WHITE}{compact_display}{Colors.RESET}"
-        if ctx.get('exceeds_200k'):
-            if ctx.get('context_size', 200000) > 200000:
-                line2 += f" {Colors.BG_YELLOW}PRM{Colors.RESET}"
-            else:
-                line2 += f" {Colors.BG_RED}>200K{Colors.RESET}"
         lines.append(line2)
 
     # Line 3: Session (ultra short with sparkline + utilization%)
@@ -2673,11 +2703,6 @@ def format_output_minimal(ctx, terminal_width):
     percentage_color = get_percentage_color(percentage)
 
     parts = []
-    if ctx.get('exceeds_200k'):
-        if ctx.get('context_size', 200000) > 200000:
-            parts.append(f"{Colors.BG_YELLOW}PRM{Colors.RESET}")
-        else:
-            parts.append(f"{Colors.BG_RED}{Colors.BRIGHT_WHITE}>200K{Colors.RESET}")
     parts.append(f"{percentage_color}Cpt{percentage}%{Colors.RESET}")
     parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}")
 
@@ -2935,7 +2960,6 @@ def main():
         api_total_duration_ms = api_cost.get('total_duration_ms')
 
         # 200K token exceeded flag
-        api_exceeds_200k = data.get('exceeds_200k_tokens', False)
 
         # Current usage cache details (fallback for cache ratio)
         api_current_usage = api_context.get('current_usage') or {}
@@ -3192,10 +3216,14 @@ def main():
         # Compute downstream values that depend on ratelimit_data
         api_session_range = None
         weekly_line = None
+        weekly_timeline = None
+        weekly_metered_cost = 0
         try:
             api_session_range = get_api_session_time_range(ratelimit_data) if ratelimit_data else None
-            weekly_timeline = generate_weekly_timeline(ratelimit_data) if SHOW_LINE4 and ratelimit_data else None
-            weekly_line = get_weekly_line(ratelimit_data, weekly_timeline) if SHOW_LINE4 and ratelimit_data else None
+            if SHOW_LINE4 and ratelimit_data:
+                weekly_timeline, weekly_metered_cost = generate_weekly_timeline(ratelimit_data)
+                weekly_line = get_weekly_line(ratelimit_data, weekly_timeline,
+                                              metered_cost=weekly_metered_cost if metered else None)
         except Exception as e:
             print(f"[ccsl] weekly generation error: {e}", file=sys.stderr)
 
@@ -3246,6 +3274,11 @@ def main():
             burn_timeline = generate_real_burn_timeline(block_stats, current_block, api_block_start_utc)
             block_tokens = block_stats.get('total_tokens', 0)
 
+        # 従量モデル使用中: この 5h ブロックの従量分コスト (Session 行末尾用)
+        block_metered_cost = 0
+        if metered and current_block and current_block.get('messages'):
+            block_metered_cost = _metered_cost_from_messages(current_block['messages'])
+
         # Build context dictionary for formatters
         # Schedule idle guard: suppress calendar when assistant has stopped
         show_schedule = SHOW_SCHEDULE or args.schedule
@@ -3284,6 +3317,8 @@ def main():
             'burn_timeline': burn_timeline,
             'burn_current_pos': burn_current_pos,
             'block_tokens': block_tokens,
+            'block_metered_cost': block_metered_cost,
+            'weekly_metered_cost': weekly_metered_cost,
             'weekly_line': weekly_line,
             'weekly_timeline': weekly_timeline if SHOW_LINE4 else None,
             'weekly_current_pos': weekly_current_pos,
@@ -3296,7 +3331,6 @@ def main():
             'show_line3': SHOW_LINE3,
             'show_line4': SHOW_LINE4,
             'show_schedule': show_schedule,
-            'exceeds_200k': api_exceeds_200k,
             'context_size': api_context_size,
             'percentage_of_full_context': percentage_of_full_context,
         }
@@ -3614,6 +3648,7 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
                         'session_id': msg.get('session_id'),
                         'type': msg.get('type'),
                         'usage': msg.get('usage'),
+                        'model': msg.get('model'),
                         'uuid': msg.get('uuid'),
                         'requestId': msg.get('requestId'),
                     })
@@ -4139,13 +4174,14 @@ def generate_weekly_timeline(ratelimit_data, num_segments=20):
     Results are cached with a 5-minute TTL to avoid slow 7-day transcript scans.
 
     Returns:
-        list: num_segments values representing token consumption per segment (oldest to newest)
+        tuple: (timeline list, metered_cost float) — timeline は num_segments 個の
+        トークン量、metered_cost は同じ 7 日窓の従量モデル分コスト (USD)
     """
     empty = [0] * num_segments
 
     seven_day = ratelimit_data.get('seven_day') if ratelimit_data else None
     if not seven_day or not seven_day.get('resets_at'):
-        return empty
+        return empty, 0.0
 
     # Check cache first
     cache_file = _get_weekly_timeline_cache_file()
@@ -4157,27 +4193,30 @@ def generate_weekly_timeline(ratelimit_data, num_segments=20):
                 if cached.get('resets_at') == seven_day.get('resets_at'):
                     tl = cached.get('timeline', empty)
                     if len(tl) == num_segments:
-                        return tl
+                        return tl, cached.get('metered_cost', 0.0)
     except (json.JSONDecodeError, OSError):
         pass
 
     # Generate fresh timeline
-    timeline = _scan_weekly_timeline(seven_day['resets_at'], num_segments)
+    timeline, metered_cost = _scan_weekly_timeline(seven_day['resets_at'], num_segments)
 
     # Write cache (atomic)
     try:
         tmp = cache_file.with_suffix('.tmp')
         with open(tmp, 'w') as f:
-            json.dump({'timestamp': time.time(), 'timeline': timeline, 'resets_at': seven_day.get('resets_at')}, f)
+            json.dump({'timestamp': time.time(), 'timeline': timeline,
+                       'metered_cost': metered_cost,
+                       'resets_at': seven_day.get('resets_at')}, f)
         tmp.rename(cache_file)
     except OSError:
         pass
 
-    return timeline
+    return timeline, metered_cost
 
 def _scan_weekly_timeline(resets_at_str, num_segments):
-    """Scan JSONL transcripts and build token timeline for the 7-day window."""
+    """Scan JSONL transcripts: token timeline + 従量モデル分コストを同時集計。"""
     timeline = [0] * num_segments
+    metered_cost = 0.0
     total_seconds = 7 * 86400
     seg_seconds = total_seconds / num_segments
 
@@ -4200,9 +4239,11 @@ def _scan_weekly_timeline(resets_at_str, num_segments):
 
                             entry_type = entry.get('type')
                             usage = None
+                            entry_model = None
                             if entry_type == 'assistant':
                                 msg = entry.get('message', {})
                                 usage = msg.get('usage') if msg else entry.get('usage')
+                                entry_model = (msg or {}).get('model')
                             if not usage:
                                 continue
 
@@ -4226,6 +4267,7 @@ def _scan_weekly_timeline(resets_at_str, num_segments):
 
                             tokens = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
                             timeline[seg] += tokens
+                            metered_cost += _metered_usage_cost(entry_model, usage)
 
                         except (json.JSONDecodeError, ValueError, KeyError):
                             continue
@@ -4235,16 +4277,17 @@ def _scan_weekly_timeline(resets_at_str, num_segments):
     except (ValueError, TypeError) as e:
         print(f"[ccsl] weekly scan error: {e}", file=sys.stderr)
 
-    return timeline
+    return timeline, metered_cost
 
-def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
+def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20, metered_cost=None):
     """Generate Weekly line display (Line 4).
-    Format: Weekly:  ▁▂▃▅▆▇█▃ [64%] 32m, Extra: 7% $3.59/$50
+    Format: Weekly:  ▁▂▃▅▆▇█▃ [64%] 32m, $34.20, Ext: 23% $11.50/$50
 
     Args:
         ratelimit_data: Rate limit data dict
         weekly_timeline: Weekly timeline data for sparkline
         sparkline_width: Width of sparkline/progress bar (default: 20)
+        metered_cost: 7 日窓の従量モデル分コスト (USD)。None/0 なら非表示
     """
     if not ratelimit_data:
         return None
@@ -4299,6 +4342,11 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
                 parts.append(f" {Colors.BRIGHT_WHITE}{days}d{hours}h{mins:02d}m{Colors.RESET}")
         except (ValueError, TypeError):
             pass
+
+    # 7 日窓の従量モデル分コスト (Ext = 財布の現在地、はその後ろで最後尾を維持)
+    if metered_cost and metered_cost > 0:
+        cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
+        parts.append(f", {cost_color}{format_cost(metered_cost)}{Colors.RESET}")
 
     # Extra usage info
     extra = ratelimit_data.get('extra_usage')

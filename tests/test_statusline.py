@@ -658,16 +658,20 @@ class TestSmoke:
         self._assert_output(result)
 
     def test_exceeds_200k(self):
+        """exceeds_200k が来ても PREMIUM/PRM/>200K バッジは出さない (v1.0.20 で全廃)"""
         data = json.dumps({
             "model": {"display_name": "Opus 4.6"},
+            "exceeds_200k_tokens": True,
             "context_window": {
-                "context_window_size": 200000,
-                "used_percentage": 85,
-                "exceeds_200k_tokens": True,
+                "context_window_size": 1000000,
+                "used_percentage": 35,
             },
         })
         result = self._run(data)
         self._assert_output(result)
+        assert 'PREMIUM' not in result.stdout
+        assert 'PRM' not in result.stdout
+        assert '>200K' not in result.stdout
 
     def test_null_current_usage(self):
         """Regression: current_usage=null caused AttributeError (session start state)."""
@@ -1493,6 +1497,62 @@ class TestCalculateMeteredCostFromTranscript:
     def test_missing_transcript_returns_none(self, tmp_path):
         assert statusline.calculate_metered_cost_from_transcript(None) is None
         assert statusline.calculate_metered_cost_from_transcript(str(tmp_path / 'nope.jsonl')) is None
+
+
+class TestMeteredCostFromMessages:
+    """5h ブロック窓の従量コスト (_metered_cost_from_messages)"""
+
+    @staticmethod
+    def _entry(model, usage, uuid=None, request_id=None):
+        return {'type': 'assistant', 'model': model, 'usage': usage,
+                'uuid': uuid, 'requestId': request_id}
+
+    def test_sums_only_metered(self):
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0}
+        messages = [
+            self._entry('claude-fable-5', usage),       # $10.00
+            self._entry('claude-opus-4-8', usage),      # 除外
+            {'type': 'user'},
+        ]
+        assert abs(statusline._metered_cost_from_messages(messages) - 10.00) < 0.001
+
+    def test_dedup(self):
+        usage = {'input_tokens': 0, 'output_tokens': 1_000_000}
+        msg = self._entry('claude-fable-5', usage, uuid='u1', request_id='r1')
+        assert abs(statusline._metered_cost_from_messages([msg, msg]) - 50.00) < 0.001
+
+    def test_tuple_form_and_empty(self):
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0}
+        messages = [(None, self._entry('claude-fable-5', usage))]
+        assert abs(statusline._metered_cost_from_messages(messages) - 10.00) < 0.001
+        assert statusline._metered_cost_from_messages(None) == 0
+        assert statusline._metered_cost_from_messages([]) == 0
+
+
+class TestWeeklyLineMeteredCost:
+    """Weekly 行の従量コスト表示 (get_weekly_line metered_cost)"""
+
+    @staticmethod
+    def _ratelimit(extra=None):
+        rl = {'seven_day': {'utilization': 30,
+                            'resets_at': (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()}}
+        if extra:
+            rl['extra_usage'] = extra
+        return rl
+
+    def test_cost_appears_before_ext(self):
+        line = statusline.get_weekly_line(
+            self._ratelimit(extra={'is_enabled': True, 'used_credits': 1150, 'monthly_limit': 5000}),
+            metered_cost=34.20)
+        plain = statusline.strip_ansi(line)
+        assert '$34.20' in plain
+        assert plain.index('$34.20') < plain.index('Ext:')
+
+    def test_no_cost_when_none_or_zero(self):
+        plain_none = statusline.strip_ansi(statusline.get_weekly_line(self._ratelimit(), metered_cost=None))
+        plain_zero = statusline.strip_ansi(statusline.get_weekly_line(self._ratelimit(), metered_cost=0))
+        assert '$' not in plain_none
+        assert '$' not in plain_zero
 
 
 # ============================================
