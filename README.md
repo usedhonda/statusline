@@ -10,8 +10,8 @@ Enhanced status line for Claude Code showing context usage, session time, and we
 ```
 [Fable 5] | 📁 statusline | 🌿 main | $7.36 | Ext 23% $11.50/$50
 Context:    ████████▒▒▒▒▒▒▒▒▒▒▒▒ [49%] 98.4K/200.0K
-Session:    ▅█▃▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [7%] 67.7M token (5am-10am) $12.40
-Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3d0h24m, $34.20, Ext: 23% $11.50/$50
+Session:    ▅█▃▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [7%] 67.7M token (5am-10am) $12
+Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3d0h24m, $34, Ext: 23% $11.50/$50
 ```
 
 ## Install
