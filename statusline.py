@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.23"
+__version__ = "1.0.24"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2480,8 +2480,7 @@ def format_output_compact(ctx):
 
             if ctx.get('metered') and (ctx.get('metered_cost') or 0) > 0:
                 metered_cost = ctx['metered_cost']
-                cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
-                line1_parts.append(f"{cost_color}{format_cost(metered_cost)}{Colors.RESET}")
+                line1_parts.append(f"{Colors.BRIGHT_YELLOW}{format_cost(metered_cost)}{Colors.RESET}")
 
             lines.append(" ".join(line1_parts))
 
