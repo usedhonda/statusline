@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.22"
+__version__ = "1.0.23"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2233,8 +2233,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     if include_cost and metered:
         metered_cost = ctx.get('metered_cost') or 0
         if metered_cost > 0:
-            cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
-            parts.append(f"{cost_color}{format_cost(metered_cost)}{Colors.RESET}")
+            parts.append(f"{Colors.BRIGHT_YELLOW}{format_cost(metered_cost)}{Colors.RESET}")
         extra = ctx.get('extra_usage')
         if extra and extra.get('is_enabled'):
             used_val = (extra.get('used_credits', 0) or 0) / 100
@@ -2411,8 +2410,7 @@ def format_output_full(ctx, terminal_width=None):
             # 従量モデル使用中: この 5h ブロックの従量分コスト
             block_cost = ctx.get('block_metered_cost') or 0
             if ctx.get('metered') and block_cost > 0:
-                cost_color = Colors.BRIGHT_YELLOW if block_cost > 10 else Colors.BRIGHT_WHITE
-                line3_parts.append(f"{cost_color}${block_cost:.0f}{Colors.RESET}")
+                line3_parts.append(f"{Colors.BRIGHT_YELLOW}${block_cost:.0f}{Colors.RESET}")
             lines.append(" ".join(line3_parts))
         else:
             lines.append(f"{Colors.BRIGHT_CYAN}Session:{Colors.RESET} --")
@@ -2517,8 +2515,7 @@ def format_output_compact(ctx):
                 line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
             block_cost = ctx.get('block_metered_cost') or 0
             if ctx.get('metered') and block_cost > 0:
-                cost_color = Colors.BRIGHT_YELLOW if block_cost > 10 else Colors.BRIGHT_WHITE
-                line3 += f" {cost_color}${block_cost:.0f}{Colors.RESET}"
+                line3 += f" {Colors.BRIGHT_YELLOW}${block_cost:.0f}{Colors.RESET}"
             lines.append(line3)
         else:
             lines.append(f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} --")
@@ -2558,8 +2555,7 @@ def format_output_compact(ctx):
                         pass
                 weekly_cost = ctx.get('weekly_metered_cost') or 0
                 if ctx.get('metered') and weekly_cost > 0:
-                    cost_color = Colors.BRIGHT_YELLOW if weekly_cost > 10 else Colors.BRIGHT_WHITE
-                    line4 += f" {cost_color}${weekly_cost:.0f}{Colors.RESET}"
+                    line4 += f" {Colors.BRIGHT_YELLOW}${weekly_cost:.0f}{Colors.RESET}"
                 lines.append(line4)
             else:
                 lines.append(ctx['weekly_line'])
@@ -4345,8 +4341,7 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20, me
 
     # 7 日窓の従量モデル分コスト (Ext = 財布の現在地、はその後ろで最後尾を維持)
     if metered_cost and metered_cost > 0:
-        cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
-        parts.append(f", {cost_color}${metered_cost:.0f}{Colors.RESET}")
+        parts.append(f", {Colors.BRIGHT_YELLOW}${metered_cost:.0f}{Colors.RESET}")
 
     # Extra usage info
     extra = ratelimit_data.get('extra_usage')
