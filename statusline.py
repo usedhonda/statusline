@@ -6,14 +6,14 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.16"
+__version__ = "1.0.17"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
 # ============================================
 
 # Display settings (True = show, False = hide)
-SHOW_LINE1    = True   # [Sonnet 4] | 🌿 main M2 | 📁 project | 💬 254
+SHOW_LINE1    = True   # [Opus 4.8] | 📁 project | 🌿 main M2  (従量モデルは + 💰/Ext)
 SHOW_LINE2    = True   # Context: 91.8K/200.0K ████████▒▒▒ 58%
 SHOW_LINE3    = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒ 25%
 SHOW_LINE4    = True   # Weekly: [64%] 32m, Extra: 7% $3.59/$50
@@ -1994,6 +1994,60 @@ def format_cost(cost):
     else:
         return f"${cost:.2f}"
 
+
+def calculate_metered_cost_from_transcript(transcript_path):
+    """Sum the estimated USD cost of metered-model messages in this session.
+
+    Mixed sessions (advisors, /model switches) bill only the metered share to
+    usage credits, so the displayed figure must exclude subscription-covered
+    models. Returns None when the transcript is unavailable so the caller can
+    fall back to the all-model session cost.
+    """
+    if not transcript_path:
+        return None
+    path = Path(transcript_path)
+    if not path.exists():
+        return None
+    total = 0.0
+    processed_hashes = set()
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                try:
+                    message_data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message_data, dict) or message_data.get('type') != 'assistant':
+                    continue
+                message = message_data.get('message') if isinstance(message_data.get('message'), dict) else {}
+                msg_model = message.get('model') or ''
+                if not is_metered_model(msg_model):
+                    continue
+                usage = message_data.get('usage') or message.get('usage')
+                if not usage:
+                    continue
+                # External tool compatible deduplication (messageId + requestId)
+                message_id = message_data.get('uuid')
+                request_id = message_data.get('requestId')
+                if message_id and request_id:
+                    unique_hash = f"{message_id}:{request_id}"
+                    if unique_hash in processed_hashes:
+                        continue
+                    processed_hashes.add(unique_hash)
+                _, cache_5m, cache_1h, cache_read = extract_cache_breakdown(usage)
+                total += calculate_cost(
+                    usage.get('input_tokens', 0) or 0,
+                    usage.get('output_tokens', 0) or 0,
+                    0,
+                    cache_read,
+                    model_name=msg_model,
+                    cache_creation_5m=cache_5m,
+                    cache_creation_1h=cache_1h,
+                )
+    except OSError:
+        return None
+    return total
+
 # ========================================
 # RESPONSIVE DISPLAY MODE FORMATTERS
 # ========================================
@@ -2059,6 +2113,16 @@ def should_show_1m_badge(model, context_size):
         return False
     return True
 
+def is_metered_model(model, model_id=""):
+    """従量課金 (usage credits) で請求されるモデルか。
+
+    Fable 5 はサブスク (Pro/Max/Team/Ent) の包含対象外で、利用分が
+    extra usage クレジットから引き落とされる (2026-06-22 でサブスク込み終了)。
+    サブスクへ再包含されたら fable をここから外すだけでよい。
+    """
+    haystack = f"{model} {model_id}".lower()
+    return 'fable' in haystack
+
 def truncate_text(text, max_len):
     """テキストを最大長で切り詰め、...を追加"""
     if len(text) <= max_len:
@@ -2068,8 +2132,7 @@ def truncate_text(text, max_len):
     return text[:max_len-3] + "..."
 
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
-                      include_active_files=True, include_messages=True,
-                      include_lines=True, include_errors=True, include_cost=True,
+                      include_errors=True, include_cost=True,
                       tight_model=False, include_context_badge=True,
                       include_dir=True):
     """Line 1の各パーツを構築する
@@ -2078,11 +2141,8 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         ctx: コンテキスト辞書
         max_branch_len: ブランチ名の最大長（デフォルト20、Noneで無制限）
         max_dir_len: ディレクトリ名の最大長（Noneで無制限）
-        include_active_files: アクティブファイル数を含めるか
-        include_messages: メッセージ数を含めるか
-        include_lines: 行変更数を含めるか
         include_errors: エラー数を含めるか
-        include_cost: コストを含めるか
+        include_cost: 従量コスト（従量モデル使用時のみ実表示）を含めるか
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
         include_context_badge: 1Mコンテキストバッジ（opt-in 1M モデルのみ）を表示するか
         include_dir: ディレクトリを含めるか
@@ -2091,11 +2151,13 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         list: Line 1のパーツのリスト
     """
     parts = []
+    metered = ctx.get('metered', False)
 
-    # Model (normal or tight)
+    # Model (normal or tight) — 従量モデルは ($) / $ バッジ付き
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
     ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+    metered_badge = ("$" if tight_model else "($)") if metered else ""
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
     # Directory (before git branch)
     if include_dir:
@@ -2115,22 +2177,27 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         git_display += Colors.RESET
         parts.append(git_display)
 
-    # Active files
-    if include_active_files and ctx['active_files'] > 0:
-        parts.append(f"{Colors.BRIGHT_WHITE}📝 {ctx['active_files']}{Colors.RESET}")
-
-    # Lines changed
-    if include_lines and (ctx['lines_added'] > 0 or ctx['lines_removed'] > 0):
-        parts.append(f"{Colors.BRIGHT_GREEN}+{ctx['lines_added']}{Colors.RESET}/{Colors.BRIGHT_RED}-{ctx['lines_removed']}{Colors.RESET}")
-
     # Errors
     if include_errors and ctx['error_count'] > 0:
         parts.append(f"{Colors.BRIGHT_RED}⚠️ {ctx['error_count']}{Colors.RESET}")
 
-    # Cost (no emoji)
-    if include_cost and ctx['session_cost'] > 0:
-        cost_color = Colors.BRIGHT_YELLOW if ctx['session_cost'] > 10 else Colors.BRIGHT_WHITE
-        parts.append(f"{cost_color}{format_cost(ctx['session_cost'])}{Colors.RESET}")
+    # Cost — 従量モデル使用時のみ。💰 = 従量分のセッション実費、Ext = 月次クレジット消化
+    if include_cost and metered:
+        metered_cost = ctx.get('metered_cost') or 0
+        if metered_cost > 0:
+            cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
+            parts.append(f"{cost_color}💰 {format_cost(metered_cost)}{Colors.RESET}")
+        extra = ctx.get('extra_usage')
+        if extra and extra.get('is_enabled'):
+            used_val = (extra.get('used_credits', 0) or 0) / 100
+            limit_val = (extra.get('monthly_limit', 0) or 0) / 100
+            if limit_val > 0:
+                pct = int(used_val / limit_val * 100)
+                pct_color = _get_utilization_color(pct)
+                parts.append(
+                    f"{Colors.BRIGHT_YELLOW}Ext{Colors.RESET} {pct_color}{pct}%{Colors.RESET} "
+                    f"{Colors.BRIGHT_WHITE}${used_val:.2f}/${limit_val:.0f}{Colors.RESET}"
+                )
 
     return parts
 
@@ -2212,37 +2279,27 @@ def format_output_full(ctx, terminal_width=None):
         else:
             # Normal Line 1: progressive shrinking by priority
             #
-            # 優先度（高→低）: モデル > ブランチ > git status > 💬メッセージ > 📁ディレクトリ > 💰コスト > +/-行数 > ⚠️エラー > 📝ファイル > (1M)バッジ
+            # 優先度（高→低）: モデル > 💰従量コスト > ブランチ > git status > 📁ディレクトリ > ⚠️エラー > (1M)バッジ
+            # 💰/Ext は従量モデル使用時のみ存在し、実費の警告なので狭くても粘る
             #
             # 段階:
             #  1. 全要素（ブランチ15文字）
-            #  2. 💰コスト・+/-行数・⚠️エラー削除
-            #  3. 📝ファイル削除・モデル名短縮
-            #  4. ブランチ12・ディレクトリ12に短縮
-            #  5. ブランチ10・(1M)バッジ削除
-            #  6. 💬メッセージ削除・ディレクトリ10
-            #  7. 📁ディレクトリ削除（ブランチのほうが重要）
-            #  8. セパレータ " | " → " "（compact風）
+            #  2. ⚠️エラー削除・モデル名短縮
+            #  3. ブランチ12・ディレクトリ12に短縮
+            #  4. 💰コスト削除・ブランチ10・ディレクトリ10・(1M)バッジ削除
+            #  5. 📁ディレクトリ削除（ブランチのほうが重要）
+            #  6. セパレータ " | " → " "（compact風）
             shrink_steps = [
                 # (separator, build_line1_parts kwargs)
                 (" | ", dict(max_branch_len=15)),
-                (" | ", dict(include_cost=False, include_lines=False, include_errors=False)),
-                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
-                             include_active_files=False, tight_model=True, max_branch_len=15)),
-                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
-                             include_active_files=False, tight_model=True,
+                (" | ", dict(include_errors=False, tight_model=True, max_branch_len=15)),
+                (" | ", dict(include_errors=False, tight_model=True,
                              max_branch_len=12, max_dir_len=12)),
-                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
-                             include_active_files=False, tight_model=True,
-                             max_branch_len=10, max_dir_len=12, include_context_badge=False)),
-                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
-                             include_active_files=False, include_messages=False, tight_model=True,
+                (" | ", dict(include_cost=False, include_errors=False, tight_model=True,
                              max_branch_len=10, max_dir_len=10, include_context_badge=False)),
-                (" | ", dict(include_cost=False, include_lines=False, include_errors=False,
-                             include_active_files=False, include_messages=False, include_dir=False,
+                (" | ", dict(include_cost=False, include_errors=False, include_dir=False,
                              tight_model=True, max_branch_len=10, include_context_badge=False)),
-                (" ",   dict(include_cost=False, include_lines=False, include_errors=False,
-                             include_active_files=False, include_messages=False, include_dir=False,
+                (" ",   dict(include_cost=False, include_errors=False, include_dir=False,
                              tight_model=True, max_branch_len=8, include_context_badge=False)),
             ]
             for sep, kwargs in shrink_steps:
@@ -2359,7 +2416,8 @@ def format_output_compact(ctx):
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
             ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            metered_badge = "$" if ctx.get('metered') else ""
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
             line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
 
@@ -2374,6 +2432,11 @@ def format_output_compact(ctx):
                     git_display += f"+{ctx['untracked_files']}"
                 git_display += Colors.RESET
                 line1_parts.append(git_display)
+
+            if ctx.get('metered') and (ctx.get('metered_cost') or 0) > 0:
+                metered_cost = ctx['metered_cost']
+                cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
+                line1_parts.append(f"{cost_color}{format_cost(metered_cost)}{Colors.RESET}")
 
             lines.append(" ".join(line1_parts))
 
@@ -2483,7 +2546,8 @@ def format_output_tight(ctx):
             line1_parts = []
             short_model = shorten_model_name(ctx['model'], tight=True)
             ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            metered_badge = "$" if ctx.get('metered') else ""
+            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
             if ctx['git_branch']:
                 branch = ctx['git_branch']
@@ -2925,6 +2989,9 @@ def main():
                     'utilization': sd.get('used_percentage'),
                     'resets_at': _to_iso(sd.get('resets_at')),
                 }
+            extra = api_rate_limits.get('extra_usage')
+            if isinstance(extra, dict):
+                ratelimit_data['extra_usage'] = extra
             if not ratelimit_data:
                 ratelimit_data = None
             # Compute api_block_start_utc from five_hour resets_at
@@ -3042,6 +3109,15 @@ def main():
         else:
             # Fallback to manual calculation if API cost unavailable
             session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model, model_id)
+
+        # 従量モデル (Fable 等): セッション内の従量分だけを transcript から積算。
+        # transcript が読めなければ全モデル混合の session_cost にフォールバック (安全側)
+        metered = is_metered_model(model, model_id)
+        metered_cost = 0
+        if metered:
+            metered_cost = calculate_metered_cost_from_transcript(data.get('transcript_path'))
+            if metered_cost is None:
+                metered_cost = session_cost
         
         # Format displays - use API tokens for Compact line
         token_display = format_token_count(compact_tokens)
@@ -3182,6 +3258,9 @@ def main():
             'error_count': error_count,
             'task_status': task_status,
             'session_cost': session_cost,
+            'metered': metered,
+            'metered_cost': metered_cost,
+            'extra_usage': (api_rate_limits or {}).get('extra_usage') if isinstance(api_rate_limits, dict) else None,
             'compact_tokens': compact_tokens,
             'compaction_threshold': compaction_threshold,
             'percentage': percentage,
@@ -4216,9 +4295,14 @@ def get_weekly_line(ratelimit_data, weekly_timeline=None, sparkline_width=20):
         limit = extra.get('monthly_limit', 0)
         # API returns cents — always divide by 100
         used_val = used / 100
+        limit_val = limit / 100
         used_str = f"${int(used_val)}" if used_val == int(used_val) else f"${used_val:.2f}"
-        limit_str = f"${limit / 100:.0f}"
+        limit_str = f"${limit_val:.0f}"
         parts.append(f", {Colors.BRIGHT_YELLOW}Ext:{Colors.RESET}")
+        if limit_val > 0:
+            pct = int(used_val / limit_val * 100)
+            pct_color = _get_utilization_color(pct)
+            parts.append(f" {pct_color}{pct}%{Colors.RESET}")
         parts.append(f" {Colors.BRIGHT_WHITE}{used_str}/{limit_str}{Colors.RESET}")
 
     return "".join(parts)

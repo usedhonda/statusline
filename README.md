@@ -8,10 +8,10 @@ Enhanced status line for Claude Code showing context usage, session time, and we
 ![screenshot](assets/screenshot.png)
 
 ```
-[Opus 4.6] | 🌿 main | 📁 statusline | 💬 249 | +24/-45 | 💰 $7.36
+[Fable 5($)] | 📁 statusline | 🌿 main | 💰 $7.36 | Ext 23% $11.50/$50
 Context:    ████████▒▒▒▒▒▒▒▒▒▒▒▒ [49%] 98.4K/200.0K
 Session:    ▅█▃▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [7%] 67.7M token (5am-10am)
-Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3d0h24m, Extra: 7% $3.59/$50
+Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3d0h24m, Ext: 23% $11.50/$50
 ```
 
 ## Install
@@ -45,7 +45,7 @@ python3 install.py
 
 ## What it shows
 
-- **Line 1** — Model, git branch, directory, message count, lines changed, cost
+- **Line 1** — Model, directory, git branch. Metered-billing models (e.g. Fable 5) add a `($)` badge, the session's metered spend, and extra-usage credit consumption
 - **Line 2** — Context window token usage with progress bar and cache ratio
 - **Line 3** — Session sparkline with 5-hour utilization, token count, and time range
 - **Line 4** — Weekly sparkline with 7-day token distribution, remaining time, extra usage
@@ -54,6 +54,7 @@ Supports **1M context** — the context line scales to the active window size (e
 
 ## Features
 
+- Metered-model cost tracking — models billed via usage credits (Fable 5) show their exact spend, computed per-message so mixed-model sessions only count the metered share
 - Context window progress bar with color warnings (yellow 80%, red 90%)
 - 5-hour session sparkline (20 segments, 15min each)
 - Weekly usage sparkline with remaining time and budget tracking

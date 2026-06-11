@@ -1321,14 +1321,17 @@ class TestBuildLine1Parts:
         base.update(overrides)
         return base
 
-    def test_all_flags_true(self):
+    def test_default_non_metered(self):
+        """非従量モデル: 削減後の Line 1 はモデル/dir/branch/⚠️のみ。コスト非表示"""
         ctx = self._make_ctx()
         parts = statusline.build_line1_parts(ctx)
         joined = statusline.strip_ansi(" ".join(parts))
         assert 'Opus 4.6' in joined
         assert 'main' in joined
         assert 'statusline' in joined
-        assert '$1.23' in joined  # cost (no 💰 emoji)
+        assert '$1.23' not in joined  # 非従量ではコスト非表示
+        assert '📝' not in joined     # active files は廃止
+        assert '+10' not in joined and '-5' not in joined  # 行増減は廃止
         # Directory should appear before git branch
         dir_pos = joined.index('statusline')
         branch_pos = joined.index('main')
@@ -1338,9 +1341,6 @@ class TestBuildLine1Parts:
         ctx = self._make_ctx()
         parts = statusline.build_line1_parts(
             ctx,
-            include_active_files=False,
-            include_messages=False,
-            include_lines=False,
             include_errors=False,
             include_cost=False,
             include_dir=False,
@@ -1364,6 +1364,105 @@ class TestBuildLine1Parts:
         parts = statusline.build_line1_parts(ctx, max_branch_len=10, max_dir_len=5)
         joined = statusline.strip_ansi(" ".join(parts))
         assert '...' in joined  # truncation applied
+
+    def test_metered_shows_badge_cost_and_extra(self):
+        """従量モデル: ($) バッジ + 💰従量分 + Ext 消化率"""
+        ctx = self._make_ctx(
+            model='Fable 5',
+            metered=True,
+            metered_cost=7.36,
+            extra_usage={'is_enabled': True, 'used_credits': 1150, 'monthly_limit': 5000},
+        )
+        parts = statusline.build_line1_parts(ctx)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert '[Fable 5($)]' in joined
+        assert '$7.36' in joined
+        assert 'Ext 23% $11.50/$50' in joined
+
+    def test_metered_tight_badge(self):
+        ctx = self._make_ctx(model='Fable 5', metered=True, metered_cost=1.0)
+        parts = statusline.build_line1_parts(ctx, tight_model=True)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert '[Fab5$]' in joined
+
+    def test_metered_without_extra_usage(self):
+        """extra_usage が無効/欠落でも 💰 は出る"""
+        ctx = self._make_ctx(model='Fable 5', metered=True, metered_cost=2.50,
+                             extra_usage={'is_enabled': False})
+        parts = statusline.build_line1_parts(ctx)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert '$2.50' in joined
+        assert 'Ext' not in joined
+
+    def test_metered_include_cost_false_hides_cost(self):
+        ctx = self._make_ctx(model='Fable 5', metered=True, metered_cost=2.50)
+        parts = statusline.build_line1_parts(ctx, include_cost=False)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert '$2.50' not in joined
+        assert '($)' in joined  # バッジは維持
+
+
+class TestIsMeteredModel:
+    def test_fable_variants(self):
+        assert statusline.is_metered_model('Fable 5')
+        assert statusline.is_metered_model('claude-fable-5[1m]')
+        assert statusline.is_metered_model('Fable 5 (1M context)', 'claude-fable-5')
+        assert statusline.is_metered_model('Unknown', 'claude-fable-5')
+
+    def test_subscription_models(self):
+        assert not statusline.is_metered_model('Opus 4.8', 'claude-opus-4-8')
+        assert not statusline.is_metered_model('Sonnet 4.6', 'claude-sonnet-4-6')
+        assert not statusline.is_metered_model('Haiku 4.5', 'claude-haiku-4-5')
+        assert not statusline.is_metered_model('Unknown', '')
+
+
+class TestCalculateMeteredCostFromTranscript:
+    @staticmethod
+    def _write_transcript(tmp_path, lines):
+        p = tmp_path / 'transcript.jsonl'
+        p.write_text('\n'.join(json.dumps(line) for line in lines))
+        return p
+
+    @staticmethod
+    def _assistant(model, usage, uuid=None, request_id=None):
+        d = {'type': 'assistant', 'message': {'model': model, 'usage': usage}}
+        if uuid:
+            d['uuid'] = uuid
+        if request_id:
+            d['requestId'] = request_id
+        return d
+
+    def test_sums_only_metered_messages(self, tmp_path):
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0,
+                 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0}
+        path = self._write_transcript(tmp_path, [
+            self._assistant('claude-fable-5', usage),       # $10.00
+            self._assistant('claude-opus-4-8', usage),      # 除外 (サブスク)
+            {'type': 'user', 'message': {}},
+        ])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        assert abs(cost - 10.00) < 0.001
+
+    def test_dedup_by_uuid_and_request_id(self, tmp_path):
+        usage = {'input_tokens': 0, 'output_tokens': 1_000_000}
+        msg = self._assistant('claude-fable-5', usage, uuid='u1', request_id='r1')
+        path = self._write_transcript(tmp_path, [msg, msg])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        assert abs(cost - 50.00) < 0.001  # 重複は 1 回だけ
+
+    def test_cache_rates_applied(self, tmp_path):
+        usage = {'input_tokens': 0, 'output_tokens': 0,
+                 'cache_creation': {'ephemeral_5m_input_tokens': 1_000_000,
+                                    'ephemeral_1h_input_tokens': 1_000_000},
+                 'cache_read_input_tokens': 1_000_000}
+        path = self._write_transcript(tmp_path, [self._assistant('claude-fable-5', usage)])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        # 5m write 12.5 + 1h write 20.0 + read 1.0 = 33.5
+        assert abs(cost - 33.50) < 0.001
+
+    def test_missing_transcript_returns_none(self, tmp_path):
+        assert statusline.calculate_metered_cost_from_transcript(None) is None
+        assert statusline.calculate_metered_cost_from_transcript(str(tmp_path / 'nope.jsonl')) is None
 
 
 # ============================================
