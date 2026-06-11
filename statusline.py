@@ -6,14 +6,14 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.21"
+__version__ = "1.0.22"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
 # ============================================
 
 # Display settings (True = show, False = hide)
-SHOW_LINE1    = True   # [Opus 4.8] | 📁 project | 🌿 main M2  (従量モデルは + 💰/Ext)
+SHOW_LINE1    = True   # [Opus 4.8] | 📁 project | 🌿 main M2  (従量モデルは + $コスト/Ext)
 SHOW_LINE2    = True   # Context: 91.8K/200.0K ████████▒▒▒ 58%
 SHOW_LINE3    = True   # Session: 1h15m/5h ███▒▒▒▒▒▒▒▒ 25%
 SHOW_LINE4    = True   # Weekly: [64%] 32m, Extra: 7% $3.59/$50
@@ -2234,7 +2234,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         metered_cost = ctx.get('metered_cost') or 0
         if metered_cost > 0:
             cost_color = Colors.BRIGHT_YELLOW if metered_cost > 10 else Colors.BRIGHT_WHITE
-            parts.append(f"{cost_color}💰 {format_cost(metered_cost)}{Colors.RESET}")
+            parts.append(f"{cost_color}{format_cost(metered_cost)}{Colors.RESET}")
         extra = ctx.get('extra_usage')
         if extra and extra.get('is_enabled'):
             used_val = (extra.get('used_credits', 0) or 0) / 100

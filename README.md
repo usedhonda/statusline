@@ -8,7 +8,7 @@ Enhanced status line for Claude Code showing context usage, session time, and we
 ![screenshot](assets/screenshot.png)
 
 ```
-[Fable 5] | 📁 statusline | 🌿 main | 💰 $7.36 | Ext 23% $11.50/$50
+[Fable 5] | 📁 statusline | 🌿 main | $7.36 | Ext 23% $11.50/$50
 Context:    ████████▒▒▒▒▒▒▒▒▒▒▒▒ [49%] 98.4K/200.0K
 Session:    ▅█▃▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [7%] 67.7M token (5am-10am) $12.40
 Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3d0h24m, $34.20, Ext: 23% $11.50/$50
@@ -45,7 +45,7 @@ python3 install.py
 
 ## What it shows
 
-- **Line 1** — Model, directory, git branch. Metered-billing models (e.g. Fable 5) add the cost of the latest turn (💰) and extra-usage credit consumption (Ext)
+- **Line 1** — Model, directory, git branch. Metered-billing models (e.g. Fable 5) add the cost of the latest turn and extra-usage credit consumption (Ext)
 - **Line 2** — Context window token usage with progress bar and cache ratio
 - **Line 3** — Session sparkline with 5-hour utilization, token count, time range, and the 5-hour window's metered spend
 - **Line 4** — Weekly sparkline with 7-day token distribution, remaining time, the 7-day window's metered spend, extra usage
