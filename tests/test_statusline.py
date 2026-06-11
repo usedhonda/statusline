@@ -1541,12 +1541,14 @@ class TestWeeklyLineMeteredCost:
         return rl
 
     def test_cost_appears_before_ext(self):
+        """窓別コストは整数表示 (船長裁定: 1ターン以外は小数点不要)"""
         line = statusline.get_weekly_line(
             self._ratelimit(extra={'is_enabled': True, 'used_credits': 1150, 'monthly_limit': 5000}),
             metered_cost=34.20)
         plain = statusline.strip_ansi(line)
-        assert '$34.20' in plain
-        assert plain.index('$34.20') < plain.index('Ext:')
+        assert '$34' in plain
+        assert '$34.20' not in plain
+        assert plain.index('$34') < plain.index('Ext:')
 
     def test_no_cost_when_none_or_zero(self):
         plain_none = statusline.strip_ansi(statusline.get_weekly_line(self._ratelimit(), metered_cost=None))
