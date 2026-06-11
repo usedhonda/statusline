@@ -1365,8 +1365,8 @@ class TestBuildLine1Parts:
         joined = statusline.strip_ansi(" ".join(parts))
         assert '...' in joined  # truncation applied
 
-    def test_metered_shows_badge_cost_and_extra(self):
-        """従量モデル: ($) バッジ + 💰従量分 + Ext 消化率"""
+    def test_metered_shows_cost_and_extra(self):
+        """従量モデル: 💰従量分 + Ext 消化率。バッジは付けない (船長裁定)"""
         ctx = self._make_ctx(
             model='Fable 5',
             metered=True,
@@ -1375,12 +1375,13 @@ class TestBuildLine1Parts:
         )
         parts = statusline.build_line1_parts(ctx)
         joined = statusline.strip_ansi(" ".join(parts))
-        assert '[Fable 5($)]' in joined
+        assert '[Fable 5]' in joined
+        assert '($)' not in joined
         assert '$7.36' in joined
         assert 'Ext 23% $11.50/$50' in joined
 
     def test_metered_tight_no_badge(self):
-        """tight モードでは $ バッジを付けない (船長裁定: Fab5$ の $ は余計)"""
+        """tight モードもバッジなし"""
         ctx = self._make_ctx(model='Fable 5', metered=True, metered_cost=1.0)
         parts = statusline.build_line1_parts(ctx, tight_model=True)
         joined = statusline.strip_ansi(" ".join(parts))
@@ -1401,7 +1402,6 @@ class TestBuildLine1Parts:
         parts = statusline.build_line1_parts(ctx, include_cost=False)
         joined = statusline.strip_ansi(" ".join(parts))
         assert '$2.50' not in joined
-        assert '($)' in joined  # バッジは維持
 
 
 class TestIsMeteredModel:
@@ -1438,12 +1438,40 @@ class TestCalculateMeteredCostFromTranscript:
         usage = {'input_tokens': 1_000_000, 'output_tokens': 0,
                  'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0}
         path = self._write_transcript(tmp_path, [
+            {'type': 'user', 'message': {'content': 'やって'}},
             self._assistant('claude-fable-5', usage),       # $10.00
             self._assistant('claude-opus-4-8', usage),      # 除外 (サブスク)
-            {'type': 'user', 'message': {}},
         ])
         cost = statusline.calculate_metered_cost_from_transcript(str(path))
         assert abs(cost - 10.00) < 0.001
+
+    def test_resets_at_each_human_turn(self, tmp_path):
+        """💰 は直前ターン分のみ。過去ターンの従量費は含めない"""
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0}
+        path = self._write_transcript(tmp_path, [
+            {'type': 'user', 'message': {'content': '1回目'}},
+            self._assistant('claude-fable-5', usage),   # 前ターン: リセットされる
+            self._assistant('claude-fable-5', usage),
+            {'type': 'user', 'message': {'content': '2回目'}},
+            self._assistant('claude-fable-5', usage),   # 直前ターン: $10.00
+        ])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        assert abs(cost - 10.00) < 0.001
+
+    def test_tool_result_and_meta_do_not_reset(self, tmp_path):
+        """tool_result (type:user) や isMeta はターン境界にしない"""
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0}
+        path = self._write_transcript(tmp_path, [
+            {'type': 'user', 'message': {'content': 'やって'}},
+            self._assistant('claude-fable-5', usage),
+            {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'ok'}]}},
+            self._assistant('claude-fable-5', usage),
+            {'type': 'user', 'isMeta': True, 'message': {'content': 'meta note'}},
+            self._assistant('claude-fable-5', usage),
+        ])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        assert abs(cost - 30.00) < 0.001  # 3 メッセージ全部が同一ターン
 
     def test_dedup_by_uuid_and_request_id(self, tmp_path):
         usage = {'input_tokens': 0, 'output_tokens': 1_000_000}

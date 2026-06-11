@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.18"
+__version__ = "1.0.19"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -1996,12 +1996,14 @@ def format_cost(cost):
 
 
 def calculate_metered_cost_from_transcript(transcript_path):
-    """Sum the estimated USD cost of metered-model messages in this session.
+    """直前ターン (最後の人間プロンプト以降) の従量モデル分コストを USD で返す。
 
-    Mixed sessions (advisors, /model switches) bill only the metered share to
-    usage credits, so the displayed figure must exclude subscription-covered
-    models. Returns None when the transcript is unavailable so the caller can
-    fall back to the all-model session cost.
+    「いまの一発がいくらだったか」を出すため、累計ではなくターン単位で集計する:
+    人間のユーザー発話 (tool_result や meta ではない user メッセージ) を見るたびに
+    積算をリセットし、それ以降の従量モデル (Fable 等) の assistant メッセージだけを
+    単価換算で合算する。応答中は伸び、応答完了時 = そのターンの実費になる。
+    サブスク込みモデルの分は含めない。transcript が読めなければ None (呼び出し側で
+    フォールバック)。
     """
     if not transcript_path:
         return None
@@ -2017,9 +2019,24 @@ def calculate_metered_cost_from_transcript(transcript_path):
                     message_data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(message_data, dict) or message_data.get('type') != 'assistant':
+                if not isinstance(message_data, dict):
                     continue
                 message = message_data.get('message') if isinstance(message_data.get('message'), dict) else {}
+                if message_data.get('type') == 'user' and not message_data.get('isMeta'):
+                    # 人間のプロンプトでターン境界。tool_result (type:user で届く) は除外
+                    content = message.get('content')
+                    is_human = isinstance(content, str) or (
+                        isinstance(content, list) and not any(
+                            isinstance(b, dict) and b.get('type') == 'tool_result'
+                            for b in content
+                        )
+                    )
+                    if is_human:
+                        total = 0.0
+                        processed_hashes.clear()
+                    continue
+                if message_data.get('type') != 'assistant':
+                    continue
                 msg_model = message.get('model') or ''
                 if not is_metered_model(msg_model):
                     continue
@@ -2153,11 +2170,10 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     parts = []
     metered = ctx.get('metered', False)
 
-    # Model (normal or tight) — 従量モデルは ($) バッジ付き (tight では省略)
+    # Model (normal or tight) — 従量モデルもバッジなし (💰/Ext の存在がサイン)
     model_name = shorten_model_name(ctx['model'], tight=tight_model)
     ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-    metered_badge = "($)" if metered and not tight_model else ""
-    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{metered_badge}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
 
     # Directory (before git branch)
     if include_dir:
@@ -3108,14 +3124,12 @@ def main():
             # Fallback to manual calculation if API cost unavailable
             session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model, model_id)
 
-        # 従量モデル (Fable 等): セッション内の従量分だけを transcript から積算。
-        # transcript が読めなければ全モデル混合の session_cost にフォールバック (安全側)
+        # 従量モデル (Fable 等): 直前ターンの従量分だけを transcript から積算。
+        # transcript が読めなければ非表示 (累計値で誤解させるより隠す)
         metered = is_metered_model(model, model_id)
         metered_cost = 0
         if metered:
-            metered_cost = calculate_metered_cost_from_transcript(data.get('transcript_path'))
-            if metered_cost is None:
-                metered_cost = session_cost
+            metered_cost = calculate_metered_cost_from_transcript(data.get('transcript_path')) or 0
         
         # Format displays - use API tokens for Compact line
         token_display = format_token_count(compact_tokens)
