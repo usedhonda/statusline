@@ -1407,6 +1407,17 @@ class TestBuildLine1Parts:
         joined = statusline.strip_ansi(" ".join(parts))
         assert '$2.50' not in joined
 
+    def test_include_extra_false_keeps_cost_drops_ext(self):
+        """縮退時は長い Ext を先に落とし、ターン金額は残す"""
+        ctx = self._make_ctx(
+            model='Fable 5', metered=True, metered_cost=2.50,
+            extra_usage={'is_enabled': True, 'used_credits': 1150, 'monthly_limit': 5000},
+        )
+        parts = statusline.build_line1_parts(ctx, include_extra=False)
+        joined = statusline.strip_ansi(" ".join(parts))
+        assert '$2.50' in joined
+        assert 'Ext' not in joined
+
 
 class TestIsMeteredModel:
     def test_fable_variants(self):
@@ -1458,6 +1469,31 @@ class TestCalculateMeteredCostFromTranscript:
             self._assistant('claude-fable-5', usage),
             {'type': 'user', 'message': {'content': '2回目'}},
             self._assistant('claude-fable-5', usage),   # 直前ターン: $10.00
+        ])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        assert abs(cost - 10.00) < 0.001
+
+    def test_falls_back_to_last_completed_turn(self, tmp_path):
+        """プロンプト直後 (現行ターン無消費) は直前完了ターンの額を返す — 金額が消えない"""
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0}
+        path = self._write_transcript(tmp_path, [
+            {'type': 'user', 'message': {'content': '1回目'}},
+            self._assistant('claude-fable-5', usage),   # 完了ターン: $10.00
+            self._assistant('claude-fable-5', usage),   # 計 $20.00
+            {'type': 'user', 'message': {'content': '2回目 (送信直後、応答まだ)'}},
+        ])
+        cost = statusline.calculate_metered_cost_from_transcript(str(path))
+        assert abs(cost - 20.00) < 0.001
+
+    def test_fallback_skips_empty_turns(self, tmp_path):
+        """無消費ターン (opus だけ等) を挟んでも、最後に消費のあったターンの額が残る"""
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 0}
+        path = self._write_transcript(tmp_path, [
+            {'type': 'user', 'message': {'content': '1回目'}},
+            self._assistant('claude-fable-5', usage),   # $10.00
+            {'type': 'user', 'message': {'content': '2回目'}},
+            self._assistant('claude-opus-4-8', usage),  # 従量ゼロのターン
+            {'type': 'user', 'message': {'content': '3回目 (応答まだ)'}},
         ])
         cost = statusline.calculate_metered_cost_from_transcript(str(path))
         assert abs(cost - 10.00) < 0.001
@@ -1611,6 +1647,37 @@ class TestFormatters:
         assert len(lines) == 4
         for line in lines:
             assert len(statusline.strip_ansi(line)) > 0
+
+    def _make_metered_ctx(self):
+        ctx = self._make_full_ctx()
+        ctx.update({
+            'model': 'Fable 5',
+            'metered': True,
+            'metered_cost': 8.09,
+            'block_metered_cost': 455.0,
+            'weekly_metered_cost': 1982.0,
+            'extra_usage': {'is_enabled': True, 'used_credits': 1150, 'monthly_limit': 5000},
+        })
+        return ctx
+
+    def test_turn_cost_visible_in_every_size_case(self):
+        """ターン金額が全サイズケースで見えること (2026-06-11 船長指摘: 雑にやらない)"""
+        ctx = self._make_metered_ctx()
+        # full: 広い幅 (Ext あり)
+        line1 = statusline.strip_ansi(statusline.format_output_full(ctx, terminal_width=200)[0])
+        assert '$8.09' in line1 and 'Ext' in line1
+        # full: 狭い幅 (Ext は落ちても金額は残る)
+        line1 = statusline.strip_ansi(statusline.format_output_full(ctx, terminal_width=62)[0])
+        assert '$8.09' in line1
+        # compact
+        line1 = statusline.strip_ansi(statusline.format_output_compact(ctx)[0])
+        assert '$8.09' in line1
+        # tight
+        line1 = statusline.strip_ansi(statusline.format_output_tight(ctx)[0])
+        assert '$8.09' in line1
+        # minimal (幅が許すとき)
+        line = statusline.strip_ansi(statusline.format_output_minimal(ctx, terminal_width=80)[0])
+        assert '$8.09' in line
 
     def test_format_output_compact(self):
         ctx = self._make_full_ctx()

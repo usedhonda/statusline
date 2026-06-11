@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.24"
+__version__ = "1.0.25"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -1997,12 +1997,17 @@ def format_cost(cost):
 
 
 def calculate_metered_cost_from_transcript(transcript_path):
-    """直前ターン (最後の人間プロンプト以降) の従量モデル分コストを USD で返す。
+    """直前ターンの従量モデル分コストを USD で返す。
 
     「いまの一発がいくらだったか」を出すため、累計ではなくターン単位で集計する:
     人間のユーザー発話 (tool_result や meta ではない user メッセージ) を見るたびに
     積算をリセットし、それ以降の従量モデル (Fable 等) の assistant メッセージだけを
     単価換算で合算する。応答中は伸び、応答完了時 = そのターンの実費になる。
+
+    **フォールバック**: 現行ターンがまだ無消費 (プロンプト直後など) のときは、
+    直前に完了したターンの額を返す。プロンプトを打った瞬間に金額が消えて
+    「見えないことが多い」となるのを防ぐ (2026-06-11 船長指摘)。
+
     サブスク込みモデルの分は含めない。transcript が読めなければ None (呼び出し側で
     フォールバック)。
     """
@@ -2012,6 +2017,7 @@ def calculate_metered_cost_from_transcript(transcript_path):
     if not path.exists():
         return None
     total = 0.0
+    prev_turn_total = 0.0
     processed_hashes = set()
     try:
         with open(path, 'r') as f:
@@ -2033,6 +2039,8 @@ def calculate_metered_cost_from_transcript(transcript_path):
                         )
                     )
                     if is_human:
+                        if total > 0:
+                            prev_turn_total = total
                         total = 0.0
                         processed_hashes.clear()
                     continue
@@ -2055,7 +2063,7 @@ def calculate_metered_cost_from_transcript(transcript_path):
                 total += _metered_usage_cost(msg_model, usage)
     except OSError:
         return None
-    return total
+    return total if total > 0 else prev_turn_total
 
 
 def _metered_usage_cost(model, usage):
@@ -2182,6 +2190,7 @@ def truncate_text(text, max_len):
 
 def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_errors=True, include_cost=True,
+                      include_extra=True,
                       tight_model=False, include_context_badge=True,
                       include_dir=True):
     """Line 1の各パーツを構築する
@@ -2192,6 +2201,8 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         max_dir_len: ディレクトリ名の最大長（Noneで無制限）
         include_errors: エラー数を含めるか
         include_cost: 従量コスト（従量モデル使用時のみ実表示）を含めるか
+        include_extra: Ext (月次クレジット消化) を含めるか。コストより長いので
+            縮退時はこちらを先に落とす
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
         include_context_badge: 1Mコンテキストバッジ（opt-in 1M モデルのみ）を表示するか
         include_dir: ディレクトリを含めるか
@@ -2229,12 +2240,12 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     if include_errors and ctx['error_count'] > 0:
         parts.append(f"{Colors.BRIGHT_RED}⚠️ {ctx['error_count']}{Colors.RESET}")
 
-    # Cost — 従量モデル使用時のみ。💰 = 従量分のセッション実費、Ext = 月次クレジット消化
+    # Cost — 従量モデル使用時のみ。直前ターンの従量実費 + Ext (月次クレジット消化)
     if include_cost and metered:
         metered_cost = ctx.get('metered_cost') or 0
         if metered_cost > 0:
             parts.append(f"{Colors.BRIGHT_YELLOW}{format_cost(metered_cost)}{Colors.RESET}")
-        extra = ctx.get('extra_usage')
+        extra = ctx.get('extra_usage') if include_extra else None
         if extra and extra.get('is_enabled'):
             used_val = (extra.get('used_credits', 0) or 0) / 100
             limit_val = (extra.get('monthly_limit', 0) or 0) / 100
@@ -2326,14 +2337,14 @@ def format_output_full(ctx, terminal_width=None):
         else:
             # Normal Line 1: progressive shrinking by priority
             #
-            # 優先度（高→低）: モデル > 💰従量コスト > ブランチ > git status > 📁ディレクトリ > ⚠️エラー > (1M)バッジ
-            # 💰/Ext は従量モデル使用時のみ存在し、実費の警告なので狭くても粘る
+            # 優先度（高→低）: モデル > 従量コスト > ブランチ > git status > 📁ディレクトリ > Ext > ⚠️エラー > (1M)バッジ
+            # 従量コストは実費の警告なので最後まで落とさない。長い Ext を先に落とす
             #
             # 段階:
             #  1. 全要素（ブランチ15文字）
             #  2. ⚠️エラー削除・モデル名短縮
             #  3. ブランチ12・ディレクトリ12に短縮
-            #  4. 💰コスト削除・ブランチ10・ディレクトリ10・(1M)バッジ削除
+            #  4. Ext 削除・ブランチ10・ディレクトリ10・(1M)バッジ削除
             #  5. 📁ディレクトリ削除（ブランチのほうが重要）
             #  6. セパレータ " | " → " "（compact風）
             shrink_steps = [
@@ -2342,11 +2353,11 @@ def format_output_full(ctx, terminal_width=None):
                 (" | ", dict(include_errors=False, tight_model=True, max_branch_len=15)),
                 (" | ", dict(include_errors=False, tight_model=True,
                              max_branch_len=12, max_dir_len=12)),
-                (" | ", dict(include_cost=False, include_errors=False, tight_model=True,
+                (" | ", dict(include_extra=False, include_errors=False, tight_model=True,
                              max_branch_len=10, max_dir_len=10, include_context_badge=False)),
-                (" | ", dict(include_cost=False, include_errors=False, include_dir=False,
+                (" | ", dict(include_extra=False, include_errors=False, include_dir=False,
                              tight_model=True, max_branch_len=10, include_context_badge=False)),
-                (" ",   dict(include_cost=False, include_errors=False, include_dir=False,
+                (" ",   dict(include_extra=False, include_errors=False, include_dir=False,
                              tight_model=True, max_branch_len=8, include_context_badge=False)),
             ]
             for sep, kwargs in shrink_steps:
@@ -2603,6 +2614,9 @@ def format_output_tight(ctx):
                 git_display += Colors.RESET
                 line1_parts.append(git_display)
 
+            if ctx.get('metered') and (ctx.get('metered_cost') or 0) > 0:
+                line1_parts.append(f"{Colors.BRIGHT_YELLOW}{format_cost(ctx['metered_cost'])}{Colors.RESET}")
+
             lines.append(" ".join(line1_parts))
 
     # Line 2: Compact tokens (ultra short)
@@ -2702,6 +2716,12 @@ def format_output_minimal(ctx, terminal_width):
     parts.append(f"{Colors.BRIGHT_WHITE}{compact_display}/{threshold_display}{Colors.RESET}")
 
     line = " ".join(parts)
+
+    # Add metered turn cost if it fits (\u5f93\u91cf\u30e2\u30c7\u30eb\u4f7f\u7528\u6642\u306e\u307f)
+    if ctx.get('metered') and (ctx.get('metered_cost') or 0) > 0:
+        cost_part = f" {Colors.BRIGHT_YELLOW}{format_cost(ctx['metered_cost'])}{Colors.RESET}"
+        if get_display_width(line + cost_part) <= terminal_width:
+            line += cost_part
 
     # Add cache ratio if it fits
     if ctx['cache_ratio'] >= 50:
