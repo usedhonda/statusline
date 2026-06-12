@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.26"
+__version__ = "1.0.27"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -731,8 +731,10 @@ def calculate_tokens_from_transcript(file_path):
                         assistant_messages += 1
                         message_count += 1
                     
-                    # Count errors
-                    if 'error' in entry or entry.get('type') == 'error':
+                    # Count errors: isApiErrorMessage marks real user-visible API
+                    # errors; a bare 'error' key also rides on system/api_error
+                    # entries that were auto-retried (not real failures)
+                    if entry.get('isApiErrorMessage'):
                         error_count += 1
                     
                     # 最後の有効なassistantメッセージのusageを使用（累積値）
@@ -844,7 +846,11 @@ def load_all_messages_chronologically(hours_limit=6, transcript_files=None):
                                 'type': entry.get('type'),
                                 'usage': entry.get('message', {}).get('usage') if entry.get('message') else entry.get('usage'),
                                 'model': entry.get('message', {}).get('model') if entry.get('message') else None,
-                                'uuid': entry.get('uuid'),  # For deduplication
+                                'uuid': entry.get('uuid'),  # For deduplication (fallback)
+                                # One API response spans multiple JSONL lines (one per
+                                # content block), each repeating the same usage under a
+                                # distinct uuid — message.id is the real dedup key
+                                'message_id': entry.get('message', {}).get('id') if entry.get('message') else None,
                                 'requestId': entry.get('requestId'),  # For deduplication
                                 'file_path': transcript_file
                             })
@@ -948,7 +954,12 @@ def detect_five_hour_blocks(all_messages, block_duration_hours=5):
     
     return blocks
 def floor_to_hour(timestamp):
-    """Floor timestamp to hour boundary"""
+    """Floor timestamp to hour boundary.
+
+    NOTE: hour-floored block starts are the ccusage-compatible FALLBACK for
+    API-key users without stdin rate_limits. The real rate-limit window starts
+    at the exact minute of the first message — that path derives the start from
+    five_hour.resets_at - 5h and never calls this."""
     # Convert to UTC if timezone-aware
     if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo:
         utc_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
@@ -1041,8 +1052,9 @@ def calculate_block_statistics_from_messages(block):
     # Process ALL messages in the block (from all projects) with enhanced deduplication
     for i, message in enumerate(block['messages']):
         if message.get('type') == 'assistant' and message.get('usage'):
-            # Primary deduplication: messageId + requestId
-            message_id = message.get('uuid') or message.get('message_id')
+            # Primary deduplication: message.id + requestId (entry uuid differs
+            # per content-block line of the same response — fallback only)
+            message_id = message.get('message_id') or message.get('uuid')
             request_id = message.get('requestId') or message.get('request_id')
             session_id = message.get('session_id')
 
@@ -1176,27 +1188,28 @@ def calculate_tokens_from_jsonl_with_dedup(transcript_file, block_start_time, du
                     
                     total_messages += 1
                     
-                    # External tool compatible deduplication (messageId + requestId only)
-                    message_id = message_data.get('uuid')
+                    # Deduplication by message.id + requestId (entry uuid differs per
+                    # content-block line of the same response — fallback only)
+                    message_id = (message_data.get('message') or {}).get('id') or message_data.get('uuid')
                     request_id = message_data.get('requestId')
-                    
+
                     unique_hash = None
                     if message_id and request_id:
                         unique_hash = f"{message_id}:{request_id}"
-                    
+
                     if unique_hash:
                         if unique_hash in processed_hashes:
                             skipped_duplicates += 1
                             continue
                         processed_hashes.add(unique_hash)
-                    
+
                     # メッセージ種別カウント
                     msg_type = message_data.get('type', '')
                     if msg_type == 'user':
                         user_messages += 1
                     elif msg_type == 'assistant':
                         assistant_messages += 1
-                    elif msg_type == 'error':
+                    if message_data.get('isApiErrorMessage'):
                         error_count += 1
                     
                     # トークン計算（assistantメッセージのusageのみ）
@@ -1254,33 +1267,44 @@ def generate_burn_timeline_from_jsonl(transcript_file, block_start_utc, duration
         
         timeline = [0] * 20  # 20 segments (5 hours / 15 minutes each)
         block_end_time = block_start_utc + timedelta(seconds=duration_seconds)
-        
+        processed_hashes = set()
+
         with open(transcript_file, 'r') as f:
             for line in f:
                 try:
                     message_data = json.loads(line.strip())
                     if not message_data or message_data.get('type') != 'assistant':
                         continue
-                    
+
                     # Get timestamp
                     timestamp_str = message_data.get('timestamp')
                     if not timestamp_str:
                         continue
-                    
+
                     msg_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                     if msg_time.tzinfo:
                         msg_time_utc = msg_time.astimezone(timezone.utc).replace(tzinfo=None)
                     else:
                         msg_time_utc = msg_time
-                    
+
                     # Check if within 5-hour window
                     if not (block_start_utc <= msg_time_utc <= block_end_time):
                         continue
-                    
+
                     # Get usage data
                     usage = message_data.get('usage') or message_data.get('message', {}).get('usage')
                     if not usage:
                         continue
+
+                    # One response spans multiple JSONL lines repeating the same
+                    # usage — count each message.id:requestId once
+                    message_id = (message_data.get('message') or {}).get('id') or message_data.get('uuid')
+                    request_id = message_data.get('requestId')
+                    if message_id and request_id:
+                        unique_hash = f"{message_id}:{request_id}"
+                        if unique_hash in processed_hashes:
+                            continue
+                        processed_hashes.add(unique_hash)
                     
                     # Calculate elapsed minutes from block start
                     elapsed_seconds = (msg_time_utc - block_start_utc).total_seconds()
@@ -1331,26 +1355,27 @@ def calculate_block_statistics_fallback(block):
         else:
             message_data = message
 
-        # External tool compatible deduplication (messageId + requestId only)
-        message_id = message_data.get('uuid')  # 実際のメッセージID
+        # Deduplication by message.id + requestId (entry uuid differs per
+        # content-block line of the same response — fallback only)
+        message_id = message_data.get('message_id') or message_data.get('uuid')
         request_id = message_data.get('requestId')  # requestIdは最上位
-        
+
         unique_hash = None
         if message_id and request_id:
             unique_hash = f"{message_id}:{request_id}"
-        
+
         if unique_hash:
             if unique_hash in processed_hashes:
                 skipped_duplicates += 1
                 continue  # 重複メッセージをスキップ
             processed_hashes.add(unique_hash)
-        
+
         # メッセージ種別のカウント
         if message_data['type'] == 'user':
             user_messages += 1
         elif message_data['type'] == 'assistant':
             assistant_messages += 1
-        elif message_data['type'] == 'error':
+        if message_data.get('isApiErrorMessage'):
             error_count += 1
         
         # トークン使用量の合計（assistantメッセージのusageのみ - 外部ツール互換）
@@ -1506,10 +1531,21 @@ def generate_real_burn_timeline(block_stats, current_block, api_block_start_utc=
             else:
                 block_start_utc = block_start
 
+        processed_hashes = set()
         for message in current_block['messages']:
             try:
                 if message.get('type') != 'assistant' or not message.get('usage'):
                     continue
+
+                # One response spans multiple JSONL lines repeating the same
+                # usage — count each message.id:requestId once
+                message_id = message.get('message_id') or message.get('uuid')
+                request_id = message.get('requestId')
+                if message_id and request_id:
+                    unique_hash = f"{message_id}:{request_id}"
+                    if unique_hash in processed_hashes:
+                        continue
+                    processed_hashes.add(unique_hash)
 
                 msg_time = message.get('timestamp')
                 if not msg_time:
@@ -2052,8 +2088,9 @@ def calculate_metered_cost_from_transcript(transcript_path):
                 usage = message_data.get('usage') or message.get('usage')
                 if not usage:
                     continue
-                # External tool compatible deduplication (messageId + requestId)
-                message_id = message_data.get('uuid')
+                # Dedup by message.id + requestId (entry uuid differs per
+                # content-block line of the same response — fallback only)
+                message_id = message.get('id') or message_data.get('uuid')
                 request_id = message_data.get('requestId')
                 if message_id and request_id:
                     unique_hash = f"{message_id}:{request_id}"
@@ -2066,12 +2103,45 @@ def calculate_metered_cost_from_transcript(transcript_path):
     return total if total > 0 else prev_turn_total
 
 
+# advisor_message イテレーション (flat usage に含まれない別モデル分) を従量コストへ
+# 加算するか。extra usage クレジットで advisor 分が課金されるか実証が取れるまで除外。
+# 検証手順は docs/MODEL_UPDATE_CHECKLIST.md §2.6
+_INCLUDE_ADVISOR_ITERATIONS = False
+
+
+def _advisor_iterations(usage):
+    """usage.iterations のうち advisor_message 型を返す。
+
+    flat usage は message 型イテレーションの合計と一致する (実測 277/277)。
+    advisor_message だけが flat に含まれず、親と別モデル (例: fable-5 配下の
+    opus-4-8) で動く。不変条件 flat == sum(message型) が崩れていたら、CC が
+    advisor を flat に畳み込んだとみなし空を返す (二重計上防止)。"""
+    iterations = usage.get('iterations') if isinstance(usage, dict) else None
+    if not isinstance(iterations, list):
+        return []
+    advisors = [i for i in iterations
+                if isinstance(i, dict) and i.get('type') == 'advisor_message']
+    if not advisors:
+        return []
+    msg_iters = [i for i in iterations
+                 if isinstance(i, dict) and i.get('type') == 'message']
+    for field in ('input_tokens', 'output_tokens'):
+        flat = usage.get(field, 0) or 0
+        summed = sum((i.get(field, 0) or 0) for i in msg_iters)
+        if flat != summed:
+            return []
+    return advisors
+
+
 def _metered_usage_cost(model, usage):
-    """1 メッセージ分の従量モデルコスト (非従量・usage なしは 0)。"""
+    """1 メッセージ分の従量モデルコスト (非従量・usage なしは 0)。
+
+    既知の制限: usage.server_tool_use (web_search $10/1k 等) は extra usage
+    クレジットでの課金有無が未確認のため含めない。"""
     if not usage or not is_metered_model(model or ''):
         return 0.0
     _, cache_5m, cache_1h, cache_read = extract_cache_breakdown(usage)
-    return calculate_cost(
+    cost = calculate_cost(
         usage.get('input_tokens', 0) or 0,
         usage.get('output_tokens', 0) or 0,
         0,
@@ -2080,6 +2150,19 @@ def _metered_usage_cost(model, usage):
         cache_creation_5m=cache_5m,
         cache_creation_1h=cache_1h,
     )
+    if _INCLUDE_ADVISOR_ITERATIONS:
+        for it in _advisor_iterations(usage):
+            _, a_5m, a_1h, a_read = extract_cache_breakdown(it)
+            cost += calculate_cost(
+                it.get('input_tokens', 0) or 0,
+                it.get('output_tokens', 0) or 0,
+                0,
+                a_read,
+                model_name=it.get('model') or model,
+                cache_creation_5m=a_5m,
+                cache_creation_1h=a_1h,
+            )
+    return cost
 
 
 def _metered_cost_from_messages(messages):
@@ -2095,7 +2178,7 @@ def _metered_cost_from_messages(messages):
             message = message[1]
         if not isinstance(message, dict) or message.get('type') != 'assistant':
             continue
-        message_id = message.get('uuid')
+        message_id = message.get('message_id') or message.get('uuid')
         request_id = message.get('requestId')
         if message_id and request_id:
             unique_hash = f"{message_id}:{request_id}"
@@ -3219,6 +3302,8 @@ def main():
             block_progress = (hours_elapsed % 5) / 5 * 100
 
         # Generate session time info
+        # (legacy fallback display: block_stats start is hour-floored when no
+        # rate_limits — the exact-minute range comes from get_api_session_time_range)
         session_time_info = ""
         if block_stats and duration_seconds is not None:
             try:
@@ -3674,6 +3759,7 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
                         'usage': msg.get('usage'),
                         'model': msg.get('model'),
                         'uuid': msg.get('uuid'),
+                        'message_id': msg.get('message_id'),
                         'requestId': msg.get('requestId'),
                     })
                 cache_data['current_block'] = cb_ser
@@ -4265,7 +4351,9 @@ def _scan_weekly_timeline(resets_at_str, num_segments):
                             if not usage:
                                 continue
 
-                            msg_id = entry.get('uuid') or (entry.get('message', {}) or {}).get('id')
+                            # message.id first: entry uuid differs per content-block
+                            # line of the same response
+                            msg_id = (entry.get('message', {}) or {}).get('id') or entry.get('uuid')
                             req_id = entry.get('requestId')
                             if msg_id and req_id:
                                 h = f"{msg_id}:{req_id}"

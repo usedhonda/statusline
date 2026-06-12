@@ -1593,6 +1593,130 @@ class TestMeteredCostFromMessages:
         assert statusline._metered_cost_from_messages([]) == 0
 
 
+class TestMessageIdDedup:
+    """1 つの API 応答が content block ごとに複数 JSONL 行へ複製される
+    (entry uuid は行ごとに異なるが message.id と usage は同一)。
+    dedup は message.id:requestId を第一キーにし、1 回だけ計上する。"""
+
+    USAGE = {'input_tokens': 1_000_000, 'output_tokens': 0}
+
+    @staticmethod
+    def _line(uuid, msg_id='msg_01', request_id='req_01',
+              model='claude-fable-5', usage=None, ts='2026-06-12T10:00:00Z'):
+        return {'type': 'assistant', 'uuid': uuid, 'requestId': request_id,
+                'timestamp': ts,
+                'message': {'id': msg_id, 'model': model,
+                            'usage': usage or TestMessageIdDedup.USAGE}}
+
+    def test_metered_turn_cost_counts_response_once(self, tmp_path):
+        # 同一応答が 3 行 (uuid 違い) → $10.00 を 1 回だけ
+        lines = [
+            {'type': 'user', 'message': {'content': 'やって'}},
+            self._line('u1'), self._line('u2'), self._line('u3'),
+        ]
+        p = tmp_path / 't.jsonl'
+        p.write_text('\n'.join(json.dumps(l) for l in lines))
+        cost = statusline.calculate_metered_cost_from_transcript(str(p))
+        assert abs(cost - 10.00) < 0.001
+
+    def test_block_cost_counts_response_once(self):
+        # load_all_messages_chronologically 形の entry dict (message_id を保持)
+        entries = [
+            {'type': 'assistant', 'model': 'claude-fable-5', 'usage': self.USAGE,
+             'uuid': u, 'message_id': 'msg_01', 'requestId': 'req_01'}
+            for u in ('u1', 'u2', 'u3')
+        ]
+        assert abs(statusline._metered_cost_from_messages(entries) - 10.00) < 0.001
+
+    def test_uuid_fallback_without_message_id(self):
+        # 旧 transcript / 旧キャッシュ: message_id 無し → uuid で従来どおり区別
+        entries = [
+            {'type': 'assistant', 'model': 'claude-fable-5', 'usage': self.USAGE,
+             'uuid': u, 'requestId': 'req_01'}
+            for u in ('u1', 'u2')
+        ]
+        assert abs(statusline._metered_cost_from_messages(entries) - 20.00) < 0.001
+
+    def test_load_all_messages_carries_message_id(self, tmp_path):
+        proj = tmp_path / 'projects' / 'p1'
+        proj.mkdir(parents=True)
+        (proj / 's.jsonl').write_text(json.dumps(self._line('u1')))
+        msgs = statusline.load_all_messages_chronologically(
+            transcript_files=[proj / 's.jsonl'])
+        assert msgs[0]['message_id'] == 'msg_01'
+
+
+class TestAdvisorIterations:
+    """usage.iterations: flat は message 型の合計と一致。advisor_message のみ
+    flat に含まれず、_INCLUDE_ADVISOR_ITERATIONS=False の間はコスト不算入。"""
+
+    @staticmethod
+    def _usage_with_advisor(flat_in=100, flat_out=50):
+        return {
+            'input_tokens': flat_in, 'output_tokens': flat_out,
+            'iterations': [
+                {'type': 'message', 'input_tokens': flat_in,
+                 'output_tokens': flat_out},
+                {'type': 'advisor_message', 'model': 'claude-opus-4-8',
+                 'input_tokens': 1_000_000, 'output_tokens': 0},
+            ],
+        }
+
+    def test_advisor_extracted(self):
+        advisors = statusline._advisor_iterations(self._usage_with_advisor())
+        assert len(advisors) == 1
+        assert advisors[0]['model'] == 'claude-opus-4-8'
+
+    def test_invariant_guard_returns_empty(self):
+        # flat != sum(message型) → 将来 CC が advisor を畳み込んだ形。空を返す
+        usage = self._usage_with_advisor()
+        usage['input_tokens'] = 999  # 不変条件を壊す
+        assert statusline._advisor_iterations(usage) == []
+
+    def test_no_iterations(self):
+        assert statusline._advisor_iterations({'input_tokens': 1}) == []
+        assert statusline._advisor_iterations({'iterations': None}) == []
+
+    def test_excluded_from_cost_by_default(self):
+        usage = self._usage_with_advisor(flat_in=1_000_000, flat_out=0)
+        usage['iterations'][0]['input_tokens'] = 1_000_000
+        cost = statusline._metered_usage_cost('claude-fable-5', usage)
+        assert abs(cost - 10.00) < 0.001  # flat 分のみ、advisor (opus $5) は不算入
+
+    def test_included_when_flag_on(self, monkeypatch):
+        monkeypatch.setattr(statusline, '_INCLUDE_ADVISOR_ITERATIONS', True)
+        usage = self._usage_with_advisor(flat_in=1_000_000, flat_out=0)
+        usage['iterations'][0]['input_tokens'] = 1_000_000
+        cost = statusline._metered_usage_cost('claude-fable-5', usage)
+        assert abs(cost - 15.00) < 0.001  # fable $10 + advisor opus $5 (自身の単価)
+
+
+class TestErrorCount:
+    """⚠️ は isApiErrorMessage (本物の API エラー) のみ。
+    自動リトライされた system/api_error や旧 type=='error' は数えない。"""
+
+    def _count(self, tmp_path, entries):
+        p = tmp_path / 't.jsonl'
+        p.write_text('\n'.join(json.dumps(e) for e in entries))
+        result = statusline.calculate_tokens_from_transcript(p)
+        return result[2]  # error_count
+
+    def test_api_error_message_counted(self, tmp_path):
+        assert self._count(tmp_path, [
+            {'type': 'assistant', 'isApiErrorMessage': True,
+             'message': {'usage': {'input_tokens': 1, 'output_tokens': 1}}},
+        ]) == 1
+
+    def test_retried_system_api_error_not_counted(self, tmp_path):
+        assert self._count(tmp_path, [
+            {'type': 'system', 'subtype': 'api_error',
+             'error': {'cause': {'code': 'ConnectionRefused'}}},
+        ]) == 0
+
+    def test_legacy_type_error_not_counted(self, tmp_path):
+        assert self._count(tmp_path, [{'type': 'error'}]) == 0
+
+
 class TestWeeklyLineMeteredCost:
     """Weekly 行の従量コスト表示 (get_weekly_line metered_cost)"""
 
