@@ -1164,6 +1164,34 @@ class TestTimezoneConversions:
         assert result.hour == 12
 
 
+class TestGetApiSessionTimeRange:
+    """Window display must show the actual 5h boundaries (resets_at is
+    exact-minute, not hour-aligned). Rounding to the nearest hour placed
+    "now" outside the displayed window: a 8:40pm-1:40am block rendered as
+    9pm-2am while the clock still read 8:47pm."""
+
+    def _local_tz(self):
+        return datetime.now().astimezone().tzinfo
+
+    def test_exact_minutes_preserved(self):
+        # resets at 1:40 local -> window is 20:40-1:40, NOT 21:00-2:00
+        resets = datetime(2026, 6, 12, 1, 40, tzinfo=self._local_tz())
+        result = statusline.get_api_session_time_range(
+            {'five_hour': {'resets_at': resets.isoformat()}})
+        assert result == ('20:40', '1:40')
+
+    def test_on_the_hour(self):
+        resets = datetime(2026, 6, 12, 8, 0, tzinfo=self._local_tz())
+        result = statusline.get_api_session_time_range(
+            {'five_hour': {'resets_at': resets.isoformat()}})
+        assert result == ('3:00', '8:00')
+
+    def test_missing_data_returns_none(self):
+        assert statusline.get_api_session_time_range(None) is None
+        assert statusline.get_api_session_time_range({}) is None
+        assert statusline.get_api_session_time_range({'five_hour': {}}) is None
+
+
 # ============================================
 # Test Group 4: detect_five_hour_blocks()
 # ============================================

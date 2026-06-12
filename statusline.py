@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.25"
+__version__ = "1.0.26"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2315,9 +2315,10 @@ def format_output_full(ctx, terminal_width=None):
         terminal_width = get_terminal_width()
 
     # Determine graph width: smoothly scale with terminal width
-    # Non-graph content of longest line (L4 Weekly) is ~39 chars + ~4 margin,
-    # so graph_width = terminal_width - 43, clamped to [8, 20]
-    graph_width = min(20, max(8, terminal_width - 43))
+    # Non-graph content of longest line (L3 Session with exact-minute range
+    # and metered cost) is ~44 chars + margin,
+    # so graph_width = terminal_width - 47, clamped to [8, 20]
+    graph_width = min(20, max(8, terminal_width - 47))
 
     if ctx['show_line1']:
         # Check if we should show schedule line (swap with Line1)
@@ -2511,21 +2512,25 @@ def format_output_compact(ctx):
     # Line 3: Session (shortened with sparkline + utilization% + time range)
     if ctx['show_line3']:
         if ctx['session_duration'] or ctx.get('api_session_range'):
-            if ctx['burn_timeline']:
-                sparkline = create_sparkline(ctx['burn_timeline'], width=12, current_pos=ctx.get('burn_current_pos'), future_style="bar")
-                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
-            else:
-                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=12)} "
-            if ctx.get('five_hour_utilization') is not None:
-                util = int(ctx['five_hour_utilization'])
-                util_color = _get_utilization_color(util)
-                line3 += f"{util_color}[{util}%]{Colors.RESET}"
-            if ctx.get('api_session_range'):
-                start, end = ctx['api_session_range']
-                line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
-            block_cost = ctx.get('block_metered_cost') or 0
-            if ctx.get('metered') and block_cost > 0:
-                line3 += f" {Colors.BRIGHT_YELLOW}${block_cost:.0f}{Colors.RESET}"
+            # Shrink the sparkline before letting the cost tail clip
+            for spark_width in (12, 8):
+                if ctx['burn_timeline']:
+                    sparkline = create_sparkline(ctx['burn_timeline'], width=spark_width, current_pos=ctx.get('burn_current_pos'), future_style="bar")
+                    line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+                else:
+                    line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=spark_width)} "
+                if ctx.get('five_hour_utilization') is not None:
+                    util = int(ctx['five_hour_utilization'])
+                    util_color = _get_utilization_color(util)
+                    line3 += f"{util_color}[{util}%]{Colors.RESET}"
+                if ctx.get('api_session_range'):
+                    start, end = ctx['api_session_range']
+                    line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+                block_cost = ctx.get('block_metered_cost') or 0
+                if ctx.get('metered') and block_cost > 0:
+                    line3 += f" {Colors.BRIGHT_YELLOW}${block_cost:.0f}{Colors.RESET}"
+                if get_display_width(line3) <= get_terminal_width():
+                    break
             lines.append(line3)
         else:
             lines.append(f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} --")
@@ -2632,18 +2637,22 @@ def format_output_tight(ctx):
     # Line 3: Session (ultra short with sparkline + utilization%)
     if ctx['show_line3']:
         if ctx['session_duration'] or ctx.get('api_session_range'):
-            if ctx['burn_timeline']:
-                sparkline = create_sparkline(ctx['burn_timeline'], width=8, current_pos=ctx.get('burn_current_pos'), future_style="bar")
-                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
-            else:
-                line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=8)} "
-            if ctx.get('five_hour_utilization') is not None:
-                util = int(ctx['five_hour_utilization'])
-                util_color = _get_utilization_color(util)
-                line3 += f"{util_color}[{util}%]{Colors.RESET}"
-            if ctx.get('api_session_range'):
-                start, end = ctx['api_session_range']
-                line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+            # Shrink the sparkline before letting the time range clip
+            for spark_width in (8, 5):
+                if ctx['burn_timeline']:
+                    sparkline = create_sparkline(ctx['burn_timeline'], width=spark_width, current_pos=ctx.get('burn_current_pos'), future_style="bar")
+                    line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {sparkline} "
+                else:
+                    line3 = f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} {get_progress_bar(ctx['block_progress'], width=spark_width)} "
+                if ctx.get('five_hour_utilization') is not None:
+                    util = int(ctx['five_hour_utilization'])
+                    util_color = _get_utilization_color(util)
+                    line3 += f"{util_color}[{util}%]{Colors.RESET}"
+                if ctx.get('api_session_range'):
+                    start, end = ctx['api_session_range']
+                    line3 += f" {Colors.BRIGHT_GREEN}({start}-{end}){Colors.RESET}"
+                if get_display_width(line3) <= get_terminal_width():
+                    break
             lines.append(line3)
         else:
             lines.append(f"{Colors.BRIGHT_CYAN}S:{Colors.RESET} --")
@@ -4145,7 +4154,7 @@ def _get_utilization_color(pct):
 
 def get_api_session_time_range(ratelimit_data):
     """Extract 5-hour session time range from API data.
-    Returns (start_local_str, end_local_str) like ('3am', '8am') or None.
+    Returns (start_local_str, end_local_str) like ('20:40', '1:40') or None.
     """
     if not ratelimit_data:
         return None
@@ -4154,21 +4163,15 @@ def get_api_session_time_range(ratelimit_data):
         return None
     try:
         resets_at = datetime.fromisoformat(five_hour['resets_at'])
-        end_local = resets_at.astimezone()  # Convert to local timezone
-        # Round to nearest hour (>=30min -> next hour, <30min -> current hour)
-        if end_local.minute >= 30:
-            end_local = end_local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        else:
-            end_local = end_local.replace(minute=0, second=0, microsecond=0)
+        # Window runs from the first message to exactly 5h later (resets_at).
+        # Show the actual boundaries — rounding to the hour can place "now"
+        # outside the displayed window (e.g. 8:40pm start shown as 9pm).
+        end_local = resets_at.astimezone().replace(second=0, microsecond=0)
         start_local = end_local - timedelta(hours=5)
 
         def fmt_hour(dt):
-            h = dt.hour
-            suffix = 'am' if h < 12 else 'pm'
-            h12 = h % 12 or 12
-            if dt.minute == 0:
-                return f"{h12}{suffix}"
-            return f"{h12}:{dt.minute:02d}{suffix}"
+            # 24h keeps the string short enough for the narrow layouts
+            return f"{dt.hour}:{dt.minute:02d}"
 
         return (fmt_hour(start_local), fmt_hour(end_local))
     except (ValueError, TypeError):
