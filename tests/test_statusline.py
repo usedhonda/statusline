@@ -602,6 +602,27 @@ STATUSLINE_PATH = os.path.join(
 )
 
 
+class TestDoSetup:
+    """do_setup() の statusLine command 選択。
+    pip/brew は PATH の `ccsl`、curl/手動は file 直叩き (self-update が効く)。"""
+
+    def _run_setup(self, tmp_path, ccsl_on_path):
+        settings = tmp_path / '.claude' / 'settings.json'
+        with patch.object(statusline.Path, 'home', return_value=tmp_path), \
+             patch.object(statusline.shutil, 'which',
+                          return_value='/usr/local/bin/ccsl' if ccsl_on_path else None):
+            statusline.do_setup()
+        return json.loads(settings.read_text())['statusLine']['command']
+
+    def test_uses_path_command_when_ccsl_installed(self, tmp_path):
+        assert self._run_setup(tmp_path, ccsl_on_path=True) == 'ccsl'
+
+    def test_uses_file_command_when_not_on_path(self, tmp_path):
+        cmd = self._run_setup(tmp_path, ccsl_on_path=False)
+        assert cmd.startswith('python3 ')
+        assert cmd.endswith('statusline.py')
+
+
 class TestSmoke:
     def _run(self, input_data):
         # Force a deterministic terminal size: statusline prefers the real tmux

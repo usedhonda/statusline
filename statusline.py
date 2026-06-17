@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.27"
+__version__ = "1.0.28"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -2879,7 +2879,13 @@ def do_setup():
     claude_dir.mkdir(exist_ok=True)
     settings_path = claude_dir / "settings.json"
 
-    statusline_config = {"type": "command", "command": "ccsl", "padding": 0, "refreshInterval": 5000}
+    # pip/brew put `ccsl` on PATH; a curl/manual install runs this file directly
+    # (and then self-updates from GitHub — no package manager needed).
+    if shutil.which("ccsl"):
+        command = "ccsl"
+    else:
+        command = f"python3 {Path(__file__).resolve()}"
+    statusline_config = {"type": "command", "command": command, "padding": 0, "refreshInterval": 5000}
 
     settings = {}
     if settings_path.exists():
@@ -2925,7 +2931,7 @@ def do_setup():
 
     print(f"\nccsl {__version__} configured successfully.")
     print("Restart Claude Code to see the status line.")
-    print("Test: echo '{\"session_id\":\"test\"}' | ccsl --show all")
+    print(f"Test: echo '{{\"session_id\":\"test\"}}' | {command} --show all")
 
 
 def main():

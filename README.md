@@ -16,12 +16,15 @@ Weekly:     ▅▃▁▇▂▇▁▁▄▁▆█▁▁▁▁▁▁▁▁ [42%] 3
 
 ## Install
 
+It's a single dependency-free Python file. Drop it in and point Claude Code at it:
+
 ```bash
-brew install usedhonda/tap/ccsl
-ccsl --setup
+mkdir -p ~/.claude
+curl -fsSL https://raw.githubusercontent.com/usedhonda/statusline/main/statusline.py -o ~/.claude/statusline.py
+python3 ~/.claude/statusline.py --setup
 ```
 
-Restart Claude Code. Done.
+Restart Claude Code. Done — it keeps itself up to date automatically.
 
 <details>
 <summary>Other install methods</summary>
@@ -39,6 +42,13 @@ ccsl --setup
 git clone https://github.com/usedhonda/statusline.git
 cd statusline
 python3 install.py
+```
+
+**Homebrew** (being retired — prefer the curl install above)
+
+```bash
+brew install usedhonda/tap/ccsl
+ccsl --setup
 ```
 
 </details>
