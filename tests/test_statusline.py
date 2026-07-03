@@ -623,6 +623,55 @@ class TestDoSetup:
         assert cmd.endswith('statusline.py')
 
 
+class TestWatchSchemaDrift:
+    """CC バージョンアップ・stdin スキーマ変化の自動監視。
+    新キー (例: rate_limits のモデル別 weekly) が生えたらログに残る。"""
+
+    BASE = {
+        'version': '2.1.199',
+        'rate_limits': {
+            'five_hour': {'used_percentage': 21, 'resets_at': 1},
+            'seven_day': {'used_percentage': 48, 'resets_at': 2},
+        },
+        'context_window': {'context_window_size': 1000000, 'current_usage': {'input_tokens': 1}},
+        'cost': {'total_cost_usd': 1.0},
+    }
+
+    def _watch(self, tmp_path, data):
+        (tmp_path / '.claude').mkdir(exist_ok=True)
+        with patch.object(statusline.Path, 'home', return_value=tmp_path):
+            statusline._watch_schema_drift(data)
+        log = tmp_path / '.claude' / 'statusline-schema-drift.log'
+        return log.read_text() if log.exists() else ''
+
+    def test_first_run_saves_baseline_without_log(self, tmp_path):
+        assert self._watch(tmp_path, self.BASE) == ''
+        assert (tmp_path / '.claude' / '.statusline_schema_seen.json').exists()
+
+    def test_unchanged_schema_stays_silent(self, tmp_path):
+        self._watch(tmp_path, self.BASE)
+        assert self._watch(tmp_path, self.BASE) == ''
+
+    def test_new_rate_limit_key_is_logged(self, tmp_path):
+        self._watch(tmp_path, self.BASE)
+        changed = json.loads(json.dumps(self.BASE))
+        changed['version'] = '2.2.0'
+        changed['rate_limits']['seven_day_fable'] = {'used_percentage': 57, 'resets_at': 3}
+        log = self._watch(tmp_path, changed)
+        assert '+seven_day_fable' in log
+        assert '2.1.199 -> 2.2.0' in log
+
+    def test_version_only_bump_logged_as_unchanged(self, tmp_path):
+        self._watch(tmp_path, self.BASE)
+        changed = dict(self.BASE, version='2.2.0')
+        log = self._watch(tmp_path, changed)
+        assert 'schema unchanged' in log
+
+    def test_non_dict_input_is_safe(self, tmp_path):
+        assert self._watch(tmp_path, None) == ''
+        assert self._watch(tmp_path, 'oops') == ''
+
+
 class TestSmoke:
     def _run(self, input_data):
         # Force a deterministic terminal size: statusline prefers the real tmux
@@ -631,6 +680,7 @@ class TestSmoke:
                if k not in ('TMUX', 'TMUX_PANE', 'TERM')}
         env['COLUMNS'] = '200'
         env['LINES'] = '50'
+        env['STATUSLINE_NO_SCHEMA_WATCH'] = '1'  # fake stdin must not pollute the drift log
         return subprocess.run(
             [sys.executable, STATUSLINE_PATH],
             input=input_data,
@@ -2099,6 +2149,7 @@ class TestSmokeExtended:
                if k not in ('TMUX', 'TMUX_PANE', 'TERM')}
         env['COLUMNS'] = '200'
         env['LINES'] = '50'
+        env['STATUSLINE_NO_SCHEMA_WATCH'] = '1'  # fake stdin must not pollute the drift log
         return subprocess.run(
             [sys.executable, STATUSLINE_PATH],
             input=input_data,

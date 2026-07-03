@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.28"
+__version__ = "1.0.29"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -440,6 +440,69 @@ def _diagnose_stdin(data):
             print('[statusline] stdin schema drift: ' + ' '.join(parts), file=sys.stderr)
         except Exception:
             pass
+
+
+def _watch_schema_drift(data):
+    """Claude Code のバージョンアップと stdin スキーマ変化を常時監視する。
+
+    stdin の主要オブジェクトのキー集合を指紋として保存し、CC バージョンが
+    変わったり新キーが生えたり (例: rate_limits にモデル別 weekly が追加
+    されたら即知りたい) したら ~/.claude/statusline-schema-drift.log に
+    差分を追記する。表示には一切影響しない fail-silent の開発用ウォッチャー。
+    """
+    try:
+        # テストや合成 stdin が偽バージョンで状態を汚さないための kill-switch
+        if os.environ.get('STATUSLINE_NO_SCHEMA_WATCH') == '1':
+            return
+        if not isinstance(data, dict):
+            return
+        version = str(data.get('version') or '')
+        fp = {
+            'top': sorted(data.keys()),
+            'context_window': sorted((data.get('context_window') or {}).keys()),
+            'current_usage': sorted(((data.get('context_window') or {}).get('current_usage') or {}).keys()),
+            'cost': sorted((data.get('cost') or {}).keys()),
+        }
+        rl = data.get('rate_limits') or {}
+        fp['rate_limits'] = sorted(rl.keys())
+        for key, val in rl.items():
+            if isinstance(val, dict):
+                fp[f'rate_limits.{key}'] = sorted(val.keys())
+
+        seen_file = Path.home() / '.claude' / '.statusline_schema_seen.json'
+        state = {}
+        if seen_file.exists():
+            with open(seen_file) as f:
+                state = json.load(f)
+        if state.get('version') == version and state.get('fp') == fp:
+            return
+
+        # 初回はベースライン保存のみ。2 回目以降の変化をログに残す
+        if state:
+            old_fp = state.get('fp') or {}
+            lines = []
+            for section in sorted(set(fp) | set(old_fp)):
+                old_keys = set(old_fp.get(section) or [])
+                new_keys = set(fp.get(section) or [])
+                added = sorted(new_keys - old_keys)
+                removed = sorted(old_keys - new_keys)
+                if added:
+                    lines.append(f"  {section}: +{','.join(added)}")
+                if removed:
+                    lines.append(f"  {section}: -{','.join(removed)}")
+            log_file = Path.home() / '.claude' / 'statusline-schema-drift.log'
+            with open(log_file, 'a') as f:
+                f.write(f"{datetime.now().isoformat()} CC {state.get('version') or '?'} -> {version}"
+                        f"{' (schema unchanged)' if not lines else ''}\n")
+                for line in lines:
+                    f.write(line + "\n")
+
+        tmp = seen_file.with_suffix('.tmp')
+        with open(tmp, 'w') as f:
+            json.dump({'version': version, 'fp': fp}, f)
+        tmp.rename(seen_file)
+    except Exception:
+        pass
 
 
 def format_token_count(tokens):
@@ -3039,6 +3102,7 @@ def main():
         data = json.loads(input_data)
 
         _diagnose_stdin(data)
+        _watch_schema_drift(data)
 
         # Optional stdin dump for debugging.
         # Opt-in via env var STATUSLINE_DUMP_STDIN=<path>, OR by touching ~/.claude/.statusline-dump-stdin
