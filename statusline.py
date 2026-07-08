@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.29"
+__version__ = "1.0.30"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -456,7 +456,6 @@ def _watch_schema_drift(data):
             return
         if not isinstance(data, dict):
             return
-        version = str(data.get('version') or '')
         fp = {
             'top': sorted(data.keys()),
             'context_window': sorted((data.get('context_window') or {}).keys()),
@@ -469,38 +468,49 @@ def _watch_schema_drift(data):
             if isinstance(val, dict):
                 fp[f'rate_limits.{key}'] = sorted(val.keys())
 
+        # 複数バージョンの pane が同じ baseline を共有するため、単純な指紋比較
+        # だと version/shape の flapping でログが暴れる。ここは「今までに一度でも
+        # 見たキーの和集合 (monotonic union)」だけを持ち、新キー出現時のみ 1 回
+        # ログする。削除・version 変化はトリガーにしない。
         seen_file = Path.home() / '.claude' / '.statusline_schema_seen.json'
-        state = {}
+        union = None
         if seen_file.exists():
             with open(seen_file) as f:
                 state = json.load(f)
-        if state.get('version') == version and state.get('fp') == fp:
+            if isinstance(state, dict) and isinstance(state.get('union'), dict):
+                union = state['union']
+
+        def _save_union(u):
+            tmp = seen_file.with_suffix('.tmp')
+            with open(tmp, 'w') as f:
+                json.dump({'union': u}, f)
+            tmp.rename(seen_file)
+
+        # 初回 (baseline なし) は和集合を保存するだけでログはしない
+        if union is None:
+            _save_union(fp)
             return
 
-        # 初回はベースライン保存のみ。2 回目以降の変化をログに残す
-        if state:
-            old_fp = state.get('fp') or {}
-            lines = []
-            for section in sorted(set(fp) | set(old_fp)):
-                old_keys = set(old_fp.get(section) or [])
-                new_keys = set(fp.get(section) or [])
-                added = sorted(new_keys - old_keys)
-                removed = sorted(old_keys - new_keys)
-                if added:
-                    lines.append(f"  {section}: +{','.join(added)}")
-                if removed:
-                    lines.append(f"  {section}: -{','.join(removed)}")
+        # section ごとに「和集合に無い新キー」のみ抽出。削除は完全に無視する
+        additions = {}
+        for section, keys in fp.items():
+            new_keys = sorted(set(keys) - set(union.get(section) or []))
+            if new_keys:
+                additions[section] = new_keys
+
+        if additions:
+            version = str(data.get('version') or '?')
             log_file = Path.home() / '.claude' / 'statusline-schema-drift.log'
             with open(log_file, 'a') as f:
-                f.write(f"{datetime.now().isoformat()} CC {state.get('version') or '?'} -> {version}"
-                        f"{' (schema unchanged)' if not lines else ''}\n")
-                for line in lines:
-                    f.write(line + "\n")
-
-        tmp = seen_file.with_suffix('.tmp')
-        with open(tmp, 'w') as f:
-            json.dump({'version': version, 'fp': fp}, f)
-        tmp.rename(seen_file)
+                f.write(f"{datetime.now().isoformat()} CC {version} new fields:\n")
+                for section in sorted(additions):
+                    f.write(f"  {section}: +{','.join(additions[section])}\n")
+            # 和集合を更新して保存 (union = union ∪ fp)
+            merged = dict(union)
+            for section, keys in fp.items():
+                merged[section] = sorted(set(union.get(section) or []) | set(keys))
+            _save_union(merged)
+        # 追加が無ければ何もしない (union は不変なので書き換えもしない)
     except Exception:
         pass
 

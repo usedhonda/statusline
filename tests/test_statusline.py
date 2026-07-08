@@ -659,13 +659,33 @@ class TestWatchSchemaDrift:
         changed['rate_limits']['seven_day_fable'] = {'used_percentage': 57, 'resets_at': 3}
         log = self._watch(tmp_path, changed)
         assert '+seven_day_fable' in log
-        assert '2.1.199 -> 2.2.0' in log
+        assert 'CC 2.2.0 new fields' in log
 
-    def test_version_only_bump_logged_as_unchanged(self, tmp_path):
+    def test_new_key_logged_only_once(self, tmp_path):
+        self._watch(tmp_path, self.BASE)
+        changed = json.loads(json.dumps(self.BASE))
+        changed['rate_limits']['seven_day_fable'] = {'used_percentage': 57, 'resets_at': 3}
+        self._watch(tmp_path, changed)
+        # 同じ新キーが再度現れても、和集合に入っているので二度目はログしない
+        log = self._watch(tmp_path, changed)
+        assert log.count('+seven_day_fable') == 1
+
+    def test_version_only_bump_stays_silent(self, tmp_path):
         self._watch(tmp_path, self.BASE)
         changed = dict(self.BASE, version='2.2.0')
-        log = self._watch(tmp_path, changed)
-        assert 'schema unchanged' in log
+        assert self._watch(tmp_path, changed) == ''
+
+    def test_removed_key_stays_silent(self, tmp_path):
+        self._watch(tmp_path, self.BASE)
+        smaller = json.loads(json.dumps(self.BASE))
+        del smaller['rate_limits']['seven_day']
+        del smaller['cost']
+        assert self._watch(tmp_path, smaller) == ''
+
+    def test_version_flapping_stays_silent(self, tmp_path):
+        self._watch(tmp_path, dict(self.BASE, version='2.1.203'))
+        assert self._watch(tmp_path, dict(self.BASE, version='2.1.198')) == ''
+        assert self._watch(tmp_path, dict(self.BASE, version='2.1.203')) == ''
 
     def test_non_dict_input_is_safe(self, tmp_path):
         assert self._watch(tmp_path, None) == ''
