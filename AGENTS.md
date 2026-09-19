@@ -132,7 +132,7 @@ block_total_tokens = block_stats.get('total_tokens', 0)
 ## 🔒 機密情報管理ルール - 絶対厳守
 
 ### 適用範囲
-- **チェック対象**: README.md, statusline.py, install.py, CLAUDE.md（リポジトリ公開ファイル）
+- **チェック対象**: README.md, statusline.py, install.py, AGENTS.md（リポジトリ公開ファイル）
 - **チェック対象外**: docs/, .gitignore, 一時ファイル、非公開設定ファイル
 - **原則**: 「実際に公開されるもの」のみが機密管理対象
 
