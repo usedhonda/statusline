@@ -46,6 +46,8 @@ import time
 
 # Block stats cache settings
 BLOCK_STATS_CACHE_TTL = 30  # 30 seconds
+BLOCK_STATS_STALE_MAX = 600  # serve a stale cache this long while it rebuilds
+REFRESH_LOCK_MAX = 120  # a background rebuild lock older than this is abandoned
 BLOCK_STATS_CACHE_FILE = None
 
 # Transcript stats cache settings
@@ -3986,7 +3988,54 @@ def _get_transcript_fingerprint(hours_limit=6):
             continue
     return fp, files
 
-def _get_cached_block_data(session_id, api_block_start_utc=None):
+def _run_detached(lock, work):
+    """Run work() in a detached child so the statusline can return at once.
+
+    One child per lock at a time; a lock older than REFRESH_LOCK_MAX is abandoned.
+    """
+    try:
+        if time.time() - lock.stat().st_mtime > REFRESH_LOCK_MAX:
+            lock.unlink()
+    except OSError:
+        pass
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except OSError:
+        return
+    try:
+        pid = os.fork()
+    except (OSError, AttributeError):
+        _release_lock(lock)
+        return
+    if pid:
+        return
+    # Child: detach from Claude Code's pipes so it doesn't wait on us.
+    try:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        work()
+    except Exception:
+        pass
+    finally:
+        _release_lock(lock)
+        os._exit(0)
+
+
+def _release_lock(lock):
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
+def _refresh_block_cache_in_background(session_id, api_block_start_utc):
+    _run_detached(_get_block_stats_cache_file().with_suffix('.lock'),
+                  lambda: _get_cached_block_data(session_id, api_block_start_utc, force_refresh=True))
+
+
+def _get_cached_block_data(session_id, api_block_start_utc=None, force_refresh=False):
     """Get block_stats and current_block from 30s file cache or by computing.
 
     On cache hit:  returns (block_stats, current_block) from disk (<1ms).
@@ -4002,15 +4051,21 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
     cache_file = _get_block_stats_cache_file()
     current_api_start_str = _serialize_datetime(api_block_start_utc) if api_block_start_utc else None
     try:
-        if cache_file.exists():
+        if cache_file.exists() and not force_refresh:
             with open(cache_file, 'r') as f:
                 cached = json.load(f)
             cached_api_start = cached.get('api_block_start_utc')
             cached_fp = cached.get('transcript_fingerprint')
-            if (cached_fp is not None
-                    and time.time() - cached.get('timestamp', 0) < BLOCK_STATS_CACHE_TTL
-                    and cached_api_start == current_api_start_str
-                    and cached_fp == transcript_fp):
+            age = time.time() - cached.get('timestamp', 0)
+            fresh = (cached_fp == transcript_fp and age < BLOCK_STATS_CACHE_TTL)
+            # With several live sessions the fingerprint changes on nearly every
+            # run, and a full rescan takes seconds — longer than Claude Code waits.
+            # Serve the slightly stale result and rebuild it in a detached child.
+            usable = (cached_fp is not None and cached_api_start == current_api_start_str
+                      and (fresh or age < BLOCK_STATS_STALE_MAX))
+            if usable:
+                if not fresh:
+                    _refresh_block_cache_in_background(session_id, api_block_start_utc)
                 # Deserialize block_stats
                 bs = cached.get('block_stats')
                 if bs:
@@ -4028,6 +4083,12 @@ def _get_cached_block_data(session_id, api_block_start_utc=None):
         pass
 
     # --- cache miss path ---
+    # A foreground rescan outlasts Claude Code's wait and gets killed before it
+    # writes the cache, so build it in the background and show no block yet.
+    if not force_refresh:
+        _refresh_block_cache_in_background(session_id, api_block_start_utc)
+        return None, None
+
     block_stats = None
     current_block = None
     try:
@@ -4611,6 +4672,7 @@ def get_api_session_time_range(ratelimit_data):
         return None
 
 WEEKLY_TIMELINE_CACHE_TTL = 300  # 5 minutes
+WEEKLY_TIMELINE_STALE_MAX = 3600  # serve a stale timeline this long while it rebuilds
 
 def _get_weekly_timeline_cache_file():
     return Path.home() / '.claude' / '.weekly_timeline_cache.json'
@@ -4640,15 +4702,29 @@ def generate_weekly_timeline(ratelimit_data, num_segments=20):
         if cache_file.exists():
             with open(cache_file, 'r') as f:
                 cached = json.load(f)
-            if time.time() - cached.get('timestamp', 0) < WEEKLY_TIMELINE_CACHE_TTL:
-                if cached.get('resets_at') == seven_day.get('resets_at'):
-                    tl = cached.get('timeline', empty)
-                    if len(tl) == num_segments:
-                        return tl, cached.get('metered_cost', 0.0)
+            age = time.time() - cached.get('timestamp', 0)
+            tl = cached.get('timeline', empty)
+            if cached.get('resets_at') == seven_day.get('resets_at') and len(tl) == num_segments:
+                if age < WEEKLY_TIMELINE_CACHE_TTL:
+                    return tl, cached.get('metered_cost', 0.0)
+                # The 7-day scan takes seconds; serve the stale timeline and
+                # rebuild it in a detached child rather than blow Claude Code's wait.
+                if age < WEEKLY_TIMELINE_STALE_MAX:
+                    _run_detached(cache_file.with_suffix('.lock'),
+                                  lambda: _write_weekly_timeline(cache_file, seven_day, num_segments))
+                    return tl, cached.get('metered_cost', 0.0)
     except (json.JSONDecodeError, OSError):
         pass
 
-    # Generate fresh timeline
+    # No usable cache: a foreground scan outlasts Claude Code's wait, gets killed
+    # and never writes the cache, so every later run misses too. Build it in
+    # the background and show an empty timeline until it lands.
+    _run_detached(cache_file.with_suffix('.lock'),
+                  lambda: _write_weekly_timeline(cache_file, seven_day, num_segments))
+    return empty, 0.0
+
+
+def _write_weekly_timeline(cache_file, seven_day, num_segments):
     timeline, metered_cost = _scan_weekly_timeline(seven_day['resets_at'], num_segments)
 
     # Write cache (atomic)

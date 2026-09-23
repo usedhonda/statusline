@@ -988,18 +988,34 @@ class TestBlockStatsCache:
         assert len(cb['messages']) == 1
         assert isinstance(cb['messages'][0]['timestamp'], datetime)
 
-    def test_cache_miss_expired_ttl(self, tmp_path):
-        """Expired cache triggers recomputation."""
+    def test_stale_cache_served_while_refreshing(self, tmp_path):
+        """Past the TTL, the stale cache is returned and rebuilt in the background."""
         cache_file = tmp_path / '.block_stats_cache.json'
-        data = self._make_cache_data(age=60)  # well past 30s TTL
+        data = self._make_cache_data(age=60)  # past 30s TTL, within stale window
         import json as _json
         cache_file.write_text(_json.dumps(data))
 
         with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
-             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])), \
+             patch.object(statusline, '_refresh_block_cache_in_background') as mock_refresh:
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
                 bs, cb = statusline._get_cached_block_data('test-session')
-                mock_load.assert_called_once()
+                mock_load.assert_not_called()
+                mock_refresh.assert_called_once()
+                assert bs is not None
+
+    def test_cache_miss_past_stale_window(self, tmp_path):
+        """A cache older than the stale window is not served; a rebuild is scheduled."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+        data = self._make_cache_data(age=statusline.BLOCK_STATS_STALE_MAX + 60)
+        import json as _json
+        cache_file.write_text(_json.dumps(data))
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])), \
+             patch.object(statusline, '_refresh_block_cache_in_background') as mock_refresh:
+            assert statusline._get_cached_block_data('test-session') == (None, None)
+            mock_refresh.assert_called_once()
 
     def test_cache_hit_different_session(self, tmp_path):
         """Cache is shared across sessions — different session_id still hits."""
@@ -1016,13 +1032,27 @@ class TestBlockStatsCache:
                 assert bs is not None
 
     def test_cache_miss_no_file(self, tmp_path):
-        """No cache file triggers recomputation."""
+        """No cache file: the scan is moved to the background and nothing is shown yet."""
         cache_file = tmp_path / '.block_stats_cache.json'
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])), \
+             patch.object(statusline, '_refresh_block_cache_in_background') as mock_refresh:
+            with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
+                assert statusline._get_cached_block_data('test-session') == (None, None)
+                mock_load.assert_not_called()
+                mock_refresh.assert_called_once()
+
+    def test_force_refresh_scans_and_ignores_cache(self, tmp_path):
+        """The background rebuild recomputes even when a fresh cache exists."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+        import json as _json
+        cache_file.write_text(_json.dumps(self._make_cache_data(age=5)))
 
         with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
              patch.object(statusline, '_get_transcript_fingerprint', return_value=(self.FAKE_FINGERPRINT, [])):
             with patch.object(statusline, 'load_all_messages_chronologically', return_value=[]) as mock_load:
-                bs, cb = statusline._get_cached_block_data('test-session')
+                statusline._get_cached_block_data('test-session', force_refresh=True)
                 mock_load.assert_called_once()
 
     def test_cache_written_after_computation(self, tmp_path):
@@ -1054,7 +1084,7 @@ class TestBlockStatsCache:
                 with patch.object(statusline, 'detect_five_hour_blocks', return_value=[mock_block]):
                     with patch.object(statusline, 'find_current_session_block', return_value=mock_block):
                         with patch.object(statusline, 'calculate_block_statistics_with_deduplication', return_value=mock_stats):
-                            bs, cb = statusline._get_cached_block_data('test-session')
+                            bs, cb = statusline._get_cached_block_data('test-session', force_refresh=True)
 
         assert cache_file.exists()
         import json as _json
