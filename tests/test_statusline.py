@@ -594,6 +594,11 @@ class TestLine1Badges:
         ctx = {'model': 'Opus 5.5', 'effort': 'medium', 'fast_mode': True, 'reported_context_size': 1_000_000}
         assert self._plain(statusline.format_model_badge(ctx, tight=True)) == "[Op5.5·med⚡]"
 
+    def test_model_modifiers_are_colored_apart_from_the_model_name(self):
+        ctx = {'model': 'Opus 5.5', 'effort': 'medium', 'reported_context_size': 1_000_000}
+        badge = statusline.format_model_badge(ctx, tight=True)
+        assert f"Op5.5{statusline.Colors.BRIGHT_MAGENTA}·med" in badge
+
     def test_model_badge_without_optional_fields(self):
         ctx = {'model': 'Opus 5.5', 'reported_context_size': 1_000_000}
         assert self._plain(statusline.format_model_badge(ctx)) == "[Opus 5.5]"

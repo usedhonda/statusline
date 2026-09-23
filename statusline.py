@@ -2337,19 +2337,23 @@ _EFFORT_ABBR = {'low': 'lo', 'medium': 'med', 'high': 'hi', 'xhigh': 'xh', 'max'
 
 
 def format_model_badge(ctx, tight=False, include_context_badge=True):
-    """`[Opus5.5·med⚡(200K)]` — model, effort, fast mode and reduced context."""
+    """`[Opus5.5·med⚡(200K)]` — model, effort, fast mode and reduced context.
+
+    Everything after the model name is a modifier and is drawn in magenta,
+    so `·med` reads as a setting rather than as part of the model name.
+    """
     name = shorten_model_name(ctx['model'], tight=tight)
+    modifiers = ""
     effort = _EFFORT_ABBR.get(ctx.get('effort') or '')
     if effort:
-        name += f"·{effort}"
+        modifiers += f"·{effort}"
     if ctx.get('fast_mode'):
-        name += "⚡"
-    suffix = ""
+        modifiers += "⚡"
     if include_context_badge and should_show_reduced_context_badge(
         f"{ctx['model']} {ctx.get('model_id', '')}", ctx.get('reported_context_size')
     ):
-        suffix = "(200K)"
-    return f"{Colors.BRIGHT_YELLOW}[{name}{Colors.BRIGHT_MAGENTA}{suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}"
+        modifiers += "(200K)"
+    return f"{Colors.BRIGHT_YELLOW}[{name}{Colors.BRIGHT_MAGENTA}{modifiers}{Colors.BRIGHT_YELLOW}]{Colors.RESET}"
 
 
 _PR_REVIEW_MARKS = {
