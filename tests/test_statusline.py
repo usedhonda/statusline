@@ -2394,3 +2394,29 @@ class TestRetiredPackageInstall:
 
     def test_curl_and_source_installs_are_not(self, tmp_path):
         assert not statusline.is_retired_package_install(tmp_path / '.claude' / 'statusline.py')
+
+
+class TestKeepWarmTarget:
+    def test_tmux_wins_over_iterm(self):
+        env = {"TMUX": "/tmp/tmux-501/default,1,0", "TMUX_PANE": "%4",
+               "ITERM_SESSION_ID": "w0t0p0:ABC-123"}
+        assert statusline.keep_warm_target(env) == ("tmux", "%4")
+
+    def test_iterm_uses_session_uuid(self):
+        env = {"ITERM_SESSION_ID": "w0t0p0:ABC-123"}
+        assert statusline.keep_warm_target(env) == ("iterm", "ABC-123")
+
+    def test_other_terminals_are_skipped(self):
+        assert statusline.keep_warm_target({"TERM_PROGRAM": "ghostty"}) is None
+
+    def test_iterm_screen_uses_carriage_returns(self):
+        screen = "⏺ ok \r✻ Churned for 2s \r❯  \r  ⏵⏵ auto mode on "
+        result = MagicMock(stdout=screen)
+        with patch.object(statusline.subprocess, "run", return_value=result):
+            assert statusline._composer_is_empty(("iterm", "ABC-123")) is True
+
+    def test_iterm_typing_goes_through_osascript(self):
+        with patch.object(statusline.subprocess, "Popen") as popen:
+            statusline._type_line(("iterm", "ABC-123"), 'Reply with just "ok".')
+        cmd = popen.call_args[0][0]
+        assert cmd[0] == "osascript" and cmd[-2:] == ["ABC-123", 'Reply with just "ok".']

@@ -77,7 +77,10 @@ Control which lines to display:
 Environment variables (set them in the `statusLine` command):
 
 - `STATUSLINE_DISPLAY_MODE=full|compact|tight` — pin a layout instead of picking one from the terminal width. Handy in narrow tmux panes, where `full` keeps the long labels and trims the line ends
-- `CCSL_KEEP_WARM_HOURS=N` — keep the prompt cache warm (off by default). A session that has been idle for less than N hours gets one tiny `[keep-alive]` turn typed into its tmux pane just before the cache expires, so the next real turn doesn't pay to re-cache the whole history. It only types into an empty prompt, and steps aside when CCStatusBar's own keep-warm is running
+- `CCSL_KEEP_WARM_HOURS=N` — keep the prompt cache warm (off by default). A session that has been idle for less than N hours gets one tiny `[keep-alive]` turn typed into its prompt just before the cache expires, so the next real turn doesn't pay to re-cache the whole history. Each poke is a small billed turn.
+  - Works in **tmux** and **iTerm2** (the first poke from iTerm2 asks for macOS Automation permission). Other terminals are skipped: they can't read the screen back, so there's no way to tell an empty prompt from a half-written one
+  - It only types into an empty prompt, and steps aside when CCStatusBar's own keep-warm is running
+  - The setting applies to every session that uses this `statusLine` command; per-session control needs CCStatusBar
 
 ```json
 "statusLine": {

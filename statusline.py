@@ -76,10 +76,11 @@ COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback). 1M context
 # Claude Code's prompt cache goes cold after its TTL (1h on a subscription). A
 # session left idle for an hour then pays to re-cache its whole history on the
 # next turn. With CCSL_KEEP_WARM_HOURS=N, a session that has been idle for less
-# than N hours gets one tiny turn typed into its tmux pane just before the cache
-# expires, which reads the cache and resets the TTL. CCStatusBar, when running
-# with keep-warm enabled, owns this instead (it can tell permission prompts from
-# idle), so the status line then stays out of the way.
+# than N hours gets one tiny turn typed into its prompt (tmux pane, or iTerm2
+# session via AppleScript) just before the cache expires, which reads the cache
+# and resets the TTL. CCStatusBar, when running with keep-warm enabled, owns this
+# instead (it can tell permission prompts from idle), so the status line then
+# stays out of the way.
 KEEP_WARM_MARKER = "[keep-alive]"
 KEEP_WARM_TEXT = f'{KEEP_WARM_MARKER} Reply with just "ok". Do nothing else.'
 KEEP_WARM_LEAD_SECONDS = 90
@@ -182,14 +183,72 @@ def claim_keep_warm(session_id, expires_at):
     return True
 
 
-def _composer_is_empty(pane):
-    """Only type into an empty prompt, never into a half-written message."""
+# iTerm2 addresses a session by the UUID half of ITERM_SESSION_ID ("w0t0p0:UUID").
+# argv 1 = session id; with argv 2 the text is typed (write text adds Enter),
+# without it the screen contents are returned.
+ITERM_POKE_SCRIPT = """
+on run argv
+  tell application id "com.googlecode.iterm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if id of s is item 1 of argv then
+            if (count of argv) > 1 then
+              tell s to write text (item 2 of argv)
+              return ""
+            end if
+            return contents of s
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return ""
+end run
+"""
+
+
+def keep_warm_target(env=None):
+    """Which terminal surface this session lives in, if we can type into it.
+
+    tmux wins over iTerm2: tmux inside iTerm2 sets both, and only tmux knows
+    the pane. Terminals that can't read their screen back are left out, since
+    typing blind could land in a half-written prompt or a permission dialog.
+    """
+    env = os.environ if env is None else env
+    if env.get("TMUX") and env.get("TMUX_PANE"):
+        return ("tmux", env["TMUX_PANE"])
+    iterm = env.get("ITERM_SESSION_ID", "")
+    if ":" in iterm:
+        return ("iterm", iterm.split(":", 1)[1])
+    return None
+
+
+def _read_screen(target):
+    kind, ref = target
+    if kind == "tmux":
+        cmd = ["tmux", "capture-pane", "-p", "-t", ref]
+    else:
+        cmd = ["osascript", "-e", ITERM_POKE_SCRIPT, ref]
     try:
-        out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane],
-                             capture_output=True, text=True, timeout=2).stdout
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
     except Exception:
-        return False
-    tail = [line for line in out.splitlines() if line.strip()][-8:]
+        return ""
+    return out.replace("\r", "\n")
+
+
+def _type_line(target, text):
+    kind, ref = target
+    if kind == "tmux":
+        cmd = ["tmux", "send-keys", "-t", ref, "-l", text, ";", "send-keys", "-t", ref, "Enter"]
+    else:
+        cmd = ["osascript", "-e", ITERM_POKE_SCRIPT, ref, text]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _composer_is_empty(target):
+    """Only type into an empty prompt, never into a half-written message."""
+    tail = [line for line in _read_screen(target).splitlines() if line.strip()][-8:]
     return any(re.fullmatch(r"\s*❯\s*", line) for line in tail)
 
 
@@ -197,10 +256,10 @@ def maybe_keep_warm(data):
     """Fire-and-forget keep-alive poke; never affects the status line output."""
     try:
         hours = keep_warm_hours()
-        pane = os.environ.get("TMUX_PANE")
+        target = keep_warm_target()
         prompt_cache = data.get("prompt_cache")
         now = time.time()
-        if hours <= 0 or not pane or not isinstance(prompt_cache, dict):
+        if hours <= 0 or not target or not isinstance(prompt_cache, dict):
             return
         expires_at = prompt_cache.get("expires_at")
         if not expires_at or not (0 < expires_at - now <= KEEP_WARM_LEAD_SECONDS):
@@ -217,13 +276,11 @@ def maybe_keep_warm(data):
         idle, last_prompt_at = transcript_idle_state(entries)
         if not should_keep_warm(prompt_cache, idle, last_prompt_at, hours, now):
             return
-        if ccstatusbar_owns_keep_warm() or not _composer_is_empty(pane):
+        if ccstatusbar_owns_keep_warm() or not _composer_is_empty(target):
             return
         if not claim_keep_warm(data.get("session_id", "unknown"), expires_at):
             return
-        subprocess.Popen(["tmux", "send-keys", "-t", pane, "-l", KEEP_WARM_TEXT, ";",
-                          "send-keys", "-t", pane, "Enter"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _type_line(target, KEEP_WARM_TEXT)
     except Exception:
         pass
 
