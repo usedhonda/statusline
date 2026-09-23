@@ -84,6 +84,18 @@ ccsl --show simple   # Lines 2 and 3 only
 ccsl --show 1,2      # Specific lines
 ```
 
+Environment variables (set them in the `statusLine` command):
+
+- `STATUSLINE_DISPLAY_MODE=full|compact|tight` — pin a layout instead of picking one from the terminal width. Handy in narrow tmux panes, where `full` keeps the long labels and trims the line ends
+- `CCSL_KEEP_WARM_HOURS=N` — keep the prompt cache warm (off by default). A session that has been idle for less than N hours gets one tiny `[keep-alive]` turn typed into its tmux pane just before the cache expires, so the next real turn doesn't pay to re-cache the whole history. It only types into an empty prompt, and steps aside when CCStatusBar's own keep-warm is running
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "STATUSLINE_DISPLAY_MODE=full CCSL_KEEP_WARM_HOURS=4 ~/.claude/statusline.py --show all"
+}
+```
+
 ## Requirements
 
 - Python 3.9+
