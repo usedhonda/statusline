@@ -39,3 +39,25 @@ jobs:
           pip install dist/ccsl-*.whl
           ccsl --version
           ccsl --help
+
+  # Self-update installs pull statusline.py from the stable branch, so a push
+  # to main reaches users only after every check above has passed on it.
+  promote:
+    needs: [lint, test, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency: promote-stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fast-forward stable
+        run: |
+          git fetch origin stable
+          if git merge-base --is-ancestor HEAD origin/stable; then
+            echo "stable already contains $GITHUB_SHA"
+          else
+            git push origin HEAD:refs/heads/stable
+          fi

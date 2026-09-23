@@ -60,7 +60,8 @@ REFRESH_LOCK_MAX = 120  # a background rebuild lock older than this is abandoned
 AUTO_UPDATE_CHECK_TTL = 14400  # 4 hours
 AUTO_UPDATE_CACHE_FILE = None
 AUTO_UPDATE_LOCK_FILE = None
-AUTO_UPDATE_URL = "https://raw.githubusercontent.com/usedhonda/statusline/main/statusline.py"
+# stable only advances after CI passes on main (see .github/workflows/ci.yml)
+AUTO_UPDATE_URL = "https://raw.githubusercontent.com/usedhonda/statusline/stable/statusline.py"
 # CCStatusBar (macOS menu-bar companion) installs its CLI here; the side-channel
 # below is a no-op when it isn't installed. Override with STATUSLINE_CCSTATUSBAR_BIN.
 CCSTATUSBAR_APP_SUPPORT = Path.home() / "Library" / "Application Support" / "CCStatusBar"

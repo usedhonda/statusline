@@ -21,7 +21,7 @@ It's a single dependency-free Python file. Drop it in and point Claude Code at i
 
 ```bash
 mkdir -p ~/.claude
-curl -fsSL https://raw.githubusercontent.com/usedhonda/statusline/main/statusline.py -o ~/.claude/statusline.py
+curl -fsSL https://raw.githubusercontent.com/usedhonda/statusline/stable/statusline.py -o ~/.claude/statusline.py
 python3 ~/.claude/statusline.py --setup
 ```
 
