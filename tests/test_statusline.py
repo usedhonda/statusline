@@ -2305,3 +2305,53 @@ class TestSmokeExtended:
         assert result.returncode == 0
         lines = result.stdout.strip().split('\n')
         assert len(lines) <= 2, f"--show 1,2 should be <= 2 lines, got {len(lines)}"
+
+
+class TestKeepWarm:
+    """Optional prompt-cache keep-alive: poke an idle session just before the cache goes cold."""
+
+    NOW = 1_800_000_000.0
+
+    @staticmethod
+    def _entry(kind, text=None, stop=None, ts="2027-01-15T08:00:00Z"):
+        message = {}
+        if text is not None:
+            message["content"] = text
+        if stop is not None:
+            message["stop_reason"] = stop
+        return {"type": kind, "timestamp": ts, "message": message}
+
+    def test_idle_after_end_turn_and_keep_alive_does_not_count_as_activity(self):
+        entries = [
+            self._entry("user", "fix the bug", ts="2027-01-15T08:00:00Z"),
+            self._entry("assistant", stop="end_turn"),
+            self._entry("user", statusline.KEEP_WARM_TEXT, ts="2027-01-15T09:00:00Z"),
+            self._entry("assistant", stop="end_turn"),
+        ]
+        idle, last_prompt_at = statusline.transcript_idle_state(entries)
+        assert idle is True
+        assert last_prompt_at == datetime(2027, 1, 15, 8, 0, tzinfo=timezone.utc).timestamp()
+
+    def test_pending_tool_call_is_not_idle(self):
+        entries = [self._entry("user", "go"), self._entry("assistant", stop="tool_use")]
+        assert statusline.transcript_idle_state(entries)[0] is False
+
+    def test_pokes_only_in_the_lead_window_and_within_the_hours(self):
+        cache = {"warm": True, "expires_at": self.NOW + 60}
+        recent = self.NOW - 3600
+        assert statusline.should_keep_warm(cache, True, recent, 6, self.NOW) is True
+        # too early
+        early = {"warm": True, "expires_at": self.NOW + 600}
+        assert statusline.should_keep_warm(early, True, recent, 6, self.NOW) is False
+        # window over
+        assert statusline.should_keep_warm(cache, True, self.NOW - 7 * 3600, 6, self.NOW) is False
+        # off, busy, or cold
+        assert statusline.should_keep_warm(cache, True, recent, 0, self.NOW) is False
+        assert statusline.should_keep_warm(cache, False, recent, 6, self.NOW) is False
+        assert statusline.should_keep_warm({"warm": False, "expires_at": self.NOW + 60}, True, recent, 6, self.NOW) is False
+
+    def test_claim_is_once_per_expiry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(statusline.Path, "home", lambda: tmp_path)
+        assert statusline.claim_keep_warm("s1", self.NOW + 60) is True
+        assert statusline.claim_keep_warm("s1", self.NOW + 60) is False
+        assert statusline.claim_keep_warm("s1", self.NOW + 3660) is True

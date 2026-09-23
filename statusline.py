@@ -58,11 +58,192 @@ AUTO_UPDATE_CHECK_TTL = 14400  # 4 hours
 AUTO_UPDATE_CACHE_FILE = None
 AUTO_UPDATE_LOCK_FILE = None
 AUTO_UPDATE_URL = "https://raw.githubusercontent.com/usedhonda/statusline/main/statusline.py"
+# CCStatusBar (macOS menu-bar companion) installs its CLI here; the side-channel
+# below is a no-op when it isn't installed. Override with STATUSLINE_CCSTATUSBAR_BIN.
+CCSTATUSBAR_APP_SUPPORT = Path.home() / "Library" / "Application Support" / "CCStatusBar"
+CCSTATUSBAR_BIN = Path(os.environ.get("STATUSLINE_CCSTATUSBAR_BIN") or CCSTATUSBAR_APP_SUPPORT / "bin" / "CCStatusBar")
 
 # Token compaction threshold - FALLBACK VALUE ONLY
 # Dynamic value is now calculated from API: context_window_size * 0.8
 # This constant is kept for backwards compatibility if API data is unavailable
 COMPACTION_THRESHOLD = 200000 * 0.8  # 80% of 200K tokens (fallback). 1M context: 800K
+
+# ========================================
+# PROMPT CACHE KEEP-WARM (optional, off by default)
+# ========================================
+# Claude Code's prompt cache goes cold after its TTL (1h on a subscription). A
+# session left idle for an hour then pays to re-cache its whole history on the
+# next turn. With CCSL_KEEP_WARM_HOURS=N, a session that has been idle for less
+# than N hours gets one tiny turn typed into its tmux pane just before the cache
+# expires, which reads the cache and resets the TTL. CCStatusBar, when running
+# with keep-warm enabled, owns this instead (it can tell permission prompts from
+# idle), so the status line then stays out of the way.
+KEEP_WARM_MARKER = "[keep-alive]"
+KEEP_WARM_TEXT = f'{KEEP_WARM_MARKER} Reply with just "ok". Do nothing else.'
+KEEP_WARM_LEAD_SECONDS = 90
+KEEP_WARM_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def keep_warm_hours():
+    try:
+        return max(0.0, float(os.environ.get("CCSL_KEEP_WARM_HOURS", "0") or 0))
+    except ValueError:
+        return 0.0
+
+
+def _entry_time(entry):
+    try:
+        return datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _is_human_prompt(entry):
+    if entry.get("type") != "user" or entry.get("isMeta"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and not any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
+
+
+def _prompt_text(entry):
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
+
+
+def transcript_idle_state(entries):
+    """(idle, last_human_prompt_at) from transcript entries, oldest first.
+
+    Idle means the conversation's last turn ended with Claude's final reply
+    (`end_turn`); a pending tool call, permission prompt or unanswered prompt is
+    not idle. Keep-alive prompts are skipped, so poking never extends the window.
+    """
+    idle = False
+    last_prompt_at = None
+    for entry in entries:
+        kind = entry.get("type")
+        if kind == "assistant":
+            idle = (entry.get("message") or {}).get("stop_reason") == "end_turn"
+        elif kind == "user":
+            idle = False
+            if _is_human_prompt(entry) and not _prompt_text(entry).lstrip().startswith(KEEP_WARM_MARKER):
+                last_prompt_at = _entry_time(entry) or last_prompt_at
+    return idle, last_prompt_at
+
+
+def should_keep_warm(prompt_cache, idle, last_prompt_at, hours, now):
+    """Pure decision: poke now so the cache is read just before it goes cold."""
+    if hours <= 0 or not idle or last_prompt_at is None:
+        return False
+    if not isinstance(prompt_cache, dict) or not prompt_cache.get("warm"):
+        return False
+    expires_at = prompt_cache.get("expires_at")
+    if not expires_at or not (0 < expires_at - now <= KEEP_WARM_LEAD_SECONDS):
+        return False
+    return now - last_prompt_at < hours * 3600
+
+
+def ccstatusbar_owns_keep_warm():
+    """CCStatusBar writes keepwarm.json while its keep-warm is on."""
+    try:
+        state = json.loads((CCSTATUSBAR_APP_SUPPORT / "keepwarm.json").read_text())
+        if not state.get("enabled"):
+            return False
+        os.kill(int(state["pid"]), 0)
+        return True
+    except Exception:
+        return False
+
+
+def claim_keep_warm(session_id, expires_at):
+    """One poke per (session, cache expiry), shared with CCStatusBar."""
+    lock_dir = Path.home() / ".claude" / ".cache-poke"
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_dir / f"{session_id}-{int(expires_at)}", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except OSError:
+        return False
+    for old in lock_dir.glob(f"{session_id}-*"):
+        if old.name != f"{session_id}-{int(expires_at)}":
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    return True
+
+
+def _composer_is_empty(pane):
+    """Only type into an empty prompt, never into a half-written message."""
+    try:
+        out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane],
+                             capture_output=True, text=True, timeout=2).stdout
+    except Exception:
+        return False
+    tail = [line for line in out.splitlines() if line.strip()][-8:]
+    return any(re.fullmatch(r"\s*❯\s*", line) for line in tail)
+
+
+def maybe_keep_warm(data):
+    """Fire-and-forget keep-alive poke; never affects the status line output."""
+    try:
+        hours = keep_warm_hours()
+        pane = os.environ.get("TMUX_PANE")
+        prompt_cache = data.get("prompt_cache")
+        now = time.time()
+        if hours <= 0 or not pane or not isinstance(prompt_cache, dict):
+            return
+        expires_at = prompt_cache.get("expires_at")
+        if not expires_at or not (0 < expires_at - now <= KEEP_WARM_LEAD_SECONDS):
+            return
+        entries = []
+        with open(data.get("transcript_path") or "", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - KEEP_WARM_TAIL_BYTES))
+            for raw in f.read().splitlines():
+                try:
+                    entries.append(json.loads(raw))
+                except Exception:
+                    continue
+        idle, last_prompt_at = transcript_idle_state(entries)
+        if not should_keep_warm(prompt_cache, idle, last_prompt_at, hours, now):
+            return
+        if ccstatusbar_owns_keep_warm() or not _composer_is_empty(pane):
+            return
+        if not claim_keep_warm(data.get("session_id", "unknown"), expires_at):
+            return
+        subprocess.Popen(["tmux", "send-keys", "-t", pane, "-l", KEEP_WARM_TEXT, ";",
+                          "send-keys", "-t", pane, "Enter"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _forward_to_ccstatusbar(input_data):
+    """Best-effort side-channel for CCStatusBar; never affects statusline output."""
+    try:
+        if not CCSTATUSBAR_BIN.exists():
+            return
+        proc = subprocess.Popen(
+            [str(CCSTATUSBAR_BIN), "statusline"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            proc.stdin.write(input_data.encode("utf-8"))
+            proc.stdin.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 # TWO DISTINCT TOKEN CALCULATION SYSTEMS
 
@@ -3188,9 +3369,11 @@ def main():
             # No input provided - just exit silently
             return
         data = json.loads(input_data)
+        _forward_to_ccstatusbar(input_data)
 
         _diagnose_stdin(data)
         _watch_schema_drift(data)
+        maybe_keep_warm(data)
 
         # Optional stdin dump for debugging.
         # Opt-in via env var STATUSLINE_DUMP_STDIN=<path>, OR by touching ~/.claude/.statusline-dump-stdin
