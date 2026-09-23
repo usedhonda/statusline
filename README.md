@@ -82,6 +82,8 @@ Environment variables (set them in the `statusLine` command):
   - It only types into an empty prompt, and steps aside when CCStatusBar's own keep-warm is running
   - The setting applies to every session that uses this `statusLine` command; per-session control needs CCStatusBar
 
+  ![keep-warm poke](assets/keep-warm.png)
+
 ```json
 "statusLine": {
   "type": "command",
