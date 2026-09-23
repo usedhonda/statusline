@@ -1,7 +1,6 @@
 # ccsl
 
 [![CI](https://github.com/usedhonda/statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/usedhonda/statusline/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/ccsl)](https://pypi.org/project/ccsl/)
 
 Enhanced status line for Claude Code showing context usage, session time, and weekly budget.
 
@@ -31,13 +30,6 @@ Restart Claude Code. Done — it keeps itself up to date automatically.
 <details>
 <summary>Other install methods</summary>
 
-**pip**
-
-```bash
-pip install ccsl
-ccsl --setup
-```
-
 **From source**
 
 ```bash
@@ -46,12 +38,10 @@ cd statusline
 python3 install.py
 ```
 
-**Homebrew** (being retired — prefer the curl install above)
-
-```bash
-brew install usedhonda/tap/ccsl
-ccsl --setup
-```
+**pip / Homebrew (retired)** — these builds no longer receive updates. If you
+installed with `pip install ccsl` or `brew install usedhonda/tap/ccsl`, switch to
+the curl install above, then remove the old package (`pip uninstall ccsl` or
+`brew uninstall ccsl`).
 
 </details>
 
@@ -79,9 +69,9 @@ Built for **1M context** — the context line scales to the active window size (
 Control which lines to display:
 
 ```bash
-ccsl --show all      # All 4 lines (default)
-ccsl --show simple   # Lines 2 and 3 only
-ccsl --show 1,2      # Specific lines
+~/.claude/statusline.py --show all      # All 4 lines (default)
+~/.claude/statusline.py --show simple   # Lines 2 and 3 only
+~/.claude/statusline.py --show 1,2      # Specific lines
 ```
 
 Environment variables (set them in the `statusLine` command):

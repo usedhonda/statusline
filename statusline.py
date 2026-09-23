@@ -6,7 +6,7 @@ if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-__version__ = "1.0.31"
+__version__ = "1.0.32"
 
 # ============================================
 # 📝 CONFIGURATION - Edit these values
@@ -3815,6 +3815,9 @@ def main():
             warning = f"{Colors.BRIGHT_RED}\u26a0\ufe0f DEAD: {dead_names}{Colors.RESET}"
             lines.insert(0, warning)
 
+        if is_retired_package_install():
+            lines.append(f"{Colors.BRIGHT_YELLOW}ccsl: pip/brew retired, no updates. Reinstall: github.com/usedhonda/statusline{Colors.RESET}")
+
         # Output lines (flush=True to avoid partial reads when piped to Claude Code)
         output = "\n".join(f"\033[0m\033[1;97m{line}\033[0m" for line in lines)
         sys.stdout.write(output + "\n")
@@ -4321,6 +4324,12 @@ def _is_update_disabled():
     if script_path != legacy_path_raw.resolve():
         return True
     return False
+
+def is_retired_package_install(script_path=None):
+    """pip/brew builds are frozen at their last release and never self-update."""
+    parts = Path(script_path or __file__).resolve().parts
+    return 'site-packages' in parts or 'Cellar' in parts
+
 
 def maybe_check_update():
     """Check if an update check is due and spawn background process if so."""

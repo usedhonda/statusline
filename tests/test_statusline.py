@@ -2385,3 +2385,12 @@ class TestKeepWarm:
         assert statusline.claim_keep_warm("s1", self.NOW + 60) is True
         assert statusline.claim_keep_warm("s1", self.NOW + 60) is False
         assert statusline.claim_keep_warm("s1", self.NOW + 3660) is True
+
+
+class TestRetiredPackageInstall:
+    def test_pip_and_brew_builds_are_retired(self):
+        assert statusline.is_retired_package_install('/usr/lib/python3.12/site-packages/statusline.py')
+        assert statusline.is_retired_package_install('/opt/homebrew/Cellar/ccsl/1.0.32/libexec/statusline.py')
+
+    def test_curl_and_source_installs_are_not(self, tmp_path):
+        assert not statusline.is_retired_package_install(tmp_path / '.claude' / 'statusline.py')

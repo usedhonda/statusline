@@ -42,8 +42,8 @@ After making changes to `statusline.py`:
 1. Run the test suite
 2. The dev machine's `~/.claude/statusline.py` is a **symlink** into this
    checkout — changes are live immediately, never run `ccsl --setup` here
-3. Release via the procedure in `.local/release.md` (version bump → GitHub
-   release → PyPI → Homebrew tap)
+3. Release via the procedure in `.local/release.md` (version bump → push to
+   main, which is what installs self-update from; pip and Homebrew are retired)
 
 ## 🚨 CRITICAL RULE: NO FAKE DATA - 絶対厳守 🚨
 
