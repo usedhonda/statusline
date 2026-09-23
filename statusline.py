@@ -41,18 +41,19 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import time
+import hashlib
 
 # CONSTANTS
 
 # Block stats cache settings
 BLOCK_STATS_CACHE_TTL = 30  # 30 seconds
 BLOCK_STATS_STALE_MAX = 600  # serve a stale cache this long while it rebuilds
+# A rebuild scans every recent transcript (hundreds of MB, seconds of CPU);
+# live sessions change the fingerprint constantly, so cap how often it runs.
+BLOCK_STATS_REFRESH_INTERVAL = 120
 REFRESH_LOCK_MAX = 120  # a background rebuild lock older than this is abandoned
-BLOCK_STATS_CACHE_FILE = None
 
 # Transcript stats cache settings
-TRANSCRIPT_STATS_CACHE_TTL = 15  # 15 seconds
-TRANSCRIPT_STATS_CACHE_FILE = None
 
 
 # Auto-update settings
@@ -1008,85 +1009,108 @@ def get_real_time_burn_data(session_id=None):
         return []
 
 # REMOVED: show_live_burn_graph() - unused function (replaced by get_burn_line)
+TRANSCRIPT_SCAN_CHUNK = 32 * 1024 * 1024  # save progress after each chunk
+
+
+def _empty_transcript_stats():
+    return {'offset': 0, 'message_count': 0, 'error_count': 0,
+            'user_messages': 0, 'assistant_messages': 0,
+            'input_tokens': 0, 'output_tokens': 0,
+            'cache_creation': 0, 'cache_read': 0}
+
+
+def _apply_transcript_entry(state, entry):
+    """Fold one transcript line into the running stats."""
+    if entry.get('type') == 'user':
+        state['user_messages'] += 1
+        state['message_count'] += 1
+    elif entry.get('type') == 'assistant':
+        state['assistant_messages'] += 1
+        state['message_count'] += 1
+
+    # Count errors: isApiErrorMessage marks real user-visible API
+    # errors; a bare 'error' key also rides on system/api_error
+    # entries that were auto-retried (not real failures)
+    if entry.get('isApiErrorMessage'):
+        state['error_count'] += 1
+
+    # 最後の有効なassistantメッセージのusageを使用（累積値）
+    if entry.get('type') == 'assistant' and entry.get('message', {}).get('usage'):
+        usage = entry['message']['usage']
+        # 0でないusageのみ更新（エラーメッセージのusage=0を無視）
+        if (usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+                + usage.get('cache_creation_input_tokens', 0)
+                + usage.get('cache_read_input_tokens', 0)) > 0:
+            state['input_tokens'] = usage.get('input_tokens', 0)
+            state['output_tokens'] = usage.get('output_tokens', 0)
+            state['cache_creation'] = usage.get('cache_creation_input_tokens', 0)
+            state['cache_read'] = usage.get('cache_read_input_tokens', 0)
+
+
 def calculate_tokens_from_transcript(file_path):
-    """Calculate total tokens from transcript file by summing all message usage data"""
-    # Check 15s file cache (TTL + path + mtime validation)
+    """Calculate token stats from a transcript, reading only what was appended.
+
+    Transcripts grow to hundreds of MB and several sessions redraw every few
+    seconds, so a full re-parse per run pegs the CPU. Each transcript keeps its
+    own cache of the stats plus the byte offset read so far; a run parses only
+    the complete lines added since. A shrunk or replaced file starts over.
+    """
     file_path = Path(file_path) if not isinstance(file_path, Path) else file_path
-    cached = _load_transcript_stats_cache(file_path)
-    if cached:
-        return (cached['total_tokens'], cached['message_count'], cached['error_count'],
-                cached['user_messages'], cached['assistant_messages'],
-                cached['input_tokens'], cached['output_tokens'],
-                cached['cache_creation'], cached['cache_read'])
-
-    message_count = 0
-    error_count = 0
-    user_messages = 0
-    assistant_messages = 0
-
-    # トークンの詳細追跡（全メッセージの合計）
-    total_input_tokens = 0
-    total_output_tokens = 0
-    total_cache_creation = 0
-    total_cache_read = 0
-
     try:
-        with open(file_path, 'r') as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    
-                    # Count message types
-                    if entry.get('type') == 'user':
-                        user_messages += 1
-                        message_count += 1
-                    elif entry.get('type') == 'assistant':
-                        assistant_messages += 1
-                        message_count += 1
-                    
-                    # Count errors: isApiErrorMessage marks real user-visible API
-                    # errors; a bare 'error' key also rides on system/api_error
-                    # entries that were auto-retried (not real failures)
-                    if entry.get('isApiErrorMessage'):
-                        error_count += 1
-                    
-                    # 最後の有効なassistantメッセージのusageを使用（累積値）
-                    if entry.get('type') == 'assistant' and entry.get('message', {}).get('usage'):
-                        usage = entry['message']['usage']
-                        # 0でないusageのみ更新（エラーメッセージのusage=0を無視）
-                        total_tokens_in_usage = (usage.get('input_tokens', 0) + 
-                                               usage.get('output_tokens', 0) + 
-                                               usage.get('cache_creation_input_tokens', 0) + 
-                                               usage.get('cache_read_input_tokens', 0))
-                        if total_tokens_in_usage > 0:
-                            total_input_tokens = usage.get('input_tokens', 0)
-                            total_output_tokens = usage.get('output_tokens', 0)
-                            total_cache_creation = usage.get('cache_creation_input_tokens', 0)
-                            total_cache_read = usage.get('cache_read_input_tokens', 0)
-                        
-                except json.JSONDecodeError:
-                    continue
+        st = file_path.stat()
     except FileNotFoundError:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
-    except Exception as e:
-        # Log error for debugging
-        with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
-            f.write(f"\n{datetime.now()}: Error in calculate_tokens_from_transcript: {e}\n")
-            f.write(f"File path: {file_path}\n")
+    except OSError:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
-    
+
+    cache_file = _get_transcript_stats_cache_file(file_path)
+    state = None
+    try:
+        cached = json.loads(cache_file.read_text())
+        if (cached.get('file_path') == str(file_path) and cached.get('inode') == st.st_ino
+                and 0 <= cached.get('offset', -1) <= st.st_size):
+            state = cached
+    except (OSError, ValueError):
+        pass
+    if state is None:
+        state = _empty_transcript_stats()
+
+    try:
+        with open(file_path, 'rb') as f:
+            f.seek(state['offset'])
+            while state['offset'] < st.st_size:
+                chunk = f.read(TRANSCRIPT_SCAN_CHUNK)
+                if not chunk:
+                    break
+                end = chunk.rfind(b'\n')
+                if end < 0:
+                    break  # a line still being written; pick it up next run
+                complete = chunk[:end + 1]
+                for raw in complete.splitlines():
+                    try:
+                        _apply_transcript_entry(state, json.loads(raw))
+                    except (ValueError, AttributeError):
+                        continue
+                state['offset'] += len(complete)
+                f.seek(state['offset'])
+                _save_transcript_stats_cache(cache_file, file_path, st.st_ino, state)
+    except Exception as e:
+        with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as log:
+            log.write(f"\n{datetime.now()}: Error in calculate_tokens_from_transcript: {e}\n")
+            log.write(f"File path: {file_path}\n")
+        return 0, 0, 0, 0, 0, 0, 0, 0, 0
+
     # 総トークン数（professional calculation）
     total_tokens = get_total_tokens({
-        'input_tokens': total_input_tokens,
-        'output_tokens': total_output_tokens,
-        'cache_creation_input_tokens': total_cache_creation,
-        'cache_read_input_tokens': total_cache_read
+        'input_tokens': state['input_tokens'],
+        'output_tokens': state['output_tokens'],
+        'cache_creation_input_tokens': state['cache_creation'],
+        'cache_read_input_tokens': state['cache_read'],
     })
-
-    result = (total_tokens, message_count, error_count, user_messages, assistant_messages,
-              total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read)
-    _save_transcript_stats_cache(file_path, result)
-    return result
+    return (total_tokens, state['message_count'], state['error_count'],
+            state['user_messages'], state['assistant_messages'],
+            state['input_tokens'], state['output_tokens'],
+            state['cache_creation'], state['cache_read'])
 
 def find_session_transcript(session_id):
     """Find transcript file for the current session"""
@@ -4033,19 +4057,21 @@ def calculate_tokens_since_time(start_time, session_id):
 # Block stats / transcript cache management
 # ============================================
 
-def _get_block_stats_cache_file():
-    """Get block stats cache file path (lazy initialization)"""
-    global BLOCK_STATS_CACHE_FILE
-    if BLOCK_STATS_CACHE_FILE is None:
-        BLOCK_STATS_CACHE_FILE = Path.home() / '.claude' / '.block_stats_cache.json'
-    return BLOCK_STATS_CACHE_FILE
+def _get_block_stats_cache_file(api_block_start_utc=None):
+    """Block stats cache path, one per 5-hour window.
 
-def _get_transcript_stats_cache_file():
-    """Get transcript stats cache file path (lazy initialization)"""
-    global TRANSCRIPT_STATS_CACHE_FILE
-    if TRANSCRIPT_STATS_CACHE_FILE is None:
-        TRANSCRIPT_STATS_CACHE_FILE = Path.home() / '.claude' / '.transcript_stats_cache.json'
-    return TRANSCRIPT_STATS_CACHE_FILE
+    Sessions don't all see the same window: one that hasn't received
+    rate_limits yet has none. Sharing one file made them evict each other's
+    cache on every run and keep a rebuild running nonstop.
+    """
+    key = _serialize_datetime(api_block_start_utc) if api_block_start_utc else 'local'
+    key = re.sub(r'[^0-9A-Za-z]', '', key)
+    return Path.home() / '.claude' / f'.block_stats_cache.{key}.json'
+
+def _get_transcript_stats_cache_file(file_path):
+    """Per-transcript stats cache, so concurrent sessions don't evict each other."""
+    key = hashlib.sha1(str(file_path).encode('utf-8')).hexdigest()[:16]
+    return Path.home() / '.claude' / '.transcript_stats' / f'{key}.json'
 
 def _serialize_datetime(dt):
     """Convert datetime to ISO string for JSON cache serialization."""
@@ -4125,7 +4151,7 @@ def _release_lock(lock):
 
 
 def _refresh_block_cache_in_background(session_id, api_block_start_utc):
-    _run_detached(_get_block_stats_cache_file().with_suffix('.lock'),
+    _run_detached(_get_block_stats_cache_file(api_block_start_utc).with_suffix('.lock'),
                   lambda: _get_cached_block_data(session_id, api_block_start_utc, force_refresh=True))
 
 
@@ -4142,7 +4168,7 @@ def _get_cached_block_data(session_id, api_block_start_utc=None, force_refresh=F
     transcript_fp, transcript_files = _get_transcript_fingerprint()
 
     # --- cache hit path ---
-    cache_file = _get_block_stats_cache_file()
+    cache_file = _get_block_stats_cache_file(api_block_start_utc)
     current_api_start_str = _serialize_datetime(api_block_start_utc) if api_block_start_utc else None
     try:
         if cache_file.exists() and not force_refresh:
@@ -4158,7 +4184,7 @@ def _get_cached_block_data(session_id, api_block_start_utc=None, force_refresh=F
             usable = (cached_fp is not None and cached_api_start == current_api_start_str
                       and (fresh or age < BLOCK_STATS_STALE_MAX))
             if usable:
-                if not fresh:
+                if not fresh and age >= BLOCK_STATS_REFRESH_INTERVAL:
                     _refresh_block_cache_in_background(session_id, api_block_start_utc)
                 # Deserialize block_stats
                 bs = cached.get('block_stats')
@@ -4274,50 +4300,15 @@ def _get_cached_block_data(session_id, api_block_start_utc=None, force_refresh=F
 
     return block_stats, current_block
 
-def _load_transcript_stats_cache(file_path):
-    """Load transcript stats from cache if valid (TTL + path + mtime match).
-    Returns cached data dict or None on miss."""
-    cache_file = _get_transcript_stats_cache_file()
+def _save_transcript_stats_cache(cache_file, file_path, inode, state):
+    """Write one transcript's stats cache atomically."""
     try:
-        if cache_file.exists():
-            with open(cache_file, 'r') as f:
-                cached = json.load(f)
-            if (time.time() - cached.get('timestamp', 0) < TRANSCRIPT_STATS_CACHE_TTL
-                    and cached.get('file_path') == str(file_path)
-                    and cached.get('file_mtime') == file_path.stat().st_mtime):
-                return cached
-    except (json.JSONDecodeError, OSError):
-        pass
-    return None
-
-def _save_transcript_stats_cache(file_path, stats_tuple):
-    """Write transcript stats cache atomically."""
-    cache_file = _get_transcript_stats_cache_file()
-    (total_tokens, message_count, error_count, user_messages, assistant_messages,
-     input_tokens, output_tokens, cache_creation, cache_read) = stats_tuple
-    try:
-        tmp = cache_file.with_suffix('.tmp')
-        with open(tmp, 'w') as f:
-            json.dump({
-                'timestamp': time.time(),
-                'file_path': str(file_path),
-                'file_mtime': file_path.stat().st_mtime,
-                'total_tokens': total_tokens,
-                'message_count': message_count,
-                'error_count': error_count,
-                'user_messages': user_messages,
-                'assistant_messages': assistant_messages,
-                'input_tokens': input_tokens,
-                'output_tokens': output_tokens,
-                'cache_creation': cache_creation,
-                'cache_read': cache_read,
-            }, f)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_suffix(f'.{os.getpid()}.tmp')
+        tmp.write_text(json.dumps(dict(state, file_path=str(file_path), inode=inode)))
         tmp.rename(cache_file)
     except OSError:
         pass
-
-
-
 
 
 # ============================================
@@ -4771,7 +4762,7 @@ def get_api_session_time_range(ratelimit_data):
     except (ValueError, TypeError):
         return None
 
-WEEKLY_TIMELINE_CACHE_TTL = 300  # 5 minutes
+WEEKLY_TIMELINE_CACHE_TTL = 1800  # 30 minutes: the 7-day scan is the heaviest
 WEEKLY_TIMELINE_STALE_MAX = 3600  # serve a stale timeline this long while it rebuilds
 
 def _get_weekly_timeline_cache_file():

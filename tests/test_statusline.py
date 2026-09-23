@@ -1016,7 +1016,7 @@ class TestBlockStatsCache:
     def test_stale_cache_served_while_refreshing(self, tmp_path):
         """Past the TTL, the stale cache is returned and rebuilt in the background."""
         cache_file = tmp_path / '.block_stats_cache.json'
-        data = self._make_cache_data(age=60)  # past 30s TTL, within stale window
+        data = self._make_cache_data(age=statusline.BLOCK_STATS_REFRESH_INTERVAL + 10)  # stale, due a rebuild
         import json as _json
         cache_file.write_text(_json.dumps(data))
 
@@ -1028,6 +1028,19 @@ class TestBlockStatsCache:
                 mock_load.assert_not_called()
                 mock_refresh.assert_called_once()
                 assert bs is not None
+
+    def test_stale_cache_not_rebuilt_too_often(self, tmp_path):
+        """Between the TTL and the refresh interval, the stale cache is served with no rebuild."""
+        cache_file = tmp_path / '.block_stats_cache.json'
+        import json as _json
+        cache_file.write_text(_json.dumps(self._make_cache_data(age=60)))
+
+        with patch.object(statusline, '_get_block_stats_cache_file', return_value=cache_file), \
+             patch.object(statusline, '_get_transcript_fingerprint', return_value=({'other': [1, 2]}, [])), \
+             patch.object(statusline, '_refresh_block_cache_in_background') as mock_refresh:
+            bs, cb = statusline._get_cached_block_data('test-session')
+            assert bs is not None
+            mock_refresh.assert_not_called()
 
     def test_cache_miss_past_stale_window(self, tmp_path):
         """A cache older than the stale window is not served; a rebuild is scheduled."""
@@ -1120,109 +1133,62 @@ class TestBlockStatsCache:
 
 
 class TestTranscriptStatsCache:
-    """Tests for transcript stats 15s TTL file cache."""
+    """Per-transcript stats cache that only parses newly appended lines."""
 
-    def _make_transcript(self, tmp_path, content='{"type":"user","timestamp":"2026-02-26T05:00:00Z"}\n'):
-        """Create a temporary transcript file."""
-        f = tmp_path / 'transcript.jsonl'
-        f.write_text(content)
-        return f
+    USER = '{"type":"user","timestamp":"2026-02-26T05:00:00Z"}\n'
 
-    def test_cache_hit_within_ttl(self, tmp_path):
-        """Fresh cache returns data without re-reading the JSONL file."""
-        transcript = self._make_transcript(tmp_path)
-        cache_file = tmp_path / '.transcript_stats_cache.json'
+    @staticmethod
+    def _assistant(inp, out):
+        return ('{"type":"assistant","message":{"usage":{"input_tokens":%d,"output_tokens":%d,'
+                '"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n' % (inp, out))
 
-        import json as _json
-        cache_data = {
-            'timestamp': time.time(),
-            'file_path': str(transcript),
-            'file_mtime': transcript.stat().st_mtime,
-            'total_tokens': 9999,
-            'message_count': 5,
-            'error_count': 0,
-            'user_messages': 3,
-            'assistant_messages': 2,
-            'input_tokens': 5000,
-            'output_tokens': 4999,
-            'cache_creation': 0,
-            'cache_read': 0,
-        }
-        cache_file.write_text(_json.dumps(cache_data))
-
+    def _run(self, transcript, cache_file):
         with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
-            result = statusline.calculate_tokens_from_transcript(transcript)
+            return statusline.calculate_tokens_from_transcript(transcript)
 
-        assert result[0] == 9999  # total_tokens from cache
+    def test_appended_lines_update_stats(self, tmp_path):
+        transcript = tmp_path / 'transcript.jsonl'
+        cache_file = tmp_path / 'cache.json'
+        transcript.write_text(self.USER + self._assistant(100, 10))
+        first = self._run(transcript, cache_file)
+        assert first[1] == 2 and first[5] == 100
+        with open(transcript, 'a') as f:
+            f.write(self.USER + self._assistant(300, 30))
+        second = self._run(transcript, cache_file)
+        assert second[1] == 4 and second[3] == 2 and second[5] == 300 and second[6] == 30
 
-    def test_cache_miss_mtime_changed(self, tmp_path):
-        """Cache invalidated when file mtime changes (new messages added)."""
-        transcript = self._make_transcript(tmp_path)
-        cache_file = tmp_path / '.transcript_stats_cache.json'
+    def test_only_new_bytes_are_parsed(self, tmp_path):
+        transcript = tmp_path / 'transcript.jsonl'
+        cache_file = tmp_path / 'cache.json'
+        transcript.write_text(self.USER * 5)
+        self._run(transcript, cache_file)
+        with open(transcript, 'a') as f:
+            f.write(self.USER)
+        with patch.object(statusline, '_apply_transcript_entry') as apply:
+            self._run(transcript, cache_file)
+        assert apply.call_count == 1
 
-        import json as _json
-        cache_data = {
-            'timestamp': time.time(),
-            'file_path': str(transcript),
-            'file_mtime': transcript.stat().st_mtime - 1,  # stale mtime
-            'total_tokens': 9999,
-            'message_count': 5,
-            'error_count': 0,
-            'user_messages': 3,
-            'assistant_messages': 2,
-            'input_tokens': 5000,
-            'output_tokens': 4999,
-            'cache_creation': 0,
-            'cache_read': 0,
-        }
-        cache_file.write_text(_json.dumps(cache_data))
+    def test_partial_last_line_waits(self, tmp_path):
+        transcript = tmp_path / 'transcript.jsonl'
+        cache_file = tmp_path / 'cache.json'
+        transcript.write_text(self.USER + '{"type":"user"')
+        assert self._run(transcript, cache_file)[1] == 1
+        with open(transcript, 'a') as f:
+            f.write(',"timestamp":"2026-02-26T05:01:00Z"}\n')
+        assert self._run(transcript, cache_file)[1] == 2
 
-        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
-            result = statusline.calculate_tokens_from_transcript(transcript)
+    def test_rewritten_file_starts_over(self, tmp_path):
+        transcript = tmp_path / 'transcript.jsonl'
+        cache_file = tmp_path / 'cache.json'
+        transcript.write_text(self.USER * 3)
+        self._run(transcript, cache_file)
+        transcript.write_text(self.USER)  # shorter than the cached offset
+        assert self._run(transcript, cache_file)[1] == 1
 
-        # Should re-read file; the simple transcript has no assistant usage -> 0 tokens
-        assert result[0] == 0
-
-    def test_cache_miss_expired_ttl(self, tmp_path):
-        """Expired cache triggers re-read."""
-        transcript = self._make_transcript(tmp_path)
-        cache_file = tmp_path / '.transcript_stats_cache.json'
-
-        import json as _json
-        cache_data = {
-            'timestamp': time.time() - 30,  # expired
-            'file_path': str(transcript),
-            'file_mtime': transcript.stat().st_mtime,
-            'total_tokens': 9999,
-            'message_count': 5,
-            'error_count': 0,
-            'user_messages': 3,
-            'assistant_messages': 2,
-            'input_tokens': 5000,
-            'output_tokens': 4999,
-            'cache_creation': 0,
-            'cache_read': 0,
-        }
-        cache_file.write_text(_json.dumps(cache_data))
-
-        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
-            result = statusline.calculate_tokens_from_transcript(transcript)
-
-        assert result[0] == 0  # re-read: no real tokens in the simple transcript
-
-    def test_cache_written_after_computation(self, tmp_path):
-        """Cache file is created after a fresh computation."""
-        transcript = self._make_transcript(tmp_path)
-        cache_file = tmp_path / '.transcript_stats_cache.json'
-
-        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache_file):
-            statusline.calculate_tokens_from_transcript(transcript)
-
-        assert cache_file.exists()
-        import json as _json
-        cached = _json.loads(cache_file.read_text())
-        assert cached['file_path'] == str(transcript)
-        assert cached['file_mtime'] == transcript.stat().st_mtime
+    def test_sessions_get_separate_caches(self, tmp_path):
+        a = statusline._get_transcript_stats_cache_file(tmp_path / 'a.jsonl')
+        b = statusline._get_transcript_stats_cache_file(tmp_path / 'b.jsonl')
+        assert a != b
 
 
 # ============================================
@@ -1889,8 +1855,12 @@ class TestErrorCount:
 
     def _count(self, tmp_path, entries):
         p = tmp_path / 't.jsonl'
-        p.write_text('\n'.join(json.dumps(e) for e in entries))
-        result = statusline.calculate_tokens_from_transcript(p)
+        # Claude Code ends every JSONL line with a newline; a line without one
+        # is still being written and is picked up on a later run
+        p.write_text(''.join(json.dumps(e) + '\n' for e in entries))
+        with patch.object(statusline, '_get_transcript_stats_cache_file',
+                          return_value=tmp_path / 'cache.json'):
+            result = statusline.calculate_tokens_from_transcript(p)
         return result[2]  # error_count
 
     def test_api_error_message_counted(self, tmp_path):
@@ -2463,3 +2433,12 @@ class TestFastModePricing:
         standard = dict(fast, speed='standard')
         assert abs(statusline._metered_usage_cost('claude-opus-5-5', fast) - 8.00) < 1e-9
         assert statusline._metered_usage_cost('claude-opus-5-5', standard) == 0.0
+
+
+class TestBlockCachePerWindow:
+    def test_windows_get_separate_cache_files(self):
+        from datetime import datetime as _dt
+        with_window = statusline._get_block_stats_cache_file(_dt(2026, 9, 23, 15, 40))
+        without = statusline._get_block_stats_cache_file(None)
+        assert with_window != without
+        assert with_window == statusline._get_block_stats_cache_file(_dt(2026, 9, 23, 15, 40))
