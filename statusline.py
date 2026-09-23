@@ -2372,7 +2372,11 @@ def format_pr_badge(pr):
 
 
 def format_cache_badge(prompt_cache, now=None):
-    """`🔥42m` while the prompt cache is warm, `❄` once it has gone cold.
+    """`🔥14:32` while the prompt cache is warm, `❄` once it has gone cold.
+
+    Shows the local clock time the cache goes cold rather than the time left:
+    with a 1h TTL every turn resets the countdown, so a remaining-minutes
+    figure just sits at 60m while you work and tells you nothing.
 
     Claude Code re-runs the status line at `expires_at`, so the switch to `❄`
     lands on time even without a refresh tick. Empty until caching is seen.
@@ -2381,11 +2385,9 @@ def format_cache_badge(prompt_cache, now=None):
         return ""
     now = time.time() if now is None else now
     expires_at = prompt_cache.get('expires_at')
-    if prompt_cache.get('warm') and expires_at:
-        remaining = expires_at - now
-        if remaining > 0:
-            minutes = max(1, int((remaining + 59) // 60))
-            return f"{Colors.BRIGHT_WHITE}🔥{minutes}m{Colors.RESET}"
+    if prompt_cache.get('warm') and expires_at and expires_at > now:
+        cold_at = time.strftime('%H:%M', time.localtime(expires_at))
+        return f"{Colors.BRIGHT_WHITE}🔥{cold_at}{Colors.RESET}"
     if prompt_cache.get('caching_observed'):
         return f"{Colors.BRIGHT_BLUE}❄{Colors.RESET}"
     return ""

@@ -614,10 +614,12 @@ class TestLine1Badges:
         assert self._plain(statusline.format_pr_badge({'number': 17})) == "#17"
         assert statusline.format_pr_badge(None) == ""
 
-    def test_cache_badge_counts_down_then_goes_cold(self):
+    def test_cache_badge_shows_when_it_goes_cold_then_goes_cold(self):
         now = 1_000_000.0
-        warm = {'warm': True, 'caching_observed': True, 'expires_at': now + 41 * 60 + 5}
-        assert self._plain(statusline.format_cache_badge(warm, now=now)) == "🔥42m"
+        expires_at = now + 41 * 60 + 5
+        warm = {'warm': True, 'caching_observed': True, 'expires_at': expires_at}
+        cold_at = time.strftime('%H:%M', time.localtime(expires_at))
+        assert self._plain(statusline.format_cache_badge(warm, now=now)) == f"🔥{cold_at}"
         cold = {'warm': False, 'caching_observed': True, 'expires_at': None}
         assert self._plain(statusline.format_cache_badge(cold, now=now)) == "❄"
         assert statusline.format_cache_badge(None, now=now) == ""
