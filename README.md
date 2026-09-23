@@ -88,40 +88,44 @@ Environment variables (set them in the `statusLine` command):
 
 ## Prompt cache keep-warm
 
-Claude Code sends your whole conversation with every turn, and the API keeps
-that prefix in a prompt cache so it doesn't have to be processed again. On a
-Claude subscription the cache lives for **1 hour** after it was last used. The
-`🔥HH:MM` on Line 1 is when it goes cold; `❄` means it already has.
+**Every turn sends the same thing: your whole conversation.** What changes is
+the price per token, and that depends on whether the API still remembers it.
 
-Once it's cold, the next turn has to write the entire history back into the
-cache. That write is billed at **2× the normal input price**, while reading a
-warm cache costs about **0.1×** (less on some models). The bigger the context,
-the more a cold start hurts.
+- **Cache warm** — the API has already processed the earlier part of the
+  conversation and kept it in its prompt cache. Re-reading it costs about
+  **0.1×** the normal input price (less on some models).
+- **Cache cold** — the API has forgotten it. The whole history is processed
+  again and written back into the cache at **2×** the normal input price.
 
-Keep-warm sends one tiny turn shortly before the cache expires. The turn reads
-the cache, which resets its 1-hour timer, and costs a cache read plus a word of
-output.
+On a Claude subscription the cache is forgotten **1 hour** after it was last
+used. The `🔥HH:MM` on Line 1 is when that happens; `❄` means it already has.
+
+Keep-warm sends one tiny turn shortly before that time. The turn re-reads the
+cache, which resets the 1-hour timer.
 
 ![keep-warm poke](assets/keep-warm.png)
 
-**Is it worth it?** One cold start costs about as much as 20 pokes (2× ÷ 0.1×),
-and more on models with cheaper cache reads. A poke happens at most once an
-hour, so:
+**Example.** A 300K-token conversation on a model priced at $5/MTok input. You
+step away and come back two hours later:
 
-| Idle stretch before you come back | Pokes | Cost vs one cold start |
+| | Without keep-warm | With keep-warm |
 |---|---|---|
-| 1 hour | 1 | ~5% |
-| 4 hours | 4 | ~20% |
-| 20 hours | 20 | about the same |
+| Hour 1 | nothing — the cache goes cold | poke: 300K read at 0.1× ≈ $0.15 |
+| Hour 2 | nothing | poke ≈ $0.15 |
+| Your next turn | 300K written at 2× ≈ **$3.00** | 300K read at 0.1× ≈ $0.15 |
+| Total | **$3.00** | **$0.45** |
 
-For example, with a 300K-token context on a model priced at $5/MTok input, a
-cold start costs about $3.00 and each poke about $0.15.
+**The rule of thumb: one cold start costs about as much as 20 pokes** (2× ÷ 0.1×).
+Both sides send the same tokens, so the ratio doesn't depend on context size.
+A bigger conversation only makes both sides more expensive, not the ratio.
+(In small conversations the poke's own few output tokens start to show, so the
+ratio drops a little; the amounts there are cents.)
 
-If you come back to a session within a few hours, keep-warm is far cheaper. If
-you walk away and never return, the pokes are pure cost. `N` in
-`CCSL_KEEP_WARM_HOURS=N` caps that loss: after N hours without a real prompt
-from you, pokes stop. On a subscription, the same trade-off applies to your
-usage limits instead of dollars.
+Pokes happen at most once an hour. If you come back within a few hours,
+keep-warm is far cheaper. If you walk away and never return, the pokes are pure
+cost. `N` in `CCSL_KEEP_WARM_HOURS=N` caps that: after N hours without a real
+prompt from you, pokes stop. On a subscription the same trade-off applies to
+your usage limits instead of dollars.
 
 **Enable it**
 
