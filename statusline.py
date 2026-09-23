@@ -2305,6 +2305,17 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     return 5.00, 25.00
 
 
+def _fast_mode_multiplier(model_name="Unknown", model_id=""):
+    """Fast mode price / standard price. Fast mode runs only on Opus 5.5 ($8/$40),
+    Opus 5 and Opus 4.8 ($10/$50) — 2x each; cache pricing scales with it."""
+    haystack = f"{model_name} {model_id}".lower()
+    if "opus-5-5" in haystack or "opus 5.5" in haystack:
+        return 8.00 / 4.00
+    if any(k in haystack for k in ("opus-5", "opus 5", "opus-4-8", "opus 4.8")):
+        return 10.00 / 5.00
+    return 1.0
+
+
 def _cache_read_rate(model_name, model_id, input_rate):
     """Cache-read rate per MTok. 0.10x of input unless the model has its own rate.
 
@@ -2322,7 +2333,7 @@ def _cache_read_rate(model_name, model_id, input_rate):
 
 def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
                    model_name="Unknown", model_id="",
-                   cache_creation_5m=None, cache_creation_1h=None):
+                   cache_creation_5m=None, cache_creation_1h=None, fast=False):
     """Estimate cost in USD from token usage.
 
     Rates are USD per million tokens (Anthropic public pricing snapshot, 2026).
@@ -2338,6 +2349,7 @@ def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
         cache_creation_5m, cache_creation_1h: if provided, override `cache_creation`
             and bill 5m/1h separately. When only one is given, the other defaults
             to 0; when both are None, the legacy `cache_creation` path is used.
+        fast: the turn ran in fast mode (usage.speed == "fast").
     """
     input_rate, output_rate = _resolve_model_rates(model_name, model_id)
     cache_5m_rate = input_rate * 1.25
@@ -2356,7 +2368,10 @@ def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
     output_cost = (output_tokens / 1_000_000) * output_rate
     cache_read_cost = (cache_read / 1_000_000) * cache_read_rate
 
-    return input_cost + output_cost + cache_write_cost + cache_read_cost
+    total = input_cost + output_cost + cache_write_cost + cache_read_cost
+    if fast:
+        total *= _fast_mode_multiplier(model_name, model_id)
+    return total
 
 def format_cost(cost):
     """Format cost for display"""
@@ -2419,10 +2434,8 @@ def calculate_metered_cost_from_transcript(transcript_path):
                 if message_data.get('type') != 'assistant':
                     continue
                 msg_model = message.get('model') or ''
-                if not is_metered_model(msg_model):
-                    continue
                 usage = message_data.get('usage') or message.get('usage')
-                if not usage:
+                if not usage or not is_metered_usage(msg_model, usage):
                     continue
                 # Dedup by message.id + requestId (entry uuid differs per
                 # content-block line of the same response — fallback only)
@@ -2474,8 +2487,9 @@ def _metered_usage_cost(model, usage):
 
     既知の制限: usage.server_tool_use (web_search $10/1k 等) は extra usage
     クレジットでの課金有無が未確認のため含めない。"""
-    if not usage or not is_metered_model(model or ''):
+    if not usage or not is_metered_usage(model, usage):
         return 0.0
+    fast = usage.get('speed') == 'fast'
     _, cache_5m, cache_1h, cache_read = extract_cache_breakdown(usage)
     cost = calculate_cost(
         usage.get('input_tokens', 0) or 0,
@@ -2485,6 +2499,7 @@ def _metered_usage_cost(model, usage):
         model_name=model,
         cache_creation_5m=cache_5m,
         cache_creation_1h=cache_1h,
+        fast=fast,
     )
     if _INCLUDE_ADVISOR_ITERATIONS:
         for it in _advisor_iterations(usage):
@@ -2651,6 +2666,14 @@ def is_metered_model(model, model_id=""):
     """
     haystack = f"{model} {model_id}".lower()
     return 'fable' in haystack
+
+def is_metered_usage(model, usage):
+    """このメッセージが usage credits で請求されるか。
+
+    従量モデル (Fable) に加え、fast mode のターンはサブスク枠ではなく
+    usage credits から引かれる (モデルが Opus でも)。"""
+    fast = isinstance(usage, dict) and usage.get('speed') == 'fast'
+    return fast or is_metered_model(model or '')
 
 def truncate_text(text, max_len):
     """テキストを最大長で切り詰め、...を追加"""
@@ -3667,7 +3690,8 @@ def main():
 
         # 従量モデル (Fable 等): 直前ターンの従量分だけを transcript から積算。
         # transcript が読めなければ非表示 (累計値で誤解させるより隠す)
-        metered = is_metered_model(model, model_id)
+        # fast mode のターンも usage credits 払い (Opus でも)
+        metered = is_metered_model(model, model_id) or data.get('fast_mode') is True
         metered_cost = 0
         if metered:
             metered_cost = calculate_metered_cost_from_transcript(data.get('transcript_path')) or 0

@@ -13,7 +13,7 @@ Session: ▆█▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [9%] 44.6M
 Weekly:  ▃▆▄▁▁▂▅█▇▃▂▁▁▁▁▁▁▁▁▁ [23%] 3d9h43m
 ```
 
-With a metered-billing model (e.g. Fable 5) Line 1 also carries the cost of the latest turn and extra-usage credit (`$7.36 | Ext 23% $11.50/$50`), and Lines 3–4 add each window's metered spend.
+With a metered-billing model (e.g. Fable 5), or in fast mode, Line 1 also carries the cost of the latest turn and extra-usage credit (`$7.36 | Ext 23% $11.50/$50`), and Lines 3–4 add each window's metered spend.
 
 ## Install
 
@@ -47,7 +47,7 @@ the curl install above, then remove the old package (`pip uninstall ccsl` or
 
 ## What it shows
 
-- **Line 1** — Model with its reasoning effort (`·med`) and `⚡` in fast mode, directory, git branch, the open PR with its review state (`#17✓`), and the time the prompt cache goes cold (`🔥15:12`, `❄` once cold). Metered-billing models (e.g. Fable 5) add the cost of the latest turn and extra-usage credit consumption (Ext)
+- **Line 1** — Model with its reasoning effort (`·med`) and `⚡` in fast mode, directory, git branch, the open PR with its review state (`#17✓`), and the time the prompt cache goes cold (`🔥15:12`, `❄` once cold). Metered-billing models (e.g. Fable 5) and fast-mode turns add the cost of the latest turn and extra-usage credit consumption (Ext)
 - **Line 2** — Context window token usage with progress bar and cache ratio
 - **Line 3** — Session sparkline with 5-hour utilization, token count, time range, and the 5-hour window's metered spend
 - **Line 4** — Weekly sparkline with 7-day token distribution, remaining time, the 7-day window's metered spend, extra usage
@@ -56,7 +56,7 @@ Built for **1M context** — the context line scales to the active window size (
 
 ## Features
 
-- Metered-model cost tracking — models billed via usage credits (Fable 5) show what the latest turn cost, computed per-message so mixed-model sessions only count the metered share
+- Metered-model cost tracking — models billed via usage credits (Fable 5), and fast-mode turns on Opus at their fast rates, show what the latest turn cost, computed per-message so mixed sessions only count the metered share
 - Context window progress bar with color warnings (yellow 80%, red 90%)
 - 5-hour session sparkline (20 segments, 15min each)
 - Weekly usage sparkline with remaining time and budget tracking

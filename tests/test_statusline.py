@@ -2445,3 +2445,21 @@ class TestKeepWarmTarget:
             statusline._type_line(("iterm", "ABC-123"), 'Reply with just "ok".')
         cmd = popen.call_args[0][0]
         assert cmd[0] == "osascript" and cmd[-2:] == ["ABC-123", 'Reply with just "ok".']
+
+
+class TestFastModePricing:
+    """Fast mode bills to usage credits at 2x: Opus 5.5 $8/$40, Opus 5 / 4.8 $10/$50."""
+
+    def test_fast_rates(self):
+        cost = statusline.calculate_cost(1_000_000, 1_000_000, 0, 0, model_name="claude-opus-5-5", fast=True)
+        assert abs(cost - 48.00) < 1e-9
+        cost = statusline.calculate_cost(1_000_000, 1_000_000, 0, 0, model_name="claude-opus-5", fast=True)
+        assert abs(cost - 60.00) < 1e-9
+        cost = statusline.calculate_cost(1_000_000, 1_000_000, 0, 0, model_name="claude-opus-4-8", fast=True)
+        assert abs(cost - 60.00) < 1e-9
+
+    def test_fast_opus_turn_is_metered(self):
+        fast = {'input_tokens': 1_000_000, 'output_tokens': 0, 'speed': 'fast'}
+        standard = dict(fast, speed='standard')
+        assert abs(statusline._metered_usage_cost('claude-opus-5-5', fast) - 8.00) < 1e-9
+        assert statusline._metered_usage_cost('claude-opus-5-5', standard) == 0.0
