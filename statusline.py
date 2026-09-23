@@ -2057,6 +2057,19 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     return 5.00, 25.00
 
 
+def _cache_read_rate(model_name, model_id, input_rate):
+    """Cache-read rate per MTok. 0.10x of input unless the model has its own rate.
+
+    Claude Fable 5.1 reads cache at $0.25/MTok, not 0.10x of its $10 input
+    ($1.00). Cache reads dominate Claude Code's token mix, so the flat
+    multiplier overstated its metered cost several times over.
+    """
+    haystack = f"{model_name} {model_id}".lower()
+    if "fable-5-1" in haystack or "fable 5.1" in haystack:
+        return 0.25
+    return input_rate * 0.10
+
+
 def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
                    model_name="Unknown", model_id="",
                    cache_creation_5m=None, cache_creation_1h=None):
@@ -2079,7 +2092,7 @@ def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
     input_rate, output_rate = _resolve_model_rates(model_name, model_id)
     cache_5m_rate = input_rate * 1.25
     cache_1h_rate = input_rate * 2.00
-    cache_read_rate = input_rate * 0.10
+    cache_read_rate = _cache_read_rate(model_name, model_id, input_rate)
 
     if cache_creation_5m is not None or cache_creation_1h is not None:
         c5 = cache_creation_5m or 0
@@ -2304,27 +2317,74 @@ def shorten_model_name(model, tight=False):
 
     return name
 
-_NATIVE_1M_VERSIONS = ('4.5', '4-5', '4.6', '4-6', '4.7', '4-7', '4.8', '4-8')
+def should_show_reduced_context_badge(model, context_size):
+    """Decide whether the `(200K)` badge should be shown next to the model name.
 
+    A 1M window is the default for every current model family, so it carries
+    no information. The badge marks the exception instead: a model that could
+    run with 1M is running with 200K or less (a 4.6 model without `[1m]`, or
+    CLAUDE_CODE_DISABLE_1M_CONTEXT). Haiku is 200K by design, so it is skipped.
 
-def should_show_1m_badge(model, context_size):
-    """Decide whether the `(1M)` badge should be shown next to the model name.
-
-    Show the badge only for models where the context size is a *choice*
-    (1M is opt-in: older models or unknown). Models that only ship with 1M
-    (Fable) or default to it (Opus 4.5+/Sonnet 4.6+ per Anthropic's 2026
-    long-context pricing) carry no information in the badge, so hide it.
+    Pass context_size=None when stdin did not report it; a missing value must
+    not be read as "200K".
     """
-    if context_size <= 200000:
+    if not context_size or context_size > 200000:
         return False
-    normalized = model.lower() if model else ''
-    if 'fable' in normalized:
-        return False
-    if ('opus' in normalized or 'sonnet' in normalized) and any(
-        v in normalized for v in _NATIVE_1M_VERSIONS
+    return 'haiku' not in (model or '').lower()
+
+
+_EFFORT_ABBR = {'low': 'lo', 'medium': 'med', 'high': 'hi', 'xhigh': 'xh', 'max': 'max'}
+
+
+def format_model_badge(ctx, tight=False, include_context_badge=True):
+    """`[Opus5.5·med⚡(200K)]` — model, effort, fast mode and reduced context."""
+    name = shorten_model_name(ctx['model'], tight=tight)
+    effort = _EFFORT_ABBR.get(ctx.get('effort') or '')
+    if effort:
+        name += f"·{effort}"
+    if ctx.get('fast_mode'):
+        name += "⚡"
+    suffix = ""
+    if include_context_badge and should_show_reduced_context_badge(
+        f"{ctx['model']} {ctx.get('model_id', '')}", ctx.get('reported_context_size')
     ):
-        return False
-    return True
+        suffix = "(200K)"
+    return f"{Colors.BRIGHT_YELLOW}[{name}{Colors.BRIGHT_MAGENTA}{suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}"
+
+
+_PR_REVIEW_MARKS = {
+    'approved': ('✓', 'BRIGHT_GREEN'),
+    'changes_requested': ('✗', 'BRIGHT_RED'),
+    'draft': ('✎', 'BRIGHT_WHITE'),
+}
+
+
+def format_pr_badge(pr):
+    """`#17✓` from stdin `pr`; empty when no PR/MR is open."""
+    if not isinstance(pr, dict) or not pr.get('number'):
+        return ""
+    mark, color = _PR_REVIEW_MARKS.get(pr.get('review_state') or '', ('', 'BRIGHT_WHITE'))
+    return f"{getattr(Colors, color)}#{pr['number']}{mark}{Colors.RESET}"
+
+
+def format_cache_badge(prompt_cache, now=None):
+    """`🔥42m` while the prompt cache is warm, `❄` once it has gone cold.
+
+    Claude Code re-runs the status line at `expires_at`, so the switch to `❄`
+    lands on time even without a refresh tick. Empty until caching is seen.
+    """
+    if not isinstance(prompt_cache, dict):
+        return ""
+    now = time.time() if now is None else now
+    expires_at = prompt_cache.get('expires_at')
+    if prompt_cache.get('warm') and expires_at:
+        remaining = expires_at - now
+        if remaining > 0:
+            minutes = max(1, int((remaining + 59) // 60))
+            return f"{Colors.BRIGHT_WHITE}🔥{minutes}m{Colors.RESET}"
+    if prompt_cache.get('caching_observed'):
+        return f"{Colors.BRIGHT_BLUE}❄{Colors.RESET}"
+    return ""
 
 def is_metered_model(model, model_id=""):
     """従量課金 (usage credits) で請求されるモデルか。
@@ -2348,7 +2408,7 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                       include_errors=True, include_cost=True,
                       include_extra=True,
                       tight_model=False, include_context_badge=True,
-                      include_dir=True):
+                      include_dir=True, include_pr=True, include_cache=True):
     """Line 1の各パーツを構築する
 
     Args:
@@ -2360,8 +2420,10 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         include_extra: Ext (月次クレジット消化) を含めるか。コストより長いので
             縮退時はこちらを先に落とす
         tight_model: モデル名を超短縮形式にするか（Op4.6など）
-        include_context_badge: 1Mコンテキストバッジ（opt-in 1M モデルのみ）を表示するか
+        include_context_badge: (200K) バッジ（1M 対応モデルが 200K 以下で動いている時のみ）を表示するか
         include_dir: ディレクトリを含めるか
+        include_pr: 開いている PR/MR の番号とレビュー状態を含めるか
+        include_cache: prompt cache の残り時間 / 冷えた印を含めるか
 
     Returns:
         list: Line 1のパーツのリスト
@@ -2369,10 +2431,8 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
     parts = []
     metered = ctx.get('metered', False)
 
-    # Model (normal or tight) — 従量モデルもバッジなし (💰/Ext の存在がサイン)
-    model_name = shorten_model_name(ctx['model'], tight=tight_model)
-    ctx_suffix = "(1M)" if include_context_badge and should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-    parts.append(f"{Colors.BRIGHT_YELLOW}[{model_name}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+    # Model (normal or tight) + effort / fast / (200K) — 従量モデルもバッジなし (💰/Ext の存在がサイン)
+    parts.append(format_model_badge(ctx, tight=tight_model, include_context_badge=include_context_badge))
 
     # Directory (before git branch)
     if include_dir:
@@ -2391,6 +2451,12 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
             git_display += f" {Colors.BRIGHT_YELLOW}M{ctx['modified_files']}"
         git_display += Colors.RESET
         parts.append(git_display)
+
+    # Open PR / MR
+    if include_pr:
+        pr_badge = format_pr_badge(ctx.get('pr'))
+        if pr_badge:
+            parts.append(pr_badge)
 
     # Errors
     if include_errors and ctx['error_count'] > 0:
@@ -2412,6 +2478,12 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
                     f"{Colors.BRIGHT_YELLOW}Ext{Colors.RESET} {pct_color}{pct}%{Colors.RESET} "
                     f"{Colors.BRIGHT_WHITE}${used_val:.2f}/${limit_val:.0f}{Colors.RESET}"
                 )
+
+    # Prompt cache: time left before it goes cold
+    if include_cache:
+        cache_badge = format_cache_badge(ctx.get('prompt_cache'))
+        if cache_badge:
+            parts.append(cache_badge)
 
     return parts
 
@@ -2494,28 +2566,28 @@ def format_output_full(ctx, terminal_width=None):
         else:
             # Normal Line 1: progressive shrinking by priority
             #
-            # 優先度（高→低）: モデル > 従量コスト > ブランチ > git status > 📁ディレクトリ > Ext > ⚠️エラー > (1M)バッジ
+            # 優先度（高→低）: モデル(effort/⚡含む) > 従量コスト > ブランチ > git status > 📁ディレクトリ > Ext > ⚠️エラー > (200K)バッジ > PR > cache
             # 従量コストは実費の警告なので最後まで落とさない。長い Ext を先に落とす
             #
             # 段階:
             #  1. 全要素（ブランチ15文字）
-            #  2. ⚠️エラー削除・モデル名短縮
-            #  3. ブランチ12・ディレクトリ12に短縮
-            #  4. Ext 削除・ブランチ10・ディレクトリ10・(1M)バッジ削除
+            #  2. ⚠️エラー・cache 削除・モデル名短縮
+            #  3. PR 削除・ブランチ12・ディレクトリ12に短縮
+            #  4. Ext 削除・ブランチ10・ディレクトリ10・(200K)バッジ削除
             #  5. 📁ディレクトリ削除（ブランチのほうが重要）
             #  6. セパレータ " | " → " "（compact風）
             shrink_steps = [
                 # (separator, build_line1_parts kwargs)
                 (" | ", dict(max_branch_len=15)),
-                (" | ", dict(include_errors=False, tight_model=True, max_branch_len=15)),
-                (" | ", dict(include_errors=False, tight_model=True,
+                (" | ", dict(include_errors=False, include_cache=False, tight_model=True, max_branch_len=15)),
+                (" | ", dict(include_errors=False, include_cache=False, include_pr=False, tight_model=True,
                              max_branch_len=12, max_dir_len=12)),
-                (" | ", dict(include_extra=False, include_errors=False, tight_model=True,
-                             max_branch_len=10, max_dir_len=10, include_context_badge=False)),
-                (" | ", dict(include_extra=False, include_errors=False, include_dir=False,
-                             tight_model=True, max_branch_len=10, include_context_badge=False)),
-                (" ",   dict(include_extra=False, include_errors=False, include_dir=False,
-                             tight_model=True, max_branch_len=8, include_context_badge=False)),
+                (" | ", dict(include_extra=False, include_errors=False, include_cache=False, include_pr=False,
+                             tight_model=True, max_branch_len=10, max_dir_len=10, include_context_badge=False)),
+                (" | ", dict(include_extra=False, include_errors=False, include_cache=False, include_pr=False,
+                             include_dir=False, tight_model=True, max_branch_len=10, include_context_badge=False)),
+                (" ",   dict(include_extra=False, include_errors=False, include_cache=False, include_pr=False,
+                             include_dir=False, tight_model=True, max_branch_len=8, include_context_badge=False)),
             ]
             for sep, kwargs in shrink_steps:
                 line1_parts = build_line1_parts(ctx, **kwargs)
@@ -2628,9 +2700,7 @@ def format_output_compact(ctx):
 
         if not schedule_shown:
             line1_parts = []
-            short_model = shorten_model_name(ctx['model'], tight=True)
-            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            line1_parts.append(format_model_badge(ctx, tight=True))
 
             line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
 
@@ -2645,6 +2715,10 @@ def format_output_compact(ctx):
                     git_display += f"+{ctx['untracked_files']}"
                 git_display += Colors.RESET
                 line1_parts.append(git_display)
+
+            pr_badge = format_pr_badge(ctx.get('pr'))
+            if pr_badge:
+                line1_parts.append(pr_badge)
 
             if ctx.get('metered') and (ctx.get('metered_cost') or 0) > 0:
                 metered_cost = ctx['metered_cost']
@@ -2761,9 +2835,7 @@ def format_output_tight(ctx):
 
         if not schedule_shown:
             line1_parts = []
-            short_model = shorten_model_name(ctx['model'], tight=True)
-            ctx_suffix = "(1M)" if should_show_1m_badge(ctx['model'], ctx.get('context_size', 200000)) else ""
-            line1_parts.append(f"{Colors.BRIGHT_YELLOW}[{short_model}{Colors.BRIGHT_MAGENTA}{ctx_suffix}{Colors.BRIGHT_YELLOW}]{Colors.RESET}")
+            line1_parts.append(format_model_badge(ctx, tight=True))
 
             if ctx['git_branch']:
                 branch = ctx['git_branch']
@@ -3521,7 +3593,13 @@ def main():
             'show_line4': SHOW_LINE4,
             'show_schedule': show_schedule,
             'context_size': api_context_size,
+            'reported_context_size': api_context.get('context_window_size'),
             'percentage_of_full_context': percentage_of_full_context,
+            'model_id': model_id,
+            'effort': (data.get('effort') or {}).get('level') if isinstance(data.get('effort'), dict) else None,
+            'fast_mode': data.get('fast_mode') is True,
+            'pr': data.get('pr'),
+            'prompt_cache': data.get('prompt_cache'),
         }
 
         # Select formatter based on display mode and terminal height (with hysteresis)

@@ -561,35 +561,74 @@ class TestExtractCacheBreakdown:
         assert statusline.extract_cache_breakdown(usage) == (0, 0, 0, 0)
 
 
-class TestShouldShow1MBadge:
-    """(1M) badge: shown only when 1M is a *choice* (opt-in models); hidden when 1M is the only/default size."""
+class TestReducedContextBadge:
+    """(200K) badge: 1M is the default now, so only a model running below it is marked."""
 
-    def test_under_200k_always_hides_badge(self):
-        assert statusline.should_show_1m_badge("Claude Opus 4.7", 200_000) is False
-        assert statusline.should_show_1m_badge("Claude Sonnet 4", 100_000) is False
+    def test_default_1m_models_show_no_badge(self):
+        # New families must not need a whitelist entry to stay quiet.
+        for model in ("Opus 5.5", "claude-opus-5-5[1m]", "Sonnet 5", "Fable 5.1", "Some Future Model"):
+            assert statusline.should_show_reduced_context_badge(model, 1_000_000) is False
 
-    def test_native_1m_flagships_hide_badge(self):
-        assert statusline.should_show_1m_badge("Claude Opus 4.8", 1_000_000) is False
-        assert statusline.should_show_1m_badge("Claude Opus 4.7", 1_000_000) is False
-        assert statusline.should_show_1m_badge("Claude Opus 4.6", 1_000_000) is False
-        assert statusline.should_show_1m_badge("Claude Opus 4.5", 1_000_000) is False
-        assert statusline.should_show_1m_badge("Claude Sonnet 4.6", 1_000_000) is False
+    def test_1m_capable_model_at_200k_shows_badge(self):
+        # A 4.6 model without [1m], or CLAUDE_CODE_DISABLE_1M_CONTEXT.
+        assert statusline.should_show_reduced_context_badge("Opus 4.6", 200_000) is True
+        assert statusline.should_show_reduced_context_badge("Opus 5.5", 200_000) is True
 
-    def test_fable_always_hides_badge(self):
-        # Fable ships 1M-only — the badge carries no information.
-        assert statusline.should_show_1m_badge("Fable 5 (1M context)", 1_000_000) is False
-        assert statusline.should_show_1m_badge("Claude Fable 5", 1_000_000) is False
+    def test_haiku_is_200k_by_design(self):
+        assert statusline.should_show_reduced_context_badge("Haiku 4.5", 200_000) is False
+        assert statusline.should_show_reduced_context_badge("x claude-haiku-4-5", 200_000) is False
 
-    def test_opt_in_1m_shows_badge(self):
-        # Legacy Opus defaults to 200K; running at 1M is a choice → show badge.
-        assert statusline.should_show_1m_badge("Claude Opus 4.1", 1_000_000) is True
+    def test_missing_context_size_is_not_read_as_200k(self):
+        assert statusline.should_show_reduced_context_badge("Opus 5.5", None) is False
+        assert statusline.should_show_reduced_context_badge(None, None) is False
 
-    def test_unknown_model_shows_badge_when_1m(self):
-        assert statusline.should_show_1m_badge("Mystery Model", 1_000_000) is True
 
-    def test_empty_model_name_safe(self):
-        assert statusline.should_show_1m_badge("", 1_000_000) is True
-        assert statusline.should_show_1m_badge(None, 200_000) is False
+class TestLine1Badges:
+    """effort / fast mode / PR / prompt cache come straight from Claude Code stdin."""
+
+    @staticmethod
+    def _plain(text):
+        return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+    def test_model_badge_carries_effort_and_fast_mode(self):
+        ctx = {'model': 'Opus 5.5', 'effort': 'medium', 'fast_mode': True, 'reported_context_size': 1_000_000}
+        assert self._plain(statusline.format_model_badge(ctx, tight=True)) == "[Op5.5·med⚡]"
+
+    def test_model_badge_without_optional_fields(self):
+        ctx = {'model': 'Opus 5.5', 'reported_context_size': 1_000_000}
+        assert self._plain(statusline.format_model_badge(ctx)) == "[Opus 5.5]"
+
+    def test_model_badge_marks_reduced_context(self):
+        ctx = {'model': 'Opus 4.6', 'effort': 'xhigh', 'reported_context_size': 200_000}
+        assert self._plain(statusline.format_model_badge(ctx, tight=True)) == "[Op4.6·xh(200K)]"
+
+    def test_pr_badge(self):
+        assert self._plain(statusline.format_pr_badge({'number': 17, 'review_state': 'approved'})) == "#17✓"
+        assert self._plain(statusline.format_pr_badge({'number': 17, 'review_state': 'changes_requested'})) == "#17✗"
+        assert self._plain(statusline.format_pr_badge({'number': 17, 'review_state': 'draft'})) == "#17✎"
+        assert self._plain(statusline.format_pr_badge({'number': 17})) == "#17"
+        assert statusline.format_pr_badge(None) == ""
+
+    def test_cache_badge_counts_down_then_goes_cold(self):
+        now = 1_000_000.0
+        warm = {'warm': True, 'caching_observed': True, 'expires_at': now + 41 * 60 + 5}
+        assert self._plain(statusline.format_cache_badge(warm, now=now)) == "🔥42m"
+        cold = {'warm': False, 'caching_observed': True, 'expires_at': None}
+        assert self._plain(statusline.format_cache_badge(cold, now=now)) == "❄"
+        assert statusline.format_cache_badge(None, now=now) == ""
+        assert statusline.format_cache_badge({'warm': False, 'caching_observed': False}, now=now) == ""
+
+
+class TestFable51CacheReadRate:
+    """Fable 5.1 reads cache at $0.25/MTok, not 0.10x of its $10 input."""
+
+    def test_fable_5_1_cache_read_rate(self):
+        cost = statusline.calculate_cost(0, 0, 0, 1_000_000, model_name="claude-fable-5-1")
+        assert abs(cost - 0.25) < 1e-9
+
+    def test_fable_5_keeps_the_flat_multiplier(self):
+        cost = statusline.calculate_cost(0, 0, 0, 1_000_000, model_name="claude-fable-5")
+        assert abs(cost - 1.00) < 1e-9
 
 
 # ============================================
