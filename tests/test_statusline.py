@@ -638,6 +638,22 @@ class TestFable51CacheReadRate:
         assert abs(cost - 1.00) < 1e-9
 
 
+class TestOpus55Pricing:
+    """Opus 5.5: $4 input, $20 output, cache reads $0.20 per MTok."""
+
+    def test_input_and_output(self):
+        assert statusline._resolve_model_rates("Opus 5.5", "claude-opus-5-5") == (4.00, 20.00)
+        cost = statusline.calculate_cost(1_000_000, 1_000_000, 0, 0, model_name="claude-opus-5-5")
+        assert abs(cost - 24.00) < 1e-9
+
+    def test_cache_read(self):
+        cost = statusline.calculate_cost(0, 0, 0, 1_000_000, model_name="claude-opus-5-5")
+        assert abs(cost - 0.20) < 1e-9
+
+    def test_opus_5_unchanged(self):
+        assert statusline._resolve_model_rates("Opus 5", "claude-opus-5") == (5.00, 25.00)
+
+
 # ============================================
 # Smoke Tests — subprocess end-to-end
 # ============================================

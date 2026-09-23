@@ -2263,6 +2263,10 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     if "fable" in haystack:
         return 10.00, 50.00  # Fable 5
 
+    # --- Opus 5.5 (cheaper than Opus 5; cache reads $0.20, see _cache_read_rate) ---
+    if "opus-5-5" in haystack or "opus 5.5" in haystack:
+        return 4.00, 20.00
+
     # --- Haiku ---
     if "haiku-4-5" in haystack or "haiku 4.5" in haystack:
         return 1.00, 5.00     # Haiku 4.5
@@ -2301,12 +2305,14 @@ def _cache_read_rate(model_name, model_id, input_rate):
     """Cache-read rate per MTok. 0.10x of input unless the model has its own rate.
 
     Claude Fable 5.1 reads cache at $0.25/MTok, not 0.10x of its $10 input
-    ($1.00). Cache reads dominate Claude Code's token mix, so the flat
+    ($1.00), and Claude Opus 5.5 at $0.20, not 0.10x of its $4 ($0.40). Cache reads dominate Claude Code's token mix, so the flat
     multiplier overstated its metered cost several times over.
     """
     haystack = f"{model_name} {model_id}".lower()
     if "fable-5-1" in haystack or "fable 5.1" in haystack:
         return 0.25
+    if "opus-5-5" in haystack or "opus 5.5" in haystack:
+        return 0.20
     return input_rate * 0.10
 
 
