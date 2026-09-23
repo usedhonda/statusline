@@ -2499,3 +2499,98 @@ class TestPerformanceGuards:
         scan.assert_not_called()
         detached.assert_called_once()
         assert timeline == [0] * 20 and cost == 0.0
+
+
+class TestEndToEndLoad:
+    """Run the real statusline.py the way Claude Code does — several sessions
+    with large, growing transcripts, redrawing in turn — and fail when a
+    redraw costs about as much as a cold start, or when steady-state redraws
+    keep starting background rebuilds (2026-09-23 incident). Relative and
+    count checks only, so shared CI runners don't make it flaky."""
+
+    SESSIONS = 4
+    # JSON parsing cost scales with line count, so many small lines make a
+    # re-parse expensive while keeping the fixture small (~6MB per session).
+    # They are older than the 7-day window, so only the transcript stats
+    # read them; a few recent turns feed the 5-hour and weekly views.
+    OLD_LINES = 60000
+    RECENT_LINES = 200
+
+    def _line(self, sid, i, ts):
+        return json.dumps({
+            'type': 'assistant', 'sessionId': sid, 'uuid': f'{sid}-{i}',
+            'requestId': f'req-{sid}-{i}', 'timestamp': ts,
+            'message': {'id': f'msg-{sid}-{i}', 'model': 'claude-opus-5-5',
+                        'content': [{'type': 'text', 'text': 'ok'}],
+                        'usage': {'input_tokens': 10, 'output_tokens': 20,
+                                  'cache_creation_input_tokens': 0,
+                                  'cache_read_input_tokens': 1000}},
+        }) + '\n'
+
+    def _setup(self, tmp_path):
+        home = tmp_path / 'home'
+        project = home / '.claude' / 'projects' / 'p'
+        project.mkdir(parents=True)
+        now = datetime.now(timezone.utc)
+        sessions = []
+        for n in range(self.SESSIONS):
+            sid = f'sess{n}'
+            path = project / f'{sid}.jsonl'
+            old = (now - timedelta(days=30)).isoformat().replace('+00:00', 'Z')
+            with open(path, 'w') as f:
+                f.write(('{"type":"user","sessionId":"%s","timestamp":"%s"}\n' % (sid, old)) * self.OLD_LINES)
+                for i in range(self.RECENT_LINES):
+                    ts = (now - timedelta(minutes=60) + timedelta(seconds=i * 10)).isoformat()
+                    f.write(self._line(sid, i, ts.replace('+00:00', 'Z')))
+            stdin = {'session_id': sid, 'transcript_path': str(path),
+                     'model': {'id': 'claude-opus-5-5', 'display_name': 'Opus 5.5'},
+                     'workspace': {'current_dir': str(tmp_path)}, 'cwd': str(tmp_path)}
+            if n % 2 == 0:  # half the sessions haven't received rate_limits yet
+                stdin['rate_limits'] = {
+                    'five_hour': {'used_percentage': 30,
+                                  'resets_at': (now + timedelta(hours=2)).isoformat()},
+                    'seven_day': {'used_percentage': 20,
+                                  'resets_at': (now + timedelta(days=3)).isoformat()}}
+            sessions.append((sid, path, json.dumps(stdin)))
+        env = {k: v for k, v in os.environ.items() if k not in ('TMUX', 'TMUX_PANE', 'ITERM_SESSION_ID')}
+        env.update(HOME=str(home), STATUSLINE_AUTO_UPDATE='0', COLUMNS='120', LINES='40',
+                   STATUSLINE_CCSTATUSBAR_BIN=str(tmp_path / 'none'))
+        env.pop('CCSL_KEEP_WARM_HOURS', None)
+        return home, sessions, env
+
+    def _redraw(self, stdin, env):
+        start = time.perf_counter()
+        subprocess.run([sys.executable, STATUSLINE_PATH, '--show', 'all'], input=stdin,
+                       env=env, capture_output=True, text=True, timeout=60)
+        return time.perf_counter() - start
+
+    @staticmethod
+    def _locks(home):
+        return sorted((home / '.claude').glob('*.lock'))
+
+    def _wait_for_background(self, home, limit=60):
+        deadline = time.time() + limit
+        while self._locks(home) and time.time() < deadline:
+            time.sleep(0.2)
+        assert not self._locks(home), 'a background rebuild never finished'
+
+    def test_redraws_stay_cheap_and_quiet(self, tmp_path):
+        home, sessions, env = self._setup(tmp_path)
+
+        cold = [self._redraw(stdin, env) for _sid, _path, stdin in sessions]
+        self._wait_for_background(home)
+
+        started = []
+        warm = []
+        for round_ in range(3):
+            for sid, path, stdin in sessions:
+                with open(path, 'a') as f:  # the session keeps talking
+                    f.write(self._line(sid, 100000 + round_, datetime.now(timezone.utc)
+                                       .isoformat().replace('+00:00', 'Z')))
+                warm.append(self._redraw(stdin, env))
+                started.extend(self._locks(home))
+
+        # medians, so one slow CI tick can't decide it
+        assert sorted(warm)[len(warm) // 2] < sorted(cold)[len(cold) // 2] / 2, \
+            f'redraws cost like cold starts: cold={cold} warm={warm}'
+        assert not started, f'steady-state redraws started background rebuilds: {started}'
