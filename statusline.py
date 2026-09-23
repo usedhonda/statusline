@@ -2275,6 +2275,10 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     if "haiku" in haystack:
         return 1.00, 5.00     # Generic "Haiku" — default to current 4.5 tier
 
+    # --- Sonnet 5 (cheaper than the 4.x line) ---
+    if "sonnet-5" in haystack or "sonnet 5" in haystack:
+        return 2.00, 10.00
+
     # --- Sonnet (4 / 4.5 / 4.6 share the same price) ---
     if "sonnet" in haystack:
         return 3.00, 15.00

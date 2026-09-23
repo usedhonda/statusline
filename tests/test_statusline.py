@@ -654,6 +654,15 @@ class TestOpus55Pricing:
         assert statusline._resolve_model_rates("Opus 5", "claude-opus-5") == (5.00, 25.00)
 
 
+class TestSonnet5Pricing:
+    def test_sonnet_5(self):
+        assert statusline._resolve_model_rates("Sonnet 5", "claude-sonnet-5") == (2.00, 10.00)
+
+    def test_sonnet_4_x_unchanged(self):
+        assert statusline._resolve_model_rates("Sonnet 4.5", "claude-sonnet-4-5") == (3.00, 15.00)
+        assert statusline._resolve_model_rates("Sonnet 4.6", "claude-sonnet-4-6") == (3.00, 15.00)
+
+
 # ============================================
 # Smoke Tests — subprocess end-to-end
 # ============================================
