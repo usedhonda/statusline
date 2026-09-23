@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import os as _os, sys as _sys  # noqa: E402 — must run before any open() call
+import os as _os, sys as _sys  # noqa: E401, E402 — must run before any open() call
 _os.environ.setdefault('PYTHONUTF8', '1')
 if hasattr(_sys.stdout, 'reconfigure'):
     _sys.stdout.reconfigure(encoding='utf-8', errors='replace')

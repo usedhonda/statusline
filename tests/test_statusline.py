@@ -1773,7 +1773,7 @@ class TestMessageIdDedup:
             self._line('u1'), self._line('u2'), self._line('u3'),
         ]
         p = tmp_path / 't.jsonl'
-        p.write_text('\n'.join(json.dumps(l) for l in lines))
+        p.write_text('\n'.join(json.dumps(line) for line in lines))
         cost = statusline.calculate_metered_cost_from_transcript(str(p))
         assert abs(cost - 10.00) < 0.001
 
@@ -2442,3 +2442,60 @@ class TestBlockCachePerWindow:
         without = statusline._get_block_stats_cache_file(None)
         assert with_window != without
         assert with_window == statusline._get_block_stats_cache_file(_dt(2026, 9, 23, 15, 40))
+
+
+class TestPerformanceGuards:
+    """Load regressions that correctness tests can't see (2026-09-23 incident:
+    every run re-parsed transcripts of up to 363MB, and sessions with and
+    without rate_limits evicted each other's 5-hour cache, so a rebuild ran
+    nonstop). Asserts on work done, not wall-clock time, so CI stays stable."""
+
+    USER = '{"type":"user","timestamp":"2026-02-26T05:00:00Z"}\n'
+
+    def test_repeat_runs_across_sessions_parse_nothing_new(self, tmp_path):
+        transcripts = []
+        for name in ('a', 'b', 'c'):
+            t = tmp_path / f'{name}.jsonl'
+            t.write_text(self.USER * 5000)
+            transcripts.append(t)
+        with patch.object(statusline.Path, 'home', return_value=tmp_path):
+            for t in transcripts:
+                statusline.calculate_tokens_from_transcript(t)
+            with patch.object(statusline, '_apply_transcript_entry') as apply:
+                for _ in range(3):
+                    for t in transcripts:
+                        statusline.calculate_tokens_from_transcript(t)
+        assert apply.call_count == 0
+
+    def test_sessions_in_different_windows_do_not_evict_each_other(self, tmp_path):
+        from datetime import datetime as _dt
+        window = _dt(2026, 9, 23, 15, 40)
+        helper = TestBlockStatsCache()
+        with patch.object(statusline.Path, 'home', return_value=tmp_path):
+            for api_start in (window, None):
+                data = helper._make_cache_data(age=5)
+                data['api_block_start_utc'] = statusline._serialize_datetime(api_start) if api_start else None
+                cache = statusline._get_block_stats_cache_file(api_start)
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(data))
+            with patch.object(statusline, '_get_transcript_fingerprint',
+                              return_value=(helper.FAKE_FINGERPRINT, [])), \
+                 patch.object(statusline, '_refresh_block_cache_in_background') as refresh, \
+                 patch.object(statusline, 'load_all_messages_chronologically') as load:
+                for _ in range(5):
+                    for api_start in (window, None):
+                        bs, _cb = statusline._get_cached_block_data('s', api_start)
+                        assert bs is not None
+        load.assert_not_called()
+        refresh.assert_not_called()
+
+    def test_weekly_cold_miss_scans_in_background(self, tmp_path):
+        with patch.object(statusline, '_get_weekly_timeline_cache_file',
+                          return_value=tmp_path / 'weekly.json'), \
+             patch.object(statusline, '_run_detached') as detached, \
+             patch.object(statusline, '_scan_weekly_timeline') as scan:
+            timeline, cost = statusline.generate_weekly_timeline(
+                {'seven_day': {'resets_at': '2026-09-27T01:00:00+00:00'}})
+        scan.assert_not_called()
+        detached.assert_called_once()
+        assert timeline == [0] * 20 and cost == 0.0
