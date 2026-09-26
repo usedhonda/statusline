@@ -288,9 +288,15 @@ def maybe_keep_warm(data):
 
 
 def _forward_to_ccstatusbar(input_data):
-    """Best-effort side-channel for CCStatusBar; never affects statusline output."""
+    """Best-effort side-channel for CCStatusBar; never affects statusline output.
+
+    Only CCStatusBar 1.10+ has a `statusline` subcommand. An older build treats
+    an unknown argument as a normal launch and opens another menu-bar instance
+    on every render, so forward only once keepwarm.json shows a new enough
+    build has run (1.10+ writes it at launch).
+    """
     try:
-        if not CCSTATUSBAR_BIN.exists():
+        if not CCSTATUSBAR_BIN.exists() or not (CCSTATUSBAR_APP_SUPPORT / "keepwarm.json").exists():
             return
         proc = subprocess.Popen(
             [str(CCSTATUSBAR_BIN), "statusline"],
