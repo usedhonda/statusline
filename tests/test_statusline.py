@@ -2410,6 +2410,35 @@ class TestKeepWarmTarget:
         with patch.object(statusline.subprocess, "run", return_value=result):
             assert statusline._composer_is_empty(("iterm", "ABC-123")) is True
 
+    def test_latest_composer_with_draft_rejects_old_empty_prompt(self):
+        screen = "❯\n⏺ ok\n❯ draft message\n  ⏵⏵ auto mode on"
+        with patch.object(statusline, "_read_screen", return_value=screen):
+            assert statusline._composer_is_empty(("tmux", "%4")) is False
+
+    def test_latest_empty_composer_allows_poke(self):
+        screen = "❯ previous message\n⏺ ok\n❯  \n  ⏵⏵ auto mode on"
+        with patch.object(statusline, "_read_screen", return_value=screen):
+            assert statusline._composer_is_empty(("tmux", "%4")) is True
+
+    def test_draft_does_not_claim_or_send_keep_warm(self, tmp_path, monkeypatch):
+        transcript = tmp_path / "transcript.jsonl"
+        entries = [TestKeepWarm._entry("user", "hello"),
+                   TestKeepWarm._entry("assistant", stop="end_turn")]
+        transcript.write_text("\n".join(json.dumps(entry) for entry in entries))
+        now = datetime(2027, 1, 15, 8, 30, tzinfo=timezone.utc).timestamp()
+        monkeypatch.setenv("CCSL_KEEP_WARM_HOURS", "4")
+        data = {"session_id": "test", "transcript_path": str(transcript),
+                "prompt_cache": {"warm": True, "expires_at": now + 60}}
+        with patch.object(statusline.time, "time", return_value=now), \
+                patch.object(statusline, "keep_warm_target", return_value=("tmux", "%4")), \
+                patch.object(statusline, "ccstatusbar_owns_keep_warm", return_value=False), \
+                patch.object(statusline, "_read_screen", return_value="❯\n⏺ ok\n❯ draft"), \
+                patch.object(statusline, "claim_keep_warm", return_value=True) as claim, \
+                patch.object(statusline, "_type_line") as send:
+            statusline.maybe_keep_warm(data)
+        claim.assert_not_called()
+        send.assert_not_called()
+
     def test_iterm_typing_goes_through_osascript(self):
         with patch.object(statusline.subprocess, "Popen") as popen:
             statusline._type_line(("iterm", "ABC-123"), 'Reply with just "ok".')

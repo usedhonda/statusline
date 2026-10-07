@@ -251,7 +251,12 @@ def _type_line(target, text):
 def _composer_is_empty(target):
     """Only type into an empty prompt, never into a half-written message."""
     tail = [line for line in _read_screen(target).splitlines() if line.strip()][-8:]
-    return any(re.fullmatch(r"\s*❯\s*", line) for line in tail)
+    # An older empty prompt may remain above the current draft. Only the
+    # latest prompt can establish that it is safe to type.
+    for line in reversed(tail):
+        if re.match(r"\s*❯", line):
+            return re.fullmatch(r"\s*❯\s*", line) is not None
+    return False
 
 
 def maybe_keep_warm(data):
