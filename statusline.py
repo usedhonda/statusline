@@ -2359,6 +2359,8 @@ def _cache_read_rate(model_name, model_id, input_rate):
         return 0.25
     if "opus-5-5" in haystack or "opus 5.5" in haystack:
         return 0.20
+    if "sonnet-5-5" in haystack or "sonnet 5.5" in haystack:
+        return 0.10  # Anthropic's October 2026 Sonnet 5.5 cache-read price
     return input_rate * 0.10
 
 

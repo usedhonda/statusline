@@ -420,6 +420,29 @@ class TestCalculateCost:
         # Sonnet 4.6: $3 + 0.1M * $15 = $4.5
         assert abs(cost - 4.5) < 0.001
 
+    def test_sonnet_5_5_cache_read_special_rate(self):
+        # Anthropic reduced Sonnet 5.5 cache reads to $0.10/MTok in October 2026.
+        for name, model_id in [
+            ("Claude Sonnet 5.5", "claude-sonnet-5-5"),
+            ("Unknown", "claude-sonnet-5-5"),
+            ("Claude Sonnet 5.5", ""),
+        ]:
+            cost = statusline.calculate_cost(
+                input_tokens=0, output_tokens=0,
+                cache_creation=0, cache_read=1_000_000,
+                model_name=name, model_id=model_id,
+            )
+            assert abs(cost - 0.10) < 0.001
+
+    def test_sonnet_5_cache_read_retains_standard_multiplier(self):
+        # Only Sonnet 5.5 gets the discounted cache-read rate.
+        cost = statusline.calculate_cost(
+            input_tokens=0, output_tokens=0,
+            cache_creation=0, cache_read=1_000_000,
+            model_name="Claude Sonnet 5", model_id="claude-sonnet-5",
+        )
+        assert abs(cost - 0.20) < 0.001
+
     def test_haiku_4_5_pricing(self):
         cost = statusline.calculate_cost(
             input_tokens=1_000_000, output_tokens=100_000,
