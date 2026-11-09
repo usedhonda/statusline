@@ -39,6 +39,7 @@ import shutil
 import re
 import unicodedata
 from pathlib import Path
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 import time
 import hashlib
@@ -1024,15 +1025,34 @@ def get_real_time_burn_data(session_id=None):
 TRANSCRIPT_SCAN_CHUNK = 32 * 1024 * 1024  # save progress after each chunk
 
 
+@lru_cache(maxsize=1)
+def _transcript_pricing_fingerprint():
+    """Identify the full pricing implementation once per process.
+
+    Source updates do not always bump __version__. Hash the script rather than
+    maintaining a fragile list of pricing functions and their dependencies.
+    If the source cannot be read, callers must rebuild instead of reusing an
+    unidentifiable policy's cached cost.
+    """
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def _empty_transcript_stats():
-    return {'offset': 0, 'message_count': 0, 'error_count': 0,
+    return {'schema': 2, 'pricing_version': __version__,
+            'pricing_fingerprint': _transcript_pricing_fingerprint(),
+            'offset': 0, 'message_count': 0, 'error_count': 0,
             'user_messages': 0, 'assistant_messages': 0,
             'input_tokens': 0, 'output_tokens': 0,
-            'cache_creation': 0, 'cache_read': 0}
+            'cache_creation': 0, 'cache_read': 0,
+            'metered_cost': 0.0, 'previous_metered_cost': 0.0, 'metered_ids': {}}
 
 
 def _apply_transcript_entry(state, entry):
-    """Fold one transcript line into the running stats."""
+    """Fold one transcript line into the running stats, including turn cost."""
+    _apply_metered_entry(state, entry)
     if entry.get('type') == 'user':
         state['user_messages'] += 1
         state['message_count'] += 1
@@ -1059,8 +1079,8 @@ def _apply_transcript_entry(state, entry):
             state['cache_read'] = usage.get('cache_read_input_tokens', 0)
 
 
-def calculate_tokens_from_transcript(file_path):
-    """Calculate token stats from a transcript, reading only what was appended.
+def _read_transcript_stats(file_path):
+    """Read shared token / turn-cost stats, parsing only appended records.
 
     Transcripts grow to hundreds of MB and several sessions redraw every few
     seconds, so a full re-parse per run pegs the CPU. Each transcript keeps its
@@ -1071,32 +1091,54 @@ def calculate_tokens_from_transcript(file_path):
     try:
         st = file_path.stat()
     except FileNotFoundError:
-        return 0, 0, 0, 0, 0, 0, 0, 0, 0
+        return None
     except OSError:
-        return 0, 0, 0, 0, 0, 0, 0, 0, 0
+        return None
 
     cache_file = _get_transcript_stats_cache_file(file_path)
+    pricing_fingerprint = _transcript_pricing_fingerprint()
     state = None
     try:
         cached = json.loads(cache_file.read_text())
-        if (cached.get('file_path') == str(file_path) and cached.get('inode') == st.st_ino
-                and 0 <= cached.get('offset', -1) <= st.st_size):
+        if (isinstance(cached, dict) and cached.get('schema') == 2
+                and cached.get('pricing_version') == __version__
+                and pricing_fingerprint is not None
+                and cached.get('pricing_fingerprint') == pricing_fingerprint
+                and cached.get('file_path') == str(file_path) and cached.get('inode') == st.st_ino
+                and 0 <= cached.get('offset', -1) <= st.st_size
+                and (cached.get('file_size', -1) < st.st_size
+                     or cached.get('mtime_ns') == st.st_mtime_ns)):
             state = cached
     except (OSError, ValueError):
         pass
     if state is None:
         state = _empty_transcript_stats()
+    state['file_size'] = st.st_size
+    state['mtime_ns'] = st.st_mtime_ns
 
     try:
         with open(file_path, 'rb') as f:
             f.seek(state['offset'])
             while state['offset'] < st.st_size:
-                chunk = f.read(TRANSCRIPT_SCAN_CHUNK)
+                chunk = f.read(min(TRANSCRIPT_SCAN_CHUNK, st.st_size - state['offset']))
                 if not chunk:
                     break
                 end = chunk.rfind(b'\n')
+                if end < 0 and f.tell() < st.st_size:
+                    # Finish one oversized record rather than getting stuck at
+                    # this offset forever. Stay within the original snapshot
+                    # and stop at its newline, not at a later record's end.
+                    chunk += f.readline(st.st_size - f.tell())
+                    end = chunk.rfind(b'\n')
                 if end < 0:
-                    break  # a line still being written; pick it up next run
+                    # A complete JSON record can arrive before its newline.
+                    # Display it now but don't persist it: reread this tail
+                    # from the last committed offset when writing completes.
+                    try:
+                        _apply_transcript_entry(state, json.loads(chunk))
+                    except (ValueError, AttributeError):
+                        pass
+                    break
                 complete = chunk[:end + 1]
                 for raw in complete.splitlines():
                     try:
@@ -1110,9 +1152,16 @@ def calculate_tokens_from_transcript(file_path):
         with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as log:
             log.write(f"\n{datetime.now()}: Error in calculate_tokens_from_transcript: {e}\n")
             log.write(f"File path: {file_path}\n")
-        return 0, 0, 0, 0, 0, 0, 0, 0, 0
+        return None
 
-    # 総トークン数（professional calculation）
+    return state
+
+
+def calculate_tokens_from_transcript(file_path):
+    """Return the current transcript counts using the shared incremental cache."""
+    state = _read_transcript_stats(file_path)
+    if state is None:
+        return 0, 0, 0, 0, 0, 0, 0, 0, 0
     total_tokens = get_total_tokens({
         'input_tokens': state['input_tokens'],
         'output_tokens': state['output_tokens'],
@@ -2421,73 +2470,57 @@ def format_cost(cost):
         return f"${cost:.2f}"
 
 
+def _apply_metered_entry(state, entry):
+    """Maintain the same latest-human-turn cost as the original full scan.
+
+    Store totals and response IDs only, never conversation text. Dedup state is
+    scoped to a human turn and survives redraws / appended content blocks.
+    """
+    message = entry.get('message') if isinstance(entry.get('message'), dict) else {}
+    if entry.get('type') == 'user' and not entry.get('isMeta'):
+        content = message.get('content')
+        is_human = isinstance(content, str) or (
+            isinstance(content, list) and not any(
+                isinstance(block, dict) and block.get('type') == 'tool_result'
+                for block in content
+            )
+        )
+        if is_human:
+            if state['metered_cost'] > 0:
+                state['previous_metered_cost'] = state['metered_cost']
+            state['metered_cost'] = 0.0
+            state['metered_ids'] = {}
+        return
+    if entry.get('type') != 'assistant':
+        return
+    model = message.get('model') or ''
+    usage = entry.get('usage') or message.get('usage')
+    if not usage or not is_metered_usage(model, usage):
+        return
+    message_id = message.get('id') or entry.get('uuid')
+    request_id = entry.get('requestId')
+    if message_id and request_id:
+        key = f"{message_id}:{request_id}"
+        if key in state['metered_ids']:
+            return
+        state['metered_ids'][key] = True
+    state['metered_cost'] += _metered_usage_cost(model, usage)
+
+
 def calculate_metered_cost_from_transcript(transcript_path):
-    """直前ターンの従量モデル分コストを USD で返す。
+    """Return latest-turn metered cost without rescanning previous records.
 
-    「いまの一発がいくらだったか」を出すため、累計ではなくターン単位で集計する:
-    人間のユーザー発話 (tool_result や meta ではない user メッセージ) を見るたびに
-    積算をリセットし、それ以降の従量モデル (Fable 等) の assistant メッセージだけを
-    単価換算で合算する。応答中は伸び、応答完了時 = そのターンの実費になる。
-
-    **フォールバック**: 現行ターンがまだ無消費 (プロンプト直後など) のときは、
-    直前に完了したターンの額を返す。プロンプトを打った瞬間に金額が消えて
-    「見えないことが多い」となるのを防ぐ (2026-06-11 船長指摘)。
-
-    サブスク込みモデルの分は含めない。transcript が読めなければ None (呼び出し側で
-    フォールバック)。
+    A new human prompt resets the turn; tool results and meta messages don't.
+    Before the new turn incurs spend, preserve the previous completed amount.
+    The token-stat reader updates the same cache first during normal rendering,
+    so this call normally reads cached totals only. Unreadable input is None.
     """
     if not transcript_path:
         return None
-    path = Path(transcript_path)
-    if not path.exists():
+    state = _read_transcript_stats(transcript_path)
+    if state is None:
         return None
-    total = 0.0
-    prev_turn_total = 0.0
-    processed_hashes = set()
-    try:
-        with open(path, 'r') as f:
-            for line in f:
-                try:
-                    message_data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(message_data, dict):
-                    continue
-                message = message_data.get('message') if isinstance(message_data.get('message'), dict) else {}
-                if message_data.get('type') == 'user' and not message_data.get('isMeta'):
-                    # 人間のプロンプトでターン境界。tool_result (type:user で届く) は除外
-                    content = message.get('content')
-                    is_human = isinstance(content, str) or (
-                        isinstance(content, list) and not any(
-                            isinstance(b, dict) and b.get('type') == 'tool_result'
-                            for b in content
-                        )
-                    )
-                    if is_human:
-                        if total > 0:
-                            prev_turn_total = total
-                        total = 0.0
-                        processed_hashes.clear()
-                    continue
-                if message_data.get('type') != 'assistant':
-                    continue
-                msg_model = message.get('model') or ''
-                usage = message_data.get('usage') or message.get('usage')
-                if not usage or not is_metered_usage(msg_model, usage):
-                    continue
-                # Dedup by message.id + requestId (entry uuid differs per
-                # content-block line of the same response — fallback only)
-                message_id = message.get('id') or message_data.get('uuid')
-                request_id = message_data.get('requestId')
-                if message_id and request_id:
-                    unique_hash = f"{message_id}:{request_id}"
-                    if unique_hash in processed_hashes:
-                        continue
-                    processed_hashes.add(unique_hash)
-                total += _metered_usage_cost(msg_model, usage)
-    except OSError:
-        return None
-    return total if total > 0 else prev_turn_total
+    return state['metered_cost'] if state['metered_cost'] > 0 else state['previous_metered_cost']
 
 
 # advisor_message イテレーション (flat usage に含まれない別モデル分) を従量コストへ
