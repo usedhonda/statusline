@@ -4340,86 +4340,96 @@ def get_update_lock_file():
     """Get auto-update lock file path (lazy initialization)."""
     global AUTO_UPDATE_LOCK_FILE
     if AUTO_UPDATE_LOCK_FILE is None:
-        AUTO_UPDATE_LOCK_FILE = Path.home() / '.claude' / '.statusline_update_lock.json'
+        AUTO_UPDATE_LOCK_FILE = Path.home() / '.claude' / '.statusline_update.lock'
     return AUTO_UPDATE_LOCK_FILE
 
 def load_update_cache():
-    """Load auto-update cache from disk."""
-    cache_file = get_update_cache_file()
+    """Load update metadata; malformed cache files are treated as absent."""
     try:
-        if cache_file.exists():
-            with open(cache_file) as f:
-                return json.load(f)
-    except (json.JSONDecodeError, IOError, OSError):
-        pass
-    return None
+        with open(get_update_cache_file(), encoding='utf-8') as f:
+            cache = json.load(f)
+        if not isinstance(cache, dict):
+            return None
+        import math
+        checked_at = cache.get('last_check', 0)
+        if isinstance(checked_at, bool) or not isinstance(checked_at, (int, float)) or not math.isfinite(checked_at):
+            return None
+        if any(key in cache and not isinstance(cache[key], str) for key in ('etag', 'content_hash')):
+            return None
+        return cache
+    except (ValueError, OSError, OverflowError):
+        return None
+
 
 def _save_update_cache(data):
-    """Save auto-update cache to disk."""
-    cache_file = get_update_cache_file()
+    """Atomically save metadata without leaving temporary files on failure."""
+    import tempfile
+    temporary = None
     try:
-        import tempfile
-        fd, tmp_path = tempfile.mkstemp(dir=str(cache_file.parent), suffix='.tmp')
-        with os.fdopen(fd, 'w') as f:
+        cache_file = get_update_cache_file()
+        fd, temporary = tempfile.mkstemp(dir=str(cache_file.parent), suffix='.json.tmp')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(data, f)
-        Path(tmp_path).rename(cache_file)
-    except (IOError, OSError):
+        os.replace(temporary, cache_file)
+    except OSError:
         pass
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
 
 def _acquire_update_lock():
-    """Acquire PID lock for update mutual exclusion."""
-    lock_file = get_update_lock_file()
-    try:
-        if lock_file.exists():
-            with open(lock_file) as f:
-                lock_data = json.load(f)
-            pid = lock_data.get('pid')
-            start_time_val = lock_data.get('start_time', 0)
-            if pid and time.time() - start_time_val < 60:
-                try:
-                    os.kill(pid, 0)
-                    return False  # Process alive, lock held
-                except OSError:
-                    pass  # Process dead, steal lock
-    except (json.JSONDecodeError, IOError, OSError):
-        pass
-    return True
+    """Return an exclusively locked descriptor, or None if unavailable.
 
-def _write_update_lock(pid):
-    """Write PID to update lock file."""
-    lock_file = get_update_lock_file()
+    Keep one inode: deleting a lock file lets two processes lock different
+    files at the same path. The OS releases this lock even if an updater dies.
+    """
+    import stat
+    fd = None
     try:
-        with open(lock_file, 'w') as f:
-            json.dump({'pid': pid, 'start_time': time.time()}, f)
-    except (IOError, OSError):
-        pass
+        lock_file = get_update_lock_file()
+        if lock_file.is_symlink():
+            return None
+        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError('update lock is not a private regular file')
+        if os.name == 'nt':
+            import msvcrt
+            if info.st_size == 0:
+                os.write(fd, b'\0')
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (OSError, ImportError):
+        if fd is not None:
+            os.close(fd)
+        return None
 
-def _release_update_lock():
-    """Release update lock file."""
-    lock_file = get_update_lock_file()
-    try:
-        lock_file.unlink()
-    except (FileNotFoundError, OSError):
-        pass
+
+def _release_update_lock(fd):
+    """Closing the owner descriptor releases the lock; never unlink it."""
+    if fd is not None:
+        os.close(fd)
+
 
 def _is_update_disabled():
-    """Check if auto-update is disabled via env var or marker file."""
+    """Check update policy and protect source/package/development installs."""
     if os.environ.get('STATUSLINE_AUTO_UPDATE', '1') == '0':
         return True
-    no_update_file = Path.home() / '.claude' / '.statusline_no_update'
-    if no_update_file.exists():
+    if (Path.home() / '.claude' / '.statusline_no_update').exists():
         return True
-    legacy_path_raw = Path.home() / '.claude' / 'statusline.py'
-    # Dev machine: ~/.claude/statusline.py is a symlink into the project checkout.
-    # Self-update would replace the symlink with a regular file (atomic rename),
-    # destroying the dev setup — never update through a symlink.
-    if legacy_path_raw.is_symlink():
+    target = Path.home() / '.claude' / 'statusline.py'
+    if target.is_symlink():
         return True
-    # pip/brew install: not running from ~/.claude/statusline.py
-    script_path = Path(__file__).resolve()
-    if script_path != legacy_path_raw.resolve():
-        return True
-    return False
+    return Path(__file__).resolve() != target.resolve()
+
 
 def is_retired_package_install(script_path=None):
     """pip/brew builds are frozen at their last release and never self-update."""
@@ -4428,314 +4438,179 @@ def is_retired_package_install(script_path=None):
 
 
 def maybe_check_update():
-    """Check if an update check is due and spawn background process if so."""
+    """Spawn a background check when due; the child owns the update lock."""
     if _is_update_disabled():
         return
-    cache = load_update_cache()
-    if cache and (time.time() - cache.get('last_check', 0)) < AUTO_UPDATE_CHECK_TTL:
-        return  # Still fresh
-    if not _acquire_update_lock():
-        return  # Another process is checking
+    cache = load_update_cache() or {}
+    if time.time() - cache.get('last_check', 0) < AUTO_UPDATE_CHECK_TTL:
+        return
+    # Avoid spawning while a check is running. Simultaneous callers may both
+    # launch, so each child also locks and rechecks freshness before any HTTP.
+    lock = _acquire_update_lock()
+    if lock is None:
+        return
+    _release_update_lock(lock)
     try:
-        target = str(Path.home() / '.claude' / 'statusline.py')
-        proc = subprocess.Popen(
-            [sys.executable, target, '--self-update'],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
+        subprocess.Popen(
+            [sys.executable, str(Path.home() / '.claude' / 'statusline.py'), '--self-update'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        _write_update_lock(proc.pid)
-    except Exception:
-        _release_update_lock()
+    except OSError:
+        pass
+
+
+def _atomic_write_update_file(path, content):
+    """Install or back up bytes without following an existing destination link."""
+    import tempfile
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), suffix='.py.tmp')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(content)
+        os.chmod(temporary, 0o755)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _run_update(foreground=False):
+    """One guarded, serialized download/validation/install path for both modes."""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    def report(message):
+        if foreground:
+            print(message)
+        else:
+            try:
+                with open(Path.home() / '.claude' / 'statusline-update.log', 'a', encoding='utf-8') as f:
+                    f.write(f'{datetime.now().isoformat()}: {message}\n')
+            except OSError:
+                pass
+
+    if _is_update_disabled():
+        if foreground:
+            print('Auto-update is disabled for this installation.')
+            print('Check STATUSLINE_AUTO_UPDATE and ~/.claude/.statusline_no_update.')
+        return False
+    lock = _acquire_update_lock()
+    if lock is None:
+        if foreground:
+            print('Updater is busy or its lock is unavailable. Try again later.')
+        return False
+    cache = {}
+    try:
+        # Policy or another process's successful check can change after launch.
+        if _is_update_disabled():
+            return False
+        cache = load_update_cache() or {}
+        if not foreground and time.time() - cache.get('last_check', 0) < AUTO_UPDATE_CHECK_TTL:
+            return True
+        if foreground:
+            print('Checking for updates...')
+        target = Path.home() / '.claude' / 'statusline.py'
+        current = target.read_bytes()
+        current_hash = hashlib.sha256(current).hexdigest()
+        request = Request(AUTO_UPDATE_URL, headers={'User-Agent': 'statusline-autoupdate/1.0'})
+        # An ETag describes the downloaded content, not a locally changed or
+        # rolled-back file. Sending it then can incorrectly produce HTTP 304.
+        if cache.get('etag') and cache.get('content_hash') == current_hash:
+            request.add_header('If-None-Match', cache['etag'])
+        try:
+            with urlopen(request, timeout=10) as response:
+                content = response.read(4 * 1024 * 1024 + 1)
+                etag = response.headers.get('ETag', '')
+        except HTTPError as exc:
+            if exc.code != 304 or not request.has_header('If-none-match'):
+                raise
+            cache['last_check'] = time.time()
+            _save_update_cache(cache)
+            if foreground:
+                print('Already up to date. (304 Not Modified)')
+            return True
+
+        if not 1000 <= len(content) <= 4 * 1024 * 1024:
+            raise ValueError('downloaded content has an unexpected size')
+        source = content.decode('utf-8')
+        if not any(line.startswith('#!') and 'python' in line for line in source.splitlines()[:3]):
+            raise ValueError('downloaded content has no Python shebang')
+        if 'def main()' not in source:
+            raise ValueError('downloaded content has no main() function')
+        compile(source, '<update>', 'exec')
+        new_hash = hashlib.sha256(content).hexdigest()
+        if new_hash == current_hash:
+            cache.update(last_check=time.time(), etag=etag, content_hash=new_hash)
+            _save_update_cache(cache)
+            if foreground:
+                print('Already up to date. (same content)')
+            return True
+        if _is_update_disabled():
+            report('Update skipped: policy or installation changed during download.')
+            return False
+        # A failed backup aborts installation. Both writes use this same lock.
+        _atomic_write_update_file(target.with_name('statusline.py.backup'), target.read_bytes())
+        _atomic_write_update_file(target, content)
+        cache.update(last_check=time.time(), last_update=time.time(), etag=etag, content_hash=new_hash)
+        _save_update_cache(cache)
+        report(f'Updated successfully: hash {new_hash[:12]}')
+        if foreground:
+            print('Rollback: python3 ~/.claude/statusline.py --rollback')
+        return True
+    except Exception as exc:
+        report(f'Update failed: {exc}')
+        cache['last_check'] = time.time()
+        _save_update_cache(cache)
+        return False
+    finally:
+        _release_update_lock(lock)
+
 
 def do_self_update():
-    """Background self-update handler (--self-update).
-    Downloads latest version from GitHub, validates, and replaces if changed.
-    """
-    import hashlib
-    import tempfile
-    log_file = Path.home() / '.claude' / 'statusline-update.log'
-    target = Path.home() / '.claude' / 'statusline.py'
+    """Background checks honor the same policy and lock as --update."""
+    return _run_update()
 
-    def log(msg):
-        try:
-            with open(log_file, 'a') as f:
-                f.write(f"{datetime.now().isoformat()}: {msg}\n")
-        except OSError:
-            pass
-
-    try:
-        # Load cache for ETag
-        cache = load_update_cache() or {}
-        etag = cache.get('etag', '')
-
-        # HTTP GET with conditional request
-        from urllib.request import Request, urlopen
-        from urllib.error import HTTPError
-        req = Request(AUTO_UPDATE_URL)
-        if etag:
-            req.add_header('If-None-Match', etag)
-        req.add_header('User-Agent', 'statusline-autoupdate/1.0')
-
-        try:
-            resp = urlopen(req, timeout=10)
-        except HTTPError as e:
-            if e.code == 304:
-                # Not modified - just update timestamp
-                cache['last_check'] = time.time()
-                _save_update_cache(cache)
-                _release_update_lock()
-                return
-            raise
-
-        content = resp.read().decode('utf-8')
-        new_etag = resp.headers.get('ETag', '')
-
-        # Validation
-        if len(content) < 1000:
-            log("SKIP: Downloaded content too small ({} bytes)".format(len(content)))
-            cache['last_check'] = time.time()
-            _save_update_cache(cache)
-            _release_update_lock()
-            return
-
-        lines = content.split('\n', 5)
-        has_shebang = any(line.startswith('#!') and 'python' in line for line in lines[:3])
-        if not has_shebang:
-            log("SKIP: No python shebang found")
-            cache['last_check'] = time.time()
-            _save_update_cache(cache)
-            _release_update_lock()
-            return
-
-        if 'def main()' not in content:
-            log("SKIP: No main() function found")
-            cache['last_check'] = time.time()
-            _save_update_cache(cache)
-            _release_update_lock()
-            return
-
-        # Syntax check
-        try:
-            compile(content, '<update>', 'exec')
-        except SyntaxError as e:
-            log("SKIP: Syntax error in downloaded content: {}".format(e))
-            cache['last_check'] = time.time()
-            _save_update_cache(cache)
-            _release_update_lock()
-            return
-
-        # SHA256 comparison
-        new_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
-        if new_hash == cache.get('content_hash', ''):
-            # Same content, just update cache
-            cache['last_check'] = time.time()
-            cache['etag'] = new_etag
-            _save_update_cache(cache)
-            _release_update_lock()
-            return
-
-        # Also compare against current file
-        try:
-            current_content = target.read_text(encoding='utf-8')
-            current_hash = hashlib.sha256(current_content.encode('utf-8')).hexdigest()
-            if new_hash == current_hash:
-                cache['last_check'] = time.time()
-                cache['etag'] = new_etag
-                cache['content_hash'] = new_hash
-                _save_update_cache(cache)
-                _release_update_lock()
-                return
-        except (IOError, OSError):
-            pass
-
-        # Backup current file
-        backup_path = target.parent / 'statusline.py.backup'
-        try:
-            import shutil
-            shutil.copy2(str(target), str(backup_path))
-        except (IOError, OSError) as e:
-            log("WARNING: Backup failed: {}".format(e))
-
-        # Atomic write: mkstemp -> write -> chmod -> rename
-        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix='.py.tmp')
-        try:
-            with os.fdopen(fd, 'w') as f:
-                f.write(content)
-            os.chmod(tmp_path, 0o755)
-            Path(tmp_path).rename(target)
-        except Exception:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-
-        # Update cache
-        cache['last_check'] = time.time()
-        cache['etag'] = new_etag
-        cache['content_hash'] = new_hash
-        cache['last_update'] = time.time()
-        _save_update_cache(cache)
-
-        log("UPDATED: {} -> hash {}".format(target, new_hash[:12]))
-
-    except Exception as e:
-        try:
-            log("ERROR: {}".format(e))
-        except Exception:
-            pass
-        # Update last_check even on error to avoid rapid retries
-        cache = load_update_cache() or {}
-        cache['last_check'] = time.time()
-        _save_update_cache(cache)
-    finally:
-        _release_update_lock()
 
 def do_update_foreground():
-    """Foreground update handler (--update). Runs synchronously with user feedback."""
-    if _is_update_disabled():
-        print("Auto-update is disabled.")
-        no_update_file = Path.home() / '.claude' / '.statusline_no_update'
-        if no_update_file.exists():
-            print("  Remove ~/.claude/.statusline_no_update to re-enable.")
-        if os.environ.get('STATUSLINE_AUTO_UPDATE', '1') == '0':
-            print("  Unset STATUSLINE_AUTO_UPDATE=0 to re-enable.")
-        return
+    """Explicit checks bypass the refresh interval, but not policy or locking."""
+    return _run_update(foreground=True)
 
-    import hashlib
-    target = Path.home() / '.claude' / 'statusline.py'
-    cache = load_update_cache() or {}
-    etag = cache.get('etag', '')
-
-    print("Checking for updates...")
-
-    try:
-        from urllib.request import Request, urlopen
-        from urllib.error import HTTPError
-        req = Request(AUTO_UPDATE_URL)
-        if etag:
-            req.add_header('If-None-Match', etag)
-        req.add_header('User-Agent', 'statusline-autoupdate/1.0')
-
-        try:
-            resp = urlopen(req, timeout=10)
-        except HTTPError as e:
-            if e.code == 304:
-                cache['last_check'] = time.time()
-                _save_update_cache(cache)
-                print("Already up to date. (304 Not Modified)")
-                return
-            raise
-
-        content = resp.read().decode('utf-8')
-        new_etag = resp.headers.get('ETag', '')
-
-        # Validate
-        errors = []
-        if len(content) < 1000:
-            errors.append("Content too small ({} bytes)".format(len(content)))
-        lines = content.split('\n', 5)
-        if not any(line.startswith('#!') and 'python' in line for line in lines[:3]):
-            errors.append("No python shebang")
-        if 'def main()' not in content:
-            errors.append("No main() function")
-        try:
-            compile(content, '<update>', 'exec')
-        except SyntaxError as e:
-            errors.append("Syntax error: {}".format(e))
-
-        if errors:
-            print("Update validation failed:")
-            for err in errors:
-                print("  - {}".format(err))
-            return
-
-        # Check if actually different
-        new_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
-        try:
-            current_hash = hashlib.sha256(target.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
-        except (IOError, OSError):
-            current_hash = ''
-
-        if new_hash == current_hash:
-            cache['last_check'] = time.time()
-            cache['etag'] = new_etag
-            cache['content_hash'] = new_hash
-            _save_update_cache(cache)
-            print("Already up to date. (same content)")
-            return
-
-        # Backup
-        backup_path = target.parent / 'statusline.py.backup'
-        try:
-            import shutil
-            shutil.copy2(str(target), str(backup_path))
-            print("Backup saved to {}".format(backup_path))
-        except (IOError, OSError) as e:
-            print("Warning: backup failed: {}".format(e))
-
-        # Atomic write
-        import tempfile
-        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix='.py.tmp')
-        try:
-            with os.fdopen(fd, 'w') as f:
-                f.write(content)
-            os.chmod(tmp_path, 0o755)
-            Path(tmp_path).rename(target)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-
-        cache['last_check'] = time.time()
-        cache['etag'] = new_etag
-        cache['content_hash'] = new_hash
-        cache['last_update'] = time.time()
-        _save_update_cache(cache)
-
-        print("Updated successfully!")
-        print("  New hash: {}".format(new_hash[:12]))
-        print("  Rollback: python3 ~/.claude/statusline.py --rollback")
-
-    except Exception as e:
-        print("Update failed: {}".format(e))
 
 def do_rollback():
-    """Rollback handler (--rollback). Restores from backup."""
+    """Restore a validated backup under the same lock as all update writers."""
     target = Path.home() / '.claude' / 'statusline.py'
-    backup_path = target.parent / 'statusline.py.backup'
-
+    backup_path = target.with_name('statusline.py.backup')
+    if target.is_symlink():
+        print('Rollback skipped: the installation is a development symlink.')
+        return False
     if not backup_path.exists():
-        print("No backup found at {}".format(backup_path))
-        return
-
+        print(f'No backup found at {backup_path}')
+        return False
+    lock = _acquire_update_lock()
+    if lock is None:
+        print('Updater is busy or its lock is unavailable. Try again later.')
+        return False
     try:
-        import shutil
-        # Validate backup first
-        backup_content = backup_path.read_text(encoding='utf-8')
-        try:
-            compile(backup_content, '<backup>', 'exec')
-        except SyntaxError:
-            print("Backup file has syntax errors. Aborting rollback.")
-            return
-
-        shutil.copy2(str(backup_path), str(target))
-        print("Rolled back to backup version.")
-        print("  Source: {}".format(backup_path))
-        print("  Target: {}".format(target))
-
-        # Clear update cache so next check re-evaluates
+        content = backup_path.read_bytes()
+        compile(content.decode('utf-8'), '<backup>', 'exec')
+        if target.is_symlink():
+            print('Rollback skipped: the installation changed to a symlink.')
+            return False
+        _atomic_write_update_file(target, content)
         cache = load_update_cache() or {}
-        cache['content_hash'] = ''
+        cache.pop('etag', None)
+        cache.update(content_hash='', last_check=time.time())
         _save_update_cache(cache)
+        print('Rolled back to backup version.')
+        return True
+    except Exception as exc:
+        print(f'Rollback failed: {exc}')
+        return False
+    finally:
+        _release_update_lock(lock)
 
-    except Exception as e:
-        print("Rollback failed: {}".format(e))
 
 # ============================================
 # Ratelimit display helpers
