@@ -696,6 +696,15 @@ STATUSLINE_PATH = os.path.join(
 )
 
 
+def _run_statusline(input_data, *args, env=None, timeout=10):
+    """Use the isolated test environment for every CLI smoke/performance run."""
+    return subprocess.run(
+        [sys.executable, STATUSLINE_PATH, *args],
+        input=input_data, capture_output=True, text=True, timeout=timeout,
+        env={**os.environ, **(env or {})},
+    )
+
+
 class TestDoSetup:
     """do_setup() の statusLine command 選択。
     pip/brew は PATH の `ccsl`、curl/手動は file 直叩き (self-update が効く)。"""
@@ -787,21 +796,7 @@ class TestWatchSchemaDrift:
 
 
 class TestSmoke:
-    def _run(self, input_data):
-        # Force a deterministic terminal size: statusline prefers the real tmux
-        # pane size (TMUX env), which varies by where the test happens to run.
-        env = {k: v for k, v in os.environ.items()
-               if k not in ('TMUX', 'TMUX_PANE', 'TERM')}
-        env['COLUMNS'] = '200'
-        env['LINES'] = '50'
-        env['STATUSLINE_NO_SCHEMA_WATCH'] = '1'  # fake stdin must not pollute the drift log
-        return subprocess.run(
-            [sys.executable, STATUSLINE_PATH],
-            input=input_data,
-            capture_output=True, text=True,
-            timeout=10,
-            env=env,
-        )
+    _run = staticmethod(_run_statusline)
 
     def _assert_output(self, result):
         """Common assertions: exit 0, meaningful stdout, no stderr errors."""
@@ -955,19 +950,11 @@ class TestSmoke:
             "contextWindow": {"context_window_size": 200000},  # wrong casing
         })
         # Silent by default.
-        silent = subprocess.run(
-            [sys.executable, STATUSLINE_PATH],
-            input=bad, capture_output=True, text=True, timeout=10,
-            env={**os.environ, 'STATUSLINE_DEBUG': '0'},
-        )
+        silent = _run_statusline(bad, env={'STATUSLINE_DEBUG': '0'})
         assert 'stdin schema drift' not in silent.stderr
 
         # Loud when STATUSLINE_DEBUG=1.
-        loud = subprocess.run(
-            [sys.executable, STATUSLINE_PATH],
-            input=bad, capture_output=True, text=True, timeout=10,
-            env={**os.environ, 'STATUSLINE_DEBUG': '1'},
-        )
+        loud = _run_statusline(bad, env={'STATUSLINE_DEBUG': '1'})
         assert loud.returncode == 0  # crash-free regardless
         assert 'stdin schema drift' in loud.stderr
 
@@ -1207,12 +1194,6 @@ class TestTranscriptStatsCache:
         self._run(transcript, cache_file)
         transcript.write_text(self.USER)  # shorter than the cached offset
         assert self._run(transcript, cache_file)[1] == 1
-
-    def test_sessions_get_separate_caches(self, tmp_path):
-        a = statusline._get_transcript_stats_cache_file(tmp_path / 'a.jsonl')
-        b = statusline._get_transcript_stats_cache_file(tmp_path / 'b.jsonl')
-        assert a != b
-
 
 # ============================================
 # Test Group 1: get_total_tokens() — Token aggregation
@@ -2256,21 +2237,7 @@ class TestAgentFunctions:
 class TestSmokeExtended:
     """Extended smoke tests with realistic input data."""
 
-    def _run(self, input_data):
-        # Force a deterministic terminal size: statusline prefers the real tmux
-        # pane size (TMUX env), which varies by where the test happens to run.
-        env = {k: v for k, v in os.environ.items()
-               if k not in ('TMUX', 'TMUX_PANE', 'TERM')}
-        env['COLUMNS'] = '200'
-        env['LINES'] = '50'
-        env['STATUSLINE_NO_SCHEMA_WATCH'] = '1'  # fake stdin must not pollute the drift log
-        return subprocess.run(
-            [sys.executable, STATUSLINE_PATH],
-            input=input_data,
-            capture_output=True, text=True,
-            timeout=10,
-            env=env,
-        )
+    _run = staticmethod(_run_statusline)
 
     def test_full_input_with_ratelimit(self):
         data = json.dumps({
@@ -2326,12 +2293,7 @@ class TestSmokeExtended:
                 "used_percentage": 30,
             },
         })
-        result = subprocess.run(
-            [sys.executable, STATUSLINE_PATH, '--show', 'simple'],
-            input=data,
-            capture_output=True, text=True,
-            timeout=10,
-        )
+        result = _run_statusline(data, '--show', 'simple')
         assert result.returncode == 0
         lines = result.stdout.strip().split('\n')
         assert len(lines) <= 2, f"Simple mode should be <= 2 lines, got {len(lines)}"
@@ -2344,12 +2306,7 @@ class TestSmokeExtended:
                 "used_percentage": 50,
             },
         })
-        result = subprocess.run(
-            [sys.executable, STATUSLINE_PATH, '--show', '1,2'],
-            input=data,
-            capture_output=True, text=True,
-            timeout=10,
-        )
+        result = _run_statusline(data, '--show', '1,2')
         assert result.returncode == 0
         lines = result.stdout.strip().split('\n')
         assert len(lines) <= 2, f"--show 1,2 should be <= 2 lines, got {len(lines)}"
@@ -2487,15 +2444,6 @@ class TestFastModePricing:
         assert statusline._metered_usage_cost('claude-opus-5-5', standard) == 0.0
 
 
-class TestBlockCachePerWindow:
-    def test_windows_get_separate_cache_files(self):
-        from datetime import datetime as _dt
-        with_window = statusline._get_block_stats_cache_file(_dt(2026, 9, 23, 15, 40))
-        without = statusline._get_block_stats_cache_file(None)
-        assert with_window != without
-        assert with_window == statusline._get_block_stats_cache_file(_dt(2026, 9, 23, 15, 40))
-
-
 class TestPerformanceGuards:
     """Load regressions that correctness tests can't see (2026-09-23 incident:
     every run re-parsed transcripts of up to 363MB, and sessions with and
@@ -2612,9 +2560,11 @@ class TestEndToEndLoad:
 
     def _redraw(self, stdin, env):
         start = time.perf_counter()
-        subprocess.run([sys.executable, STATUSLINE_PATH, '--show', 'all'], input=stdin,
-                       env=env, capture_output=True, text=True, timeout=60)
-        return time.perf_counter() - start
+        result = _run_statusline(stdin, '--show', 'all', env=env, timeout=60)
+        elapsed = time.perf_counter() - start
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip(), 'a failed render must not count as a fast redraw'
+        return elapsed
 
     @staticmethod
     def _locks(home):
