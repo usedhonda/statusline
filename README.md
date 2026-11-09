@@ -26,6 +26,10 @@ python3 ~/.claude/statusline.py --setup
 ```
 
 Restart Claude Code. Done — it keeps itself up to date automatically.
+Setup uses a 5-second idle refresh interval. If an older installation refreshes
+slowly while idle, rerun `python3 ~/.claude/statusline.py --setup`: it repairs the
+old `5000` value, which Claude Code interprets as seconds, and preserves other
+custom intervals. See the [Claude Code status line settings](https://code.claude.com/docs/en/statusline#manually-configure-a-status-line).
 
 <details>
 <summary>Other install methods</summary>
@@ -41,7 +45,12 @@ python3 install.py
 **pip / Homebrew (retired)** — these builds no longer receive updates. If you
 installed with `pip install ccsl` or `brew install usedhonda/tap/ccsl`, switch to
 the curl install above, then remove the old package (`pip uninstall ccsl` or
-`brew uninstall ccsl`).
+`brew uninstall ccsl`). `--setup` points Claude Code at the downloaded file and
+the Python interpreter you ran, even while the old `ccsl` command is still on
+PATH. It preserves an existing auto-update opt-out and rollback backup.
+
+Setup preserves unrelated settings and refuses to replace an unreadable or
+invalid `~/.claude/settings.json`; repair that file and rerun `--setup` if needed.
 
 </details>
 

@@ -3335,28 +3335,30 @@ def _verify_schedule_hooks(settings_path):
     return (not missing), missing
 
 
-def do_setup():
-    """Configure Claude Code settings.json to use PATH-based ccsl command."""
+def do_setup(script_path=None):
+    """Configure Claude Code to run this installation with the current Python."""
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(exist_ok=True)
     settings_path = claude_dir / "settings.json"
 
-    # pip/brew put `ccsl` on PATH; a curl/manual install runs this file directly
-    # (and then self-updates from GitHub — no package manager needed).
-    if shutil.which("ccsl"):
-        command = "ccsl"
-    else:
-        command = f"python3 {Path(__file__).resolve()}"
-    statusline_config = {"type": "command", "command": command, "padding": 0, "refreshInterval": 5000}
+    # A retired pip/brew ccsl may still be on PATH during migration. Always
+    # configure the script being installed, not an unrelated PATH executable.
+    import shlex
+    argv = [sys.executable, str(Path(script_path or __file__).resolve())]
+    command = subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv)
+    statusline_config = {"type": "command", "command": command, "padding": 0}
 
     settings = {}
     if settings_path.exists():
         try:
             with open(settings_path, encoding='utf-8') as f:
                 settings = json.load(f)
-        except json.JSONDecodeError:
-            shutil.copy2(settings_path, settings_path.with_suffix('.json.backup'))
-            settings = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Settings were not changed: cannot read {settings_path}: {exc}", file=sys.stderr)
+            return False
+    if not isinstance(settings, dict):
+        print(f"Settings were not changed: {settings_path} must contain a JSON object", file=sys.stderr)
+        return False
 
     # Merge statusLine (preserve user customizations)
     existing_sl = settings.get('statusLine', {})
@@ -3366,11 +3368,30 @@ def do_setup():
     else:
         settings['statusLine'] = statusline_config
 
+    # Claude Code measures this interval in seconds, not milliseconds. Repair
+    # the value emitted by older installers; preserve other explicit choices.
+    status_line = settings['statusLine']
+    if 'refreshInterval' not in status_line or status_line['refreshInterval'] == 5000:
+        status_line['refreshInterval'] = 5
+
     # Add Stop hook for schedule idle guard
     _add_schedule_hooks(settings)
 
-    with open(settings_path, 'w', encoding='utf-8') as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
+    # Write alongside the target and replace atomically so interrupted setup
+    # cannot leave Claude Code with a truncated settings file.
+    import tempfile
+    destination = settings_path.resolve()
+    fd, temporary = tempfile.mkstemp(dir=str(destination.parent), suffix='.json.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+            f.write('\n')
+        os.replace(temporary, destination)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
     ok, missing = _verify_schedule_hooks(settings_path)
     if not ok:
@@ -3379,21 +3400,12 @@ def do_setup():
 
     print(f"Settings updated: {settings_path}")
 
-    # Warn about old file-based install (don't rename - other CC sessions may reference it)
-    old_script = claude_dir / "statusline.py"
-    if old_script.exists():
-        print(f"Note: {old_script} still exists (safe to remove after all CC sessions restart)")
-
-    # Clean up auto-update artifacts
-    for name in ['.statusline_update.json', '.statusline_update_lock.json',
-                 '.statusline_no_update', 'statusline.py.backup']:
-        p = claude_dir / name
-        if p.exists():
-            p.unlink()
-
+    # Setup changes the command only. Keep opt-out, active updater locks, and
+    # rollback backups intact; they belong to the user's update policy/state.
     print(f"\nccsl {__version__} configured successfully.")
     print("Restart Claude Code to see the status line.")
     print(f"Test: echo '{{\"session_id\":\"test\"}}' | {command} --show all")
+    return True
 
 
 def main():
@@ -3453,7 +3465,8 @@ def main():
 
     # Handle setup (early exit, no stdin needed)
     if args.setup:
-        do_setup()
+        if not do_setup():
+            raise SystemExit(1)
         return
 
     # Handle auto-update commands (early exit, no stdin needed)
