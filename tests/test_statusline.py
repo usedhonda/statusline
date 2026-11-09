@@ -815,22 +815,46 @@ class TestSmoke:
             "model": {"display_name": "Opus 4.6"},
             "context_window": {
                 "context_window_size": 200000,
+                "total_input_tokens": 60000,
+                "total_output_tokens": 8000,
+                "current_usage": {
+                    "input_tokens": 6000,
+                    "output_tokens": 8000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 54000,
+                },
                 "used_percentage": 30,
             },
         })
         result = self._run(data)
         self._assert_output(result)
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+        assert '[30%] 60.0K/200.0K' in plain
+        assert '90% cached' in plain
 
     def test_1m_context(self):
         data = json.dumps({
             "model": {"display_name": "Sonnet 4"},
             "context_window": {
                 "context_window_size": 1000000,
-                "used_percentage": 50,
+                # Older payloads may carry cumulative totals; current_usage
+                # is the authoritative per-component context snapshot.
+                "total_input_tokens": 900000,
+                "total_output_tokens": 80000,
+                "current_usage": {
+                    "input_tokens": 40000,
+                    "output_tokens": 8000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 360000,
+                },
+                "used_percentage": 40,
             },
         })
         result = self._run(data)
         self._assert_output(result)
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+        assert '[40%] 400.0K/1.0M' in plain
+        assert '90% cached' in plain
 
     def test_empty_input(self):
         result = self._run("")
@@ -858,11 +882,18 @@ class TestSmoke:
         assert 'PRM' not in result.stdout
         assert '>200K' not in result.stdout
 
-    def test_null_current_usage(self):
-        """Regression: current_usage=null caused AttributeError (session start state)."""
+    def test_null_current_usage(self, tmp_path):
+        """A null snapshot must not resurrect pre-compaction transcript usage."""
+        transcript = tmp_path / 'before-compact.jsonl'
+        transcript.write_text(json.dumps({
+            'type': 'assistant',
+            'message': {'usage': {'input_tokens': 10000, 'output_tokens': 5000,
+                                  'cache_creation_input_tokens': 0,
+                                  'cache_read_input_tokens': 90000}},
+        }) + '\n', encoding='utf-8')
         data = json.dumps({
             "session_id": "test-null-usage",
-            "transcript_path": "/tmp/test.jsonl",
+            "transcript_path": str(transcript),
             "cwd": "/tmp",
             "model": {"id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6"},
             "workspace": {"current_dir": "/tmp", "project_dir": "/tmp", "added_dirs": []},
@@ -887,6 +918,25 @@ class TestSmoke:
         })
         result = self._run(data)
         self._assert_output(result)
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+        assert '[0%] 0/200.0K' in plain
+        assert 'cached' not in plain
+
+    def test_current_usage_without_percentage(self):
+        data = json.dumps({
+            'context_window': {
+                'context_window_size': 200000,
+                'current_usage': {
+                    'input_tokens': 6000, 'output_tokens': 8000,
+                    'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 54000,
+                },
+            },
+        })
+        result = self._run(data)
+        self._assert_output(result)
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+        assert '[30%] 60.0K/200.0K' in plain
+        assert '90% cached' in plain
 
     def test_no_used_percentage_uses_200k_denominator(self):
         """Regression: fallback display denominator must use context_window_size (200K), not compaction_threshold (160K).

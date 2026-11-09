@@ -3527,7 +3527,6 @@ def main():
         # API provided values (use these instead of manual calculation where possible)
         api_total_cost = api_cost.get('total_cost_usd', 0)
         api_input_tokens = api_context.get('total_input_tokens', 0)
-        api_output_tokens = api_context.get('total_output_tokens', 0)
         api_context_size = api_context.get('context_window_size', 200000)
 
         # Lines changed (v2.1.6+ feature)
@@ -3677,24 +3676,32 @@ def main():
                     (total_tokens, _, error_count, user_messages, assistant_messages,
                      input_tokens, output_tokens, cache_creation, cache_read) = calculate_tokens_from_transcript(transcript_file)
         
-        # Calculate percentage for Compact display.
-        # In CC 2.1.6+ the API exposes:
-        #   context_window.total_input_tokens  = next-turn context fill (includes cache_read)
-        #   context_window.used_percentage     = total_input_tokens / context_window_size
-        # These two are consistent with each other. The transcript-derived `total_tokens`
-        # is a *cumulative* session metric and does NOT match used_percentage — mixing them
-        # produces nonsense like "[0%] 377K/1.0M" right after auto-compaction.
+        # Current context is input-only: fresh input + cache writes + cache
+        # reads. Prefer the per-component snapshot over totals, which older
+        # Claude Code versions could report cumulatively. A null snapshot is
+        # authoritative at startup / after compaction; don't revive old usage.
+        context_cache_read = 0
+        if 'current_usage' in api_context:
+            compact_tokens = (
+                api_current_usage.get('input_tokens', 0)
+                + api_current_cache_creation + api_current_cache_read
+            )
+            context_cache_read = api_current_cache_read
+        elif 'total_input_tokens' in api_context:
+            compact_tokens = api_input_tokens
+        else:
+            # Legacy payloads: the transcript parser keeps the latest response,
+            # not a cumulative total. Output is excluded here as in the API.
+            compact_tokens = input_tokens + cache_creation + cache_read
+            context_cache_read = cache_read
+
         if api_used_percentage is not None:
-            # Align compact_tokens with used_percentage (both = next-turn context fill).
-            compact_tokens = api_input_tokens + api_output_tokens
             percentage = min(100, round(api_used_percentage))
             percentage_of_full_context = True
         else:
-            # Fallback for pre-2.1.6 Claude Code: derive % from transcript cumulative tokens.
-            compact_tokens = total_tokens
             percentage = min(100, round((compact_tokens / api_context_size) * 100))
             percentage_of_full_context = False
-        
+
         # Get additional info
         active_files = len(workspace.get('active_files', []))
         task_status = data.get('task', {}).get('status', 'idle')
@@ -3759,13 +3766,9 @@ def main():
         # Calculate common values
         total_messages = user_messages + assistant_messages
 
-        # Calculate cache ratio (with API current_usage fallback)
-        cache_ratio = 0
-        eff_cache_read = cache_read if cache_read > 0 else api_current_cache_read
-        eff_cache_creation = cache_creation if cache_creation > 0 else api_current_cache_creation
-        if eff_cache_read > 0 or eff_cache_creation > 0:
-            all_tokens = compact_tokens + eff_cache_read + eff_cache_creation
-            cache_ratio = (eff_cache_read / all_tokens * 100) if all_tokens > 0 else 0
+        # Cache reads already belong to compact_tokens. Adding them again
+        # halves a nearly fully cached prompt's ratio and hides its badge.
+        cache_ratio = (context_cache_read / compact_tokens * 100) if compact_tokens > 0 else 0
 
         # Calculate block progress
         block_progress = 0

@@ -52,6 +52,8 @@ the curl install above, then remove the old package (`pip uninstall ccsl` or
 - **Line 3** — Session sparkline with 5-hour utilization, token count, time range, and the 5-hour window's metered spend
 - **Line 4** — Weekly sparkline with 7-day token distribution, remaining time, the 7-day window's metered spend, extra usage
 
+The context count and percentage both describe the current input prompt, including cache reads and writes. Response output is excluded; the cached percentage is the share of that same prompt read from cache. A null current snapshot after compaction clears the context display until Claude Code reports it again.
+
 Built for **1M context** — the context line scales to the active window size (e.g. `443K/1.0M`). A `(200K)` badge on the model marks a 1M-capable model running with a reduced window.
 
 ## Features
