@@ -2344,9 +2344,11 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
 
 
 def _fast_mode_multiplier(model_name="Unknown", model_id=""):
-    """Fast mode price / standard price. Fast mode runs only on Opus 5.5 ($8/$40),
-    Opus 5 and Opus 4.8 ($10/$50) — 2x each; cache pricing scales with it."""
+    """Fast mode doubles standard and cache prices for Fable 5.2, Opus 5.5,
+    Opus 5 and Opus 4.8; other models use standard rates."""
     haystack = f"{model_name} {model_id}".lower()
+    if "fable-5-2" in haystack or "fable 5.2" in haystack:
+        return 16.00 / 8.00
     if "opus-5-5" in haystack or "opus 5.5" in haystack:
         return 8.00 / 4.00
     if any(k in haystack for k in ("opus-5", "opus 5", "opus-4-8", "opus 4.8")):
