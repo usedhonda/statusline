@@ -2295,9 +2295,11 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     """
     haystack = f"{model_name} {model_id}".lower()
 
-    # --- Fable (new top tier above Opus, 2026) ---
+    # --- Fable 5.2: lower standard rates than Fable 5 / 5.1 ---
+    if "fable-5-2" in haystack or "fable 5.2" in haystack:
+        return 8.00, 40.00
     if "fable" in haystack:
-        return 10.00, 50.00  # Fable 5
+        return 10.00, 50.00  # Fable 5 / 5.1
 
     # --- Opus 5.5 (cheaper than Opus 5; cache reads $0.20, see _cache_read_rate) ---
     if "opus-5-5" in haystack or "opus 5.5" in haystack:
@@ -2342,9 +2344,11 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
 
 
 def _fast_mode_multiplier(model_name="Unknown", model_id=""):
-    """Fast mode price / standard price. Fast mode runs only on Opus 5.5 ($8/$40),
-    Opus 5 and Opus 4.8 ($10/$50) — 2x each; cache pricing scales with it."""
+    """Fast mode doubles standard and cache prices for Fable 5.2, Opus 5.5,
+    Opus 5 and Opus 4.8; other models use standard rates."""
     haystack = f"{model_name} {model_id}".lower()
+    if "fable-5-2" in haystack or "fable 5.2" in haystack:
+        return 16.00 / 8.00
     if "opus-5-5" in haystack or "opus 5.5" in haystack:
         return 8.00 / 4.00
     if any(k in haystack for k in ("opus-5", "opus 5", "opus-4-8", "opus 4.8")):
@@ -2355,11 +2359,14 @@ def _fast_mode_multiplier(model_name="Unknown", model_id=""):
 def _cache_read_rate(model_name, model_id, input_rate):
     """Cache-read rate per MTok. 0.10x of input unless the model has its own rate.
 
-    Claude Fable 5.1 reads cache at $0.25/MTok, not 0.10x of its $10 input
-    ($1.00), and Claude Opus 5.5 at $0.20, not 0.10x of its $4 ($0.40). Cache reads dominate Claude Code's token mix, so the flat
-    multiplier overstated its metered cost several times over.
+    Claude Fable 5.2 reads cache at $0.20/MTok (rather than $0.80 via the
+    default multiplier), Fable 5.1 at $0.25 (rather than $1.00), and Opus 5.5
+    at $0.20 (rather than $0.40). Cache reads dominate Claude Code's token
+    mix, so the default multiplier would overstate its metered cost.
     """
     haystack = f"{model_name} {model_id}".lower()
+    if "fable-5-2" in haystack or "fable 5.2" in haystack:
+        return 0.20
     if "fable-5-1" in haystack or "fable 5.1" in haystack:
         return 0.25
     if "opus-5-5" in haystack or "opus 5.5" in haystack:

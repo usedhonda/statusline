@@ -649,6 +649,43 @@ class TestLine1Badges:
         assert statusline.format_cache_badge({'warm': False, 'caching_observed': False}, now=now) == ""
 
 
+class TestFable52Pricing:
+    """Anthropic Nov 9, 2026 Fable 5.2 rates, including special cache and fast mode."""
+
+    def test_standard_input_output_both_name_and_model_id(self):
+        for model_name, model_id in [
+            ("Claude Fable 5.2", ""),
+            ("Unknown", "claude-fable-5-2"),
+            ("Fable 5.2 (1M context)", "claude-fable-5-2"),
+        ]:
+            assert statusline._resolve_model_rates(model_name, model_id) == (8.00, 40.00)
+            assert statusline.calculate_cost(
+                1_000_000, 1_000_000, 0, 0,
+                model_name=model_name, model_id=model_id,
+            ) == 48.00
+
+    def test_cache_reads_and_writes(self):
+        assert statusline.calculate_cost(
+            0, 0, 0, 1_000_000, model_id="claude-fable-5-2",
+        ) == 0.20
+        assert statusline.calculate_cost(
+            0, 0, 0, 0, model_id="claude-fable-5-2",
+            cache_creation_5m=1_000_000, cache_creation_1h=1_000_000,
+        ) == 26.00  # 5m $10 + 1h $16
+
+    def test_fast_mode_doubles_all_rates(self):
+        assert statusline.calculate_cost(
+            1_000_000, 1_000_000, 0, 1_000_000,
+            model_id="claude-fable-5-2", fast=True,
+        ) == 96.40  # ($8 + $40 + $0.20) * 2
+
+    def test_previous_fable_versions_not_repriced(self):
+        assert statusline._resolve_model_rates("Fable 5.1", "") == (10.00, 50.00)
+        assert statusline._resolve_model_rates("Fable 5", "") == (10.00, 50.00)
+        assert statusline.calculate_cost(0, 0, 0, 1_000_000, model_id="claude-fable-5-1") == 0.25
+        assert statusline.calculate_cost(0, 0, 0, 1_000_000, model_id="claude-fable-5") == 1.00
+
+
 class TestFable51CacheReadRate:
     """Fable 5.1 reads cache at $0.25/MTok, not 0.10x of its $10 input."""
 
