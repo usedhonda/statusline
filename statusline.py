@@ -67,6 +67,7 @@ AUTO_UPDATE_URL = "https://raw.githubusercontent.com/usedhonda/statusline/stable
 # below is a no-op when it isn't installed. Override with STATUSLINE_CCSTATUSBAR_BIN.
 CCSTATUSBAR_APP_SUPPORT = Path.home() / "Library" / "Application Support" / "CCStatusBar"
 CCSTATUSBAR_BIN = Path(os.environ.get("STATUSLINE_CCSTATUSBAR_BIN") or CCSTATUSBAR_APP_SUPPORT / "bin" / "CCStatusBar")
+CCSTATUSBAR_FORWARD_TIMEOUT = 0.25
 
 # Token compaction threshold - FALLBACK VALUE ONLY
 # Dynamic value is now calculated from API: context_window_size * 0.8
@@ -299,22 +300,20 @@ def _forward_to_ccstatusbar(input_data):
     Only CCStatusBar 1.10+ has a `statusline` subcommand. An older build treats
     an unknown argument as a normal launch and opens another menu-bar instance
     on every render, so forward only once keepwarm.json shows a new enough
-    build has run (1.10+ writes it at launch).
+    build has run (1.10+ writes it at launch). Bound the whole handoff: a stalled
+    companion must not block stdout before the status line has rendered.
+    subprocess.run kills and reaps the child on timeout.
     """
     try:
         if not CCSTATUSBAR_BIN.exists() or not (CCSTATUSBAR_APP_SUPPORT / "keepwarm.json").exists():
             return
-        proc = subprocess.Popen(
+        subprocess.run(
             [str(CCSTATUSBAR_BIN), "statusline"],
-            stdin=subprocess.PIPE,
+            input=input_data.encode("utf-8"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=CCSTATUSBAR_FORWARD_TIMEOUT,
         )
-        try:
-            proc.stdin.write(input_data.encode("utf-8"))
-            proc.stdin.close()
-        except Exception:
-            pass
     except Exception:
         pass
 

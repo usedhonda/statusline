@@ -2473,6 +2473,52 @@ class TestSmokeExtended:
         assert len(lines) <= 2, f"--show 1,2 should be <= 2 lines, got {len(lines)}"
 
 
+class TestCompanionForwarding:
+    def test_forwarding_is_bounded_and_uses_original_payload(self, tmp_path, monkeypatch):
+        executable = tmp_path / 'CCStatusBar'
+        executable.touch()
+        monkeypatch.setattr(statusline, 'CCSTATUSBAR_BIN', executable)
+        monkeypatch.setattr(statusline, 'CCSTATUSBAR_APP_SUPPORT', tmp_path)
+        payload = '{"model": {"display_name": "日本語"}}'
+        with patch.object(statusline.subprocess, 'run') as run:
+            statusline._forward_to_ccstatusbar(payload)
+            run.assert_not_called()  # older companion without capability marker
+            (tmp_path / 'keepwarm.json').write_text('{}', encoding='utf-8')
+            statusline._forward_to_ccstatusbar(payload)
+            assert run.call_args.args[0] == [str(executable), 'statusline']
+            assert run.call_args.kwargs['input'] == payload.encode('utf-8')
+            assert run.call_args.kwargs['timeout'] == statusline.CCSTATUSBAR_FORWARD_TIMEOUT
+
+    def test_stalled_companion_does_not_block_or_leave_child(self, tmp_path, monkeypatch):
+        # Run only a test-owned process: it never reads stdin, so the old pipe
+        # write deadlocks once the payload exceeds the pipe capacity.
+        executable = tmp_path / 'CCStatusBar'
+        executable.touch()
+        (tmp_path / 'keepwarm.json').write_text('{}', encoding='utf-8')
+        monkeypatch.setattr(statusline, 'CCSTATUSBAR_BIN', executable)
+        monkeypatch.setattr(statusline, 'CCSTATUSBAR_APP_SUPPORT', tmp_path)
+        real_popen = subprocess.Popen
+        children = []
+
+        def stalled_child(*args, **kwargs):
+            child = real_popen([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(statusline.subprocess, 'Popen', stalled_child)
+        try:
+            started = time.monotonic()
+            statusline._forward_to_ccstatusbar('x' * 1_048_576)
+            assert time.monotonic() - started < 3
+            assert len(children) == 1
+            assert children[0].poll() is not None
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=3)
+
+
 class TestKeepWarm:
     """Optional prompt-cache keep-alive: poke an idle session just before the cache goes cold."""
 
