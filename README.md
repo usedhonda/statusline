@@ -54,6 +54,28 @@ invalid `~/.claude/settings.json`; repair that file and rerun `--setup` if neede
 
 </details>
 
+## Updates and rollback
+
+File installations check the CI-approved `stable` branch at most every four
+hours. You can check immediately with:
+
+```bash
+python3 ~/.claude/statusline.py --update
+python3 ~/.claude/statusline.py --rollback
+```
+
+Updates and rollback share a process lock. Downloads are validated before
+installation, and an update only replaces the script after the previous
+version has been backed up successfully. A rollback clears the old download
+validator so the next explicit `--update` can fetch again.
+
+Set `STATUSLINE_AUTO_UPDATE=0` in the status-line command, or create
+`~/.claude/.statusline_no_update`, to disable automatic and explicit updates.
+Rollback remains available when updates are disabled. Symlinked development
+installs and package installs are not self-updated. The lock file remains on
+disk after a check; the operating system releases the lock when the process
+exits, including after a crash.
+
 ## What it shows
 
 - **Line 1** — Model with its reasoning effort (`·med`) and `⚡` in fast mode, directory, git branch, the open PR with its review state (`#17✓`), and the time the prompt cache goes cold (`🔥15:12`, `❄` once cold). Metered-billing models (e.g. Fable 5) and fast-mode turns add the cost of the latest turn and extra-usage credit consumption (Ext)
