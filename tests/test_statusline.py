@@ -1914,6 +1914,79 @@ class TestCalculateMeteredCostFromTranscript:
         # 5m write 12.5 + 1h write 20.0 + read 1.0 = 33.5
         assert abs(cost - 33.50) < 0.001
 
+    def test_metered_cost_reuses_transcript_cache_and_only_new_records(self, tmp_path):
+        usage = {'input_tokens': 1000000, 'output_tokens': 0}
+        msg = self._assistant('claude-fable-5', usage, uuid='u1', request_id='r1')
+        path = self._write_transcript(tmp_path, [
+            {'type': 'user', 'message': {'content': 'first'}}, msg,
+        ])
+        with open(path, 'a') as f:
+            f.write('\n')
+        cache = tmp_path / 'stats.json'
+        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache), \
+             patch.object(statusline, '_transcript_pricing_fingerprint', return_value='policy-a') as policy:
+            # main() calculates token stats before asking for metered cost.
+            statusline.calculate_tokens_from_transcript(path)
+            with patch.object(statusline, '_metered_usage_cost', wraps=statusline._metered_usage_cost) as price:
+                assert statusline.calculate_metered_cost_from_transcript(path) == 10.0
+                assert price.call_count == 0, 'the already parsed transcript was repriced'
+                with open(path, 'a') as f:
+                    # Another content block for the same response must stay deduped
+                    # even when it lands in a later redraw.
+                    f.write(json.dumps(msg) + '\n')
+                    f.write(json.dumps(self._assistant('claude-fable-5', usage, uuid='u2', request_id='r2')) + '\n')
+                assert statusline.calculate_metered_cost_from_transcript(path) == 20.0
+                assert price.call_count == 1
+                with open(path, 'a') as f:
+                    f.write(json.dumps({'type': 'user', 'message': {'content': 'second'}}) + '\n')
+                assert statusline.calculate_metered_cost_from_transcript(path) == 20.0
+                with open(path, 'a') as f:
+                    f.write(json.dumps(self._assistant('claude-fable-5', usage, uuid='u3', request_id='r3')) + '\n')
+                assert statusline.calculate_metered_cost_from_transcript(path) == 10.0
+                assert price.call_count == 2
+                # Pricing changes have shipped without a version bump. An
+                # unchanged transcript must be repriced after a source change.
+                version = statusline.__version__
+                policy.return_value = 'policy-b'
+                price.return_value = 25.0
+                assert statusline.calculate_metered_cost_from_transcript(path) == 25.0
+                assert statusline.__version__ == version
+                # Failure to fingerprint the source must never authorize reuse
+                # of an older cache, including a cache with the same None value.
+                policy.return_value = None
+                for changed_cost in (30.0, 35.0):
+                    price.return_value = changed_cost
+                    assert statusline.calculate_metered_cost_from_transcript(path) == changed_cost
+
+    def test_metered_cache_handles_partial_tail_and_replacement(self, tmp_path):
+        msg = self._assistant('claude-fable-5', {'input_tokens': 1000000, 'output_tokens': 0})
+        # Exercise a record longer than the scan chunk without a large fixture.
+        long_user = {'type': 'user', 'message': {'content': 'long-record-fixture ' * 128}}
+        path = self._write_transcript(tmp_path, [long_user, msg])
+        cache = tmp_path / 'stats.json'
+        with patch.object(statusline, '_get_transcript_stats_cache_file', return_value=cache), \
+             patch.object(statusline, 'TRANSCRIPT_SCAN_CHUNK', 64):
+            # A complete JSON record without its newline is displayed but is
+            # reread on completion, so it can never be permanently double-counted.
+            assert statusline.calculate_metered_cost_from_transcript(path) == 10.0
+            assert statusline.calculate_metered_cost_from_transcript(path) == 10.0
+            with open(path, 'a') as f:
+                f.write('\n' + json.dumps(msg)[:25])
+            assert statusline.calculate_metered_cost_from_transcript(path) == 10.0
+            with open(path, 'a') as f:
+                f.write(json.dumps(msg)[25:] + '\n')
+            assert statusline.calculate_metered_cost_from_transcript(path) == 20.0
+            replacement = tmp_path / 'replacement.jsonl'
+            replacement.write_text(json.dumps(msg) + '\n')
+            replacement.replace(path)
+            assert statusline.calculate_metered_cost_from_transcript(path) == 10.0
+            # Same inode and byte length must not preserve stale metered totals.
+            stamp = path.stat().st_mtime_ns
+            msg['message']['usage']['input_tokens'] = 2000000
+            path.write_text(json.dumps(msg) + '\n')
+            os.utime(path, ns=(stamp + 1000000, stamp + 1000000))
+            assert statusline.calculate_metered_cost_from_transcript(path) == 20.0
+
     def test_missing_transcript_returns_none(self, tmp_path):
         assert statusline.calculate_metered_cost_from_transcript(None) is None
         assert statusline.calculate_metered_cost_from_transcript(str(tmp_path / 'nope.jsonl')) is None
@@ -2785,11 +2858,13 @@ class TestEndToEndLoad:
         return json.dumps({
             'type': 'assistant', 'sessionId': sid, 'uuid': f'{sid}-{i}',
             'requestId': f'req-{sid}-{i}', 'timestamp': ts,
-            'message': {'id': f'msg-{sid}-{i}', 'model': 'claude-opus-5-5',
+            'message': {'id': f'msg-{sid}-{i}',
+                        'model': 'claude-fable-5-1' if int(sid[-1]) % 2 else 'claude-opus-5-5',
                         'content': [{'type': 'text', 'text': 'ok'}],
                         'usage': {'input_tokens': 10, 'output_tokens': 20,
                                   'cache_creation_input_tokens': 0,
-                                  'cache_read_input_tokens': 1000}},
+                                  'cache_read_input_tokens': 1000,
+                                  'speed': 'standard' if int(sid[-1]) % 2 else 'fast'}},
         }) + '\n'
 
     def _setup(self, tmp_path):
@@ -2808,7 +2883,9 @@ class TestEndToEndLoad:
                     ts = (now - timedelta(minutes=60) + timedelta(seconds=i * 10)).isoformat()
                     f.write(self._line(sid, i, ts.replace('+00:00', 'Z')))
             stdin = {'session_id': sid, 'transcript_path': str(path),
-                     'model': {'id': 'claude-opus-5-5', 'display_name': 'Opus 5.5'},
+                     'model': {'id': 'claude-fable-5-1' if n % 2 else 'claude-opus-5-5',
+                               'display_name': 'Fable 5.1' if n % 2 else 'Opus 5.5'},
+                     'fast_mode': n % 2 == 0,
                      'workspace': {'current_dir': str(tmp_path)}, 'cwd': str(tmp_path)}
             if n % 2 == 0:  # half the sessions haven't received rate_limits yet
                 stdin['rate_limits'] = {
