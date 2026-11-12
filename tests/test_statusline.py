@@ -443,6 +443,41 @@ class TestCalculateCost:
         )
         assert abs(cost - 0.20) < 0.001
 
+    def test_haiku_5_5_prompt_tiers(self):
+        # The threshold includes cache reads/writes, but excludes output.
+        # All token classes switch together immediately above 100,000 input.
+        for name, model_id in [
+            ('Claude Haiku 5.5', ''),
+            ('Unknown', 'claude-haiku-5-5'),
+            ('Claude Haiku 5.5', 'claude-haiku-5-5'),
+        ]:
+            for fresh, expected in [(1, 0.0714999), (2, 0.3575)]:
+                cost = statusline.calculate_cost(
+                    fresh, 125000, 999999, 50000, name, model_id,
+                    cache_creation_5m=20000, cache_creation_1h=29999,
+                    prompt_tokens=fresh + 20000 + 29999 + 50000,
+                )
+                assert abs(cost - expected) < 1e-10, (name, model_id, fresh, cost)
+
+    def test_haiku_5_5_unknown_prompt_uses_conservative_tier(self):
+        # An aggregate must not be mistaken for one small prompt.
+        cost = statusline.calculate_cost(
+            10000, 10000, 20000, 30000, model_id='claude-haiku-5-5',
+        )
+        assert abs(cost - 0.044) < 1e-10
+
+    def test_request_prompt_tokens_requires_complete_single_request(self):
+        usage = {'input_tokens': 1, 'output_tokens': 50000,
+                 'cache_creation_input_tokens': 49999, 'cache_read_input_tokens': 50000}
+        assert statusline._request_prompt_tokens(usage) == 100000
+        assert statusline._request_prompt_tokens(dict(usage, iterations=[{'type': 'message'}])) == 100000
+        assert statusline._request_prompt_tokens(dict(usage, iterations=[
+            {'type': 'message'}, {'type': 'message'},
+        ])) is None
+        del usage['cache_read_input_tokens']
+        assert statusline._request_prompt_tokens(usage) is None
+        assert statusline._request_prompt_tokens({}) is None
+
     def test_haiku_4_5_pricing(self):
         cost = statusline.calculate_cost(
             input_tokens=1_000_000, output_tokens=100_000,
@@ -895,6 +930,22 @@ class TestSmoke:
         plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
         assert '[40%] 400.0K/1.0M' in plain
         assert '90% cached' in plain
+
+    def test_haiku_cost_fallback_uses_current_request(self):
+        # Exercise the displayed fallback rather than just its rate table.
+        data = json.dumps({
+            'agent': {'name': 'pricing-fixture'},
+            'model': {'id': 'claude-haiku-5-5', 'display_name': 'Haiku 5.5'},
+            'cost': {'total_cost_usd': 0},
+            'context_window': {
+                'context_window_size': 1000000,
+                'current_usage': {'input_tokens': 100000, 'output_tokens': 100000,
+                                  'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0},
+            },
+        })
+        result = self._run(data)
+        self._assert_output(result)
+        assert '$0.06' in result.stdout
 
     def test_empty_input(self):
         result = self._run("")

@@ -13,7 +13,7 @@ Session: ▆█▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [9%] 44.6M
 Weekly:  ▃▆▄▁▁▂▅█▇▃▂▁▁▁▁▁▁▁▁▁ [23%] 3d9h43m
 ```
 
-With a metered-billing model (e.g. Fable 5), or in fast mode, Line 1 also carries the cost of the latest turn and extra-usage credit (`$7.36 | Ext 23% $11.50/$50`), and Lines 3–4 add each window's metered spend.
+For Fable models or fast mode, Line 1 also carries the estimated API cost of the latest turn and reported extra-usage credit (`$7.36 | Ext 23% $11.50/$50`), and Lines 3–4 add each window's metered spend.
 
 ## Install
 
@@ -78,7 +78,7 @@ exits, including after a crash.
 
 ## What it shows
 
-- **Line 1** — Model with its reasoning effort (`·med`) and `⚡` in fast mode, directory, git branch, the open PR with its review state (`#17✓`), and the time the prompt cache goes cold (`🔥15:12`, `❄` once cold). Metered-billing models (e.g. Fable 5) and fast-mode turns add the cost of the latest turn and extra-usage credit consumption (Ext)
+- **Line 1** — Model with its reasoning effort (`·med`) and `⚡` in fast mode, directory, git branch, the open PR with its review state (`#17✓`), and the time the prompt cache goes cold (`🔥15:12`, `❄` once cold). Fable models and fast-mode turns add the estimated API cost of the latest turn and reported extra-usage credit consumption (Ext)
 - **Line 2** — Context window token usage with progress bar and cache ratio
 - **Line 3** — Session sparkline with 5-hour utilization, token count, time range, and the 5-hour window's metered spend
 - **Line 4** — Weekly sparkline with 7-day token distribution, remaining time, the 7-day window's metered spend, extra usage
@@ -89,13 +89,30 @@ Built for **1M context** — the context line scales to the active window size (
 
 ## Features
 
-- Metered-model cost tracking — models billed via usage credits (Fable 5), and fast-mode turns on Opus at their fast rates, show what the latest turn cost, computed per-message so mixed sessions only count the metered share
+- Cost estimates for Fable models and fast-mode turns on Opus — computed per message at the applicable API rates; mixed sessions count only this share
 - Context window progress bar with color warnings (yellow 80%, red 90%)
 - 5-hour session sparkline (20 segments, 15min each)
 - Weekly usage sparkline with remaining time and budget tracking
 - Responsive layout adapting to terminal width and height
 - Agent team support with single-line format and dead agent warnings
 - Schedule integration showing upcoming calendar events
+
+## Cost estimates
+
+Claude Code's reported session cost takes priority. Local token-based fallbacks
+use the public model prices, rather than an invoice amount. Fable subscription
+coverage depends on your plan and seat tier, which this script cannot infer from
+token counts; its Fable dollar display is an API-equivalent estimate, not proof
+that usage credits were debited. The Ext field uses Claude Code's reported
+credit data when available. Haiku 5.5 is priced
+per request: prompts up to 100,000 tokens use the lower tier; longer prompts use
+the higher tier. Fresh input, cache writes, and cache reads all count toward
+that threshold; output does not. When a complete single-request snapshot is
+unavailable (including aggregate iteration counts), the fallback uses the higher
+Haiku 5.5 tier as a conservative estimate. It never infers a cheap tier from
+session totals. Existing Haiku 4.5/3.5 and other model rates are unchanged.
+
+Rates checked on 2026-11-09 against the [official pricing table](https://platform.claude.com/docs/en/about-claude/pricing#long-context-pricing).
 
 ## Customize
 

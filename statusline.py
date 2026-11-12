@@ -2312,7 +2312,33 @@ def detect_active_periods(messages, idle_threshold=5*60):
 
 # REMOVED: get_time_progress_bar() - unused function (replaced by get_progress_bar)
 
-def _resolve_model_rates(model_name="Unknown", model_id=""):
+def _is_haiku_55(model_name="Unknown", model_id=""):
+    return bool(re.search(r'\bhaiku(?:-5-5| 5\.5)(?![\d.])', f"{model_name} {model_id}".lower()))
+
+
+def _request_prompt_tokens(usage):
+    """Return a complete single-request input count, or None if uncertain.
+
+    Missing fields and multi-iteration totals cannot establish a request's
+    pricing tier. Do not treat an aggregate as a single long or short prompt.
+    """
+    if not isinstance(usage, dict):
+        return None
+    iterations = usage.get('iterations')
+    if iterations is not None:
+        if not isinstance(iterations, list):
+            return None
+        requests = [i for i in iterations if isinstance(i, dict) and i.get('type') in ('message', 'fallback_message')]
+        if len(requests) != 1:
+            return None
+    fields = ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+    values = [usage.get(field) for field in fields]
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in values):
+        return None
+    return sum(values)
+
+
+def _resolve_model_rates(model_name="Unknown", model_id="", prompt_tokens=None):
     """Resolve (input_rate, output_rate) per MTok from Anthropic public pricing.
 
     Snapshot: Anthropic pricing page (2026). Cache multipliers are applied separately.
@@ -2330,7 +2356,15 @@ def _resolve_model_rates(model_name="Unknown", model_id=""):
     if "opus-5-5" in haystack or "opus 5.5" in haystack:
         return 4.00, 20.00
 
-    # --- Haiku ---
+    # --- Haiku 5.5 (official prices checked 2026-11-09) ---
+    # All input categories count toward the threshold; output does not.
+    # Without a known per-request prompt size, use the conservative high tier.
+    if _is_haiku_55(model_name, model_id):
+        if prompt_tokens is not None and 0 <= prompt_tokens <= 100000:
+            return 0.10, 0.50
+        return 0.50, 2.50
+
+    # --- Earlier Haiku models ---
     if "haiku-4-5" in haystack or "haiku 4.5" in haystack:
         return 1.00, 5.00     # Haiku 4.5
     if "haiku-3-5" in haystack or "haiku 3.5" in haystack:
@@ -2403,7 +2437,8 @@ def _cache_read_rate(model_name, model_id, input_rate):
 
 def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
                    model_name="Unknown", model_id="",
-                   cache_creation_5m=None, cache_creation_1h=None, fast=False):
+                   cache_creation_5m=None, cache_creation_1h=None, fast=False,
+                   prompt_tokens=None):
     """Estimate cost in USD from token usage.
 
     Rates are USD per million tokens (Anthropic public pricing snapshot, 2026).
@@ -2420,8 +2455,12 @@ def calculate_cost(input_tokens, output_tokens, cache_creation, cache_read,
             and bill 5m/1h separately. When only one is given, the other defaults
             to 0; when both are None, the legacy `cache_creation` path is used.
         fast: the turn ran in fast mode (usage.speed == "fast").
+        prompt_tokens: known input length of ONE request, including fresh input,
+            cache writes and cache reads (not output or session totals). Haiku
+            5.5 uses the over-100K price when this is unknown, as a conservative
+            estimate rather than guessing a cheap tier from incomplete data.
     """
-    input_rate, output_rate = _resolve_model_rates(model_name, model_id)
+    input_rate, output_rate = _resolve_model_rates(model_name, model_id, prompt_tokens)
     cache_5m_rate = input_rate * 1.25
     cache_1h_rate = input_rate * 2.00
     cache_read_rate = _cache_read_rate(model_name, model_id, input_rate)
@@ -2570,6 +2609,7 @@ def _metered_usage_cost(model, usage):
         cache_creation_5m=cache_5m,
         cache_creation_1h=cache_1h,
         fast=fast,
+        prompt_tokens=_request_prompt_tokens(usage),
     )
     if _INCLUDE_ADVISOR_ITERATIONS:
         for it in _advisor_iterations(usage):
@@ -2582,6 +2622,7 @@ def _metered_usage_cost(model, usage):
                 model_name=it.get('model') or model,
                 cache_creation_5m=a_5m,
                 cache_creation_1h=a_1h,
+                prompt_tokens=_request_prompt_tokens(it),
             )
     return cost
 
@@ -2731,9 +2772,9 @@ def format_cache_badge(prompt_cache, now=None):
 def is_metered_model(model, model_id=""):
     """従量課金 (usage credits) で請求されるモデルか。
 
-    Fable 5 はサブスク (Pro/Max/Team/Ent) の包含対象外で、利用分が
-    extra usage クレジットから引き落とされる (2026-06-22 でサブスク込み終了)。
-    サブスクへ再包含されたら fable をここから外すだけでよい。
+    Fable をローカルの API 相当コスト見積りの対象とする。
+    サブスク包含の有無はプラン・座席に依存し、トークン記録からは判定できない。
+    この分類は usage credits の実際の引き落としを保証するものではない。
     """
     haystack = f"{model} {model_id}".lower()
     return 'fable' in haystack
@@ -3800,8 +3841,22 @@ def main():
         if api_total_cost > 0:
             session_cost = api_total_cost
         else:
-            # Fallback to manual calculation if API cost unavailable
-            session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model, model_id)
+            request_prompt_tokens = _request_prompt_tokens(api_current_usage)
+            if _is_haiku_55(model, model_id) and request_prompt_tokens is not None:
+                # Claude Code's current_usage is a single context snapshot;
+                # use all of its input components to choose Haiku's price.
+                _, c5, c1, cr = extract_cache_breakdown(api_current_usage)
+                session_cost = calculate_cost(
+                    api_current_usage.get('input_tokens', 0),
+                    api_current_usage.get('output_tokens', 0) or 0,
+                    0, cr, model, model_id,
+                    cache_creation_5m=c5, cache_creation_1h=c1,
+                    prompt_tokens=request_prompt_tokens,
+                )
+            else:
+                # Legacy transcript totals do not establish the per-request
+                # prompt length. Haiku 5.5 therefore uses its conservative tier.
+                session_cost = calculate_cost(input_tokens, output_tokens, cache_creation, cache_read, model, model_id)
 
         # 従量モデル (Fable 等): 直前ターンの従量分だけを transcript から積算。
         # transcript が読めなければ非表示 (累計値で誤解させるより隠す)
