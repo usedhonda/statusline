@@ -734,8 +734,7 @@ STATUSLINE_PATH = os.path.join(
 
 
 class TestDoSetup:
-    """do_setup() の statusLine command 選択。
-    pip/brew は PATH の `ccsl`、curl/手動は file 直叩き (self-update が効く)。"""
+    """Setup selects this installation even during migration from pip/brew."""
 
     def _run_setup(self, tmp_path, ccsl_on_path):
         settings = tmp_path / '.claude' / 'settings.json'
@@ -745,13 +744,17 @@ class TestDoSetup:
             statusline.do_setup()
         return json.loads(settings.read_text())['statusLine']['command']
 
-    def test_uses_path_command_when_ccsl_installed(self, tmp_path):
-        assert self._run_setup(tmp_path, ccsl_on_path=True) == 'ccsl'
+    def test_uses_current_install_when_retired_ccsl_is_on_path(self, tmp_path):
+        import shlex
+        argv = [sys.executable, STATUSLINE_PATH]
+        expected = subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv)
+        assert self._run_setup(tmp_path, ccsl_on_path=True) == expected
 
-    def test_uses_file_command_when_not_on_path(self, tmp_path):
-        cmd = self._run_setup(tmp_path, ccsl_on_path=False)
-        assert cmd.startswith('python3 ')
-        assert cmd.endswith('statusline.py')
+    def test_uses_current_python_without_ccsl_on_path(self, tmp_path):
+        import shlex
+        argv = [sys.executable, STATUSLINE_PATH]
+        expected = subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv)
+        assert self._run_setup(tmp_path, ccsl_on_path=False) == expected
 
 
 class TestWatchSchemaDrift:

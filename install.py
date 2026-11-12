@@ -1,92 +1,64 @@
 #!/usr/bin/env python3
-"""Statusline Installer - Deploy to Claude Code"""
+"""Statusline Installer - Deploy to Claude Code."""
 
-import json
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-# Reuse hook helpers from the bundled statusline.py to keep behavior in sync.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from statusline import _add_schedule_hooks, _verify_schedule_hooks  # noqa: E402
+if sys.version_info < (3, 9):
+    raise SystemExit("Error: Python 3.9+ required")
 
-COMMAND = "~/.claude/statusline.py"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from statusline import do_setup  # noqa: E402
 
 
 def main():
-    if shutil.which("ccsl"):
-        print("ccsl is already on PATH (pip/brew installed).")
-        print("Run: ccsl --setup")
-        sys.exit(0)
+    source = Path(__file__).resolve().with_name("statusline.py")
+    if not source.is_file():
+        raise SystemExit(f"Error: statusline.py not found beside {__file__}")
 
-    if sys.version_info < (3, 7):
-        print("Error: Python 3.7+ required")
-        sys.exit(1)
-
-    source = Path("statusline.py")
-    if not source.exists():
-        print("Error: statusline.py not found in current directory")
-        sys.exit(1)
-
-    # Install
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(exist_ok=True)
     target = claude_dir / "statusline.py"
-    shutil.copy2(source, target)
-    target.chmod(0o755)
+    if target.is_symlink():
+        raise SystemExit(f"Refusing to replace the development symlink: {target}")
+
+    fd, temporary = tempfile.mkstemp(dir=str(claude_dir), suffix='.py.tmp')
+    os.close(fd)
+    try:
+        shutil.copyfile(source, temporary)
+        os.chmod(temporary, 0o755)
+        os.replace(temporary, target)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
     print(f"Installed to {target}")
 
-    # Configure settings.json
-    settings_path = claude_dir / "settings.json"
-    statusline_config = {"type": "command", "command": COMMAND, "padding": 0, "refreshInterval": 5000}
+    # Share settings merging, quoting, and hooks with the curl --setup path.
+    if not do_setup(script_path=target):
+        raise SystemExit(1)
 
-    settings = {}
-    if settings_path.exists():
-        try:
-            with open(settings_path, encoding='utf-8') as f:
-                settings = json.load(f)
-        except json.JSONDecodeError:
-            print(f"Warning: invalid JSON in {settings_path}, creating backup")
-            shutil.copy2(settings_path, settings_path.with_suffix('.json.backup'))
-            settings = {}
-
-    # Merge statusLine (preserve user customizations)
-    existing_sl = settings.get('statusLine', {})
-    if isinstance(existing_sl, dict):
-        existing_sl.update(statusline_config)
-        settings['statusLine'] = existing_sl
-    else:
-        settings['statusLine'] = statusline_config
-
-    # Add Stop hook for schedule idle guard
-    _add_schedule_hooks(settings)
-
-    with open(settings_path, 'w', encoding='utf-8') as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-
-    ok, missing = _verify_schedule_hooks(settings_path)
-    if not ok:
-        print(f"WARNING: Schedule hooks not registered correctly: {', '.join(missing)}",
-              file=sys.stderr)
-    print(f"Settings updated: {settings_path}")
-
-    # Auto-update opt-in/out
     no_update_file = claude_dir / ".statusline_no_update"
+    disabled = no_update_file.exists()
+    default = 'n' if disabled else 'y'
     try:
-        answer = input("\nEnable auto-update? [Y/n]: ").strip().lower()
+        answer = input("\nEnable auto-update? " + ("[y/N]: " if disabled else "[Y/n]: ")).strip().lower()
     except (KeyboardInterrupt, EOFError):
         answer = ''
+    answer = answer or default
     if answer in ('n', 'no'):
         no_update_file.touch()
         print("Auto-update disabled. Re-enable: rm ~/.claude/.statusline_no_update")
-    else:
-        if no_update_file.exists():
-            no_update_file.unlink()
+    elif answer in ('y', 'yes'):
+        no_update_file.unlink(missing_ok=True)
         print("Auto-update enabled.")
+    else:
+        print("Auto-update preference unchanged.")
 
-    print("\nRestart Claude Code to see the status line.")
-    print(f"Manual test: echo '{{\"session_id\":\"test\"}}' | {COMMAND}")
-    print(f"Check updates: {COMMAND} --update")
 
 if __name__ == "__main__":
     main()
