@@ -42,6 +42,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import time
 import hashlib
+import stat
 
 # CONSTANTS
 
@@ -386,6 +387,31 @@ Colors = Colors()
 def strip_ansi(text):
     """ANSIエスケープコードを除去"""
     return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
+_DISPLAY_ESCAPE_RE = re.compile(
+    r'(?:\x1b\]|\x9d)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)'
+    r'|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)'
+    r'|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]'
+    r'|\x1b[ -/]*[@-~]'
+)
+_BIDI_CONTROLS = {'LRE', 'RLE', 'LRO', 'RLO', 'PDF', 'LRI', 'RLI', 'FSI', 'PDI'}
+
+
+def sanitize_display_text(value):
+    """Keep external labels on one line, without terminal control sequences.
+
+    Apply before adding our own ANSI styling or measuring/truncating labels.
+    Calendar titles, filesystem names and agent labels are data, even when
+    they contain escape sequences. Preserve ordinary Unicode and emoji joins.
+    """
+    text = _DISPLAY_ESCAPE_RE.sub('', str(value))
+    return ''.join(
+        ' ' if char.isspace() else char
+        for char in text
+        if (char.isspace() or unicodedata.category(char) not in ('Cc', 'Cs'))
+        and unicodedata.bidirectional(char) not in _BIDI_CONTROLS
+    )
 
 def get_display_width(text):
     """表示幅を計算（絵文字/CJK対応）
@@ -2208,9 +2234,9 @@ def format_schedule_line(event, terminal_width):
     if event['is_all_day']:
         time_part = "終日"
     else:
-        time_part = event['time']
+        time_part = sanitize_display_text(event['time'])
 
-    summary = event['summary']
+    summary = sanitize_display_text(event['summary'])
 
     # Build the line: 📅 14:00 summary (in Xm)
     prefix = f"📅 {time_part} "
@@ -2596,6 +2622,7 @@ def shorten_model_name(model, tight=False):
     display_name に生の model id が来る CC バージョンにも対応
     （"claude-fable-5[1m]" → "Fable 5"）
     """
+    model = sanitize_display_text(model)
     import re
     # 生 model id 形式の正規化: "claude-opus-4-7[1m]" → "Opus 4.7", "claude-fable-5" → "Fable 5",
     # "claude-haiku-4-5-20251001" → "Haiku 4.5" (日付 suffix は捨てる)
@@ -2678,7 +2705,7 @@ def format_pr_badge(pr):
     if not isinstance(pr, dict) or not pr.get('number'):
         return ""
     mark, color = _PR_REVIEW_MARKS.get(pr.get('review_state') or '', ('', 'BRIGHT_WHITE'))
-    return f"{getattr(Colors, color)}#{pr['number']}{mark}{Colors.RESET}"
+    return f"{getattr(Colors, color)}#{sanitize_display_text(pr['number'])}{mark}{Colors.RESET}"
 
 
 def format_cache_badge(prompt_cache, now=None):
@@ -2760,14 +2787,14 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     # Directory (before git branch)
     if include_dir:
-        dir_name = ctx['current_dir']
+        dir_name = sanitize_display_text(ctx['current_dir'])
         if max_dir_len and len(dir_name) > max_dir_len:
             dir_name = truncate_text(dir_name, max_dir_len)
         parts.append(f"{Colors.BRIGHT_CYAN}📁 {dir_name}{Colors.RESET}")
 
     # Git branch (no untracked files count)
     if ctx['git_branch']:
-        branch = ctx['git_branch']
+        branch = sanitize_display_text(ctx['git_branch'])
         if max_branch_len and len(branch) > max_branch_len:
             branch = truncate_text(branch, max_branch_len)
         git_display = f"{Colors.BRIGHT_GREEN}🌿 {branch}"
@@ -2811,13 +2838,38 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
 
     return parts
 
+DEAD_AGENTS_FILE = Path('/tmp/tproj-dead-agents')
+DEAD_AGENTS_MAX_BYTES = 16 * 1024
+
+
 def get_dead_agents():
-    """Read dead agents file written by team-watcher"""
+    """Read a bounded, same-user regular file from the legacy watcher path.
+
+    The shared temporary directory is not trusted. Validate the open file
+    descriptor and use nonblocking/no-follow flags so a FIFO or symlink cannot
+    stall a redraw or make us read a different user's data.
+    """
     try:
-        with open('/tmp/tproj-dead-agents', 'r') as f:
-            agents = [line.strip() for line in f if line.strip()]
-            return agents
-    except (FileNotFoundError, PermissionError):
+        before = DEAD_AGENTS_FILE.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return []
+        flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(DEAD_AGENTS_FILE, flags)
+        with os.fdopen(fd, 'rb') as f:
+            info = os.fstat(f.fileno())
+            if ((info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                    or not stat.S_ISREG(info.st_mode) or info.st_size > DEAD_AGENTS_MAX_BYTES):
+                return []
+            if hasattr(os, 'geteuid') and info.st_uid != os.geteuid():
+                return []
+            if info.st_mode & 0o022:
+                return []
+            raw = f.read(DEAD_AGENTS_MAX_BYTES + 1)
+        if len(raw) > DEAD_AGENTS_MAX_BYTES:
+            return []
+        agents = [sanitize_display_text(line).strip() for line in raw.decode('utf-8', errors='replace').splitlines()]
+        return [name for name in agents if name]
+    except (OSError, ValueError):
         return []
 
 def format_agent_line(ctx, agent_name):
@@ -2825,7 +2877,7 @@ def format_agent_line(ctx, agent_name):
     parts = []
 
     # Agent name
-    parts.append(f"{Colors.BRIGHT_MAGENTA}\U0001F916 {agent_name}{Colors.RESET}")
+    parts.append(f"{Colors.BRIGHT_MAGENTA}\U0001F916 {sanitize_display_text(agent_name)}{Colors.RESET}")
 
     # Model
     model_name = shorten_model_name(ctx['model'])
@@ -3026,10 +3078,10 @@ def format_output_compact(ctx):
             line1_parts = []
             line1_parts.append(format_model_badge(ctx, tight=True))
 
-            line1_parts.append(f"{Colors.BRIGHT_CYAN}{ctx['current_dir']}{Colors.RESET}")
+            line1_parts.append(f"{Colors.BRIGHT_CYAN}{sanitize_display_text(ctx['current_dir'])}{Colors.RESET}")
 
             if ctx['git_branch']:
-                branch = ctx['git_branch']
+                branch = sanitize_display_text(ctx['git_branch'])
                 if len(branch) > 10:
                     branch = truncate_text(branch, 10)
                 git_display = f"{Colors.BRIGHT_GREEN}{branch}"
@@ -3162,7 +3214,7 @@ def format_output_tight(ctx):
             line1_parts.append(format_model_badge(ctx, tight=True))
 
             if ctx['git_branch']:
-                branch = ctx['git_branch']
+                branch = sanitize_display_text(ctx['git_branch'])
                 if len(branch) > 10:
                     branch = truncate_text(branch, 10)
                 git_display = f"{Colors.BRIGHT_GREEN}{branch}"
@@ -3554,7 +3606,6 @@ def main():
         # Context window percentage (v2.1.6+ feature)
         # These are pre-calculated by Claude Code and more accurate than manual calculation
         api_used_percentage = api_context.get('used_percentage')  # v2.1.6+
-        api_remaining_percentage = api_context.get('remaining_percentage')  # v2.1.6+
 
         # Dynamic compaction threshold (80% of context window)
         compaction_threshold = api_context_size * 0.8
@@ -3741,10 +3792,6 @@ def main():
         if metered:
             metered_cost = calculate_metered_cost_from_transcript(data.get('transcript_path')) or 0
         
-        # Format displays - use API tokens for Compact line
-        token_display = format_token_count(compact_tokens)
-        percentage_color = get_percentage_color(percentage)
-
         # ========================================
         # RESPONSIVE DISPLAY MODE SYSTEM
         # ========================================
@@ -3971,12 +4018,21 @@ def main():
         sys.stdout.write(f"{Colors.LIGHT_GRAY}Check ~/.claude/statusline-error.log{Colors.RESET}\n")
         sys.stdout.flush()
         
-        # Debug logging with traceback
-        import traceback
-        with open(Path.home() / '.claude' / 'statusline-error.log', 'a') as f:
-            f.write(f"{datetime.now()}: {e}\n")
-            f.write(traceback.format_exc() + "\n")
-            f.write(f"Input data: {locals().get('input_data', 'No input')}\n\n")
+        # Error diagnostics are not an opt-in stdin dump. Future/unknown input
+        # fields and exception messages can contain private values, so record
+        # only the exception type and stack locations (no locals or messages).
+        # Full input remains available through STATUSLINE_DUMP_STDIN above.
+        try:
+            import traceback
+            log_file = Path.home() / '.claude' / 'statusline-error.log'
+            fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(f"{datetime.now()}: {type(e).__name__}\n")
+                for frame in traceback.extract_tb(e.__traceback__):
+                    f.write(f"  {Path(frame.filename).name}:{frame.lineno} in {frame.name}\n")
+                f.write("Input values omitted; use STATUSLINE_DUMP_STDIN for an explicit diagnostic dump.\n\n")
+        except OSError:
+            pass  # Logging failure must not break the fallback already printed.
 
 def calculate_tokens_since_time(start_time, session_id):
     """📊 SESSION LINE SYSTEM: Calculate tokens for current session only

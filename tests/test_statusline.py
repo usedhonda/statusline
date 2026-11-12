@@ -874,6 +874,34 @@ class TestSmoke:
         # Should not crash (empty input is valid — shows default state)
         assert result.returncode == 0
 
+    def test_error_log_omits_input_and_dump_remains_opt_in(self, tmp_path, monkeypatch):
+        directory = tmp_path / '.claude'
+        directory.mkdir()
+        monkeypatch.setenv('HOME', str(tmp_path))
+        monkeypatch.setenv('STATUSLINE_CCSTATUSBAR_BIN', str(tmp_path / 'absent'))
+        monkeypatch.delenv('STATUSLINE_DUMP_STDIN', raising=False)
+        sentinel = 'TEST_ONLY_PRIVATE_VALUE_12345'
+        # A schema error in one field must not copy unrelated private fields.
+        payload = json.dumps({'cost': None, 'integration_token': sentinel})
+        result = self._run(payload)
+        self._assert_output(result)
+        log = directory / 'statusline-error.log'
+        assert 'AttributeError' in log.read_text()
+        assert sentinel not in log.read_text()
+        if os.name != 'nt':
+            assert log.stat().st_mode & 0o777 == 0o600
+
+        dump = tmp_path / 'explicit-debug.log'
+        monkeypatch.setenv('STATUSLINE_DUMP_STDIN', str(dump))
+        self._assert_output(self._run(payload))
+        assert sentinel in dump.read_text()
+        assert sentinel not in log.read_text()
+
+        # An unavailable error log must not turn the safe fallback into a crash.
+        log.unlink()
+        log.mkdir()
+        self._assert_output(self._run(payload))
+
     def test_minimal_input(self):
         data = json.dumps({"model": {"display_name": "Opus 4.6"}})
         result = self._run(data)
@@ -1587,6 +1615,31 @@ class TestBuildLine1Parts:
         branch_pos = joined.index('main')
         assert dir_pos < branch_pos, "Directory should appear before git branch"
 
+    def test_external_labels_are_sanitized_in_every_layout(self):
+        # Printable Unicode survives; controls from a path/model/branch cannot
+        # add lines or terminal commands. Exercise the independent formatters.
+        label = '安全👩\u200d💻\x1b[31m\x1b[2J\x1b]52;c;payload\x07\n\r\t\x00\x9b2J\u202e'
+        ctx = self._make_ctx(model=label, current_dir=label, git_branch=label,
+                             pr={'number': label}, show_line1=True,
+                             show_line2=False, show_line3=False, show_line4=False)
+        outputs = [' '.join(statusline.build_line1_parts(ctx)),
+                   *statusline.format_output_compact(ctx),
+                   *statusline.format_output_tight(ctx),
+                   statusline.format_agent_line(dict(ctx, percentage=40), label)]
+        for output in outputs:
+            assert '安全' in output
+            assert not any(c in output for c in ('\x1b', '\x07', '\x00', '\x9b', '\n', '\r', '\t', '\u202e'))
+            assert 'payload' not in output
+        assert '👩\u200d💻' in outputs[0]
+
+    def test_sanitizing_labels_preserves_our_own_colors(self, monkeypatch):
+        monkeypatch.delenv('NO_COLOR', raising=False)
+        monkeypatch.delenv('STATUSLINE_NO_COLOR', raising=False)
+        result = statusline.format_model_badge({'model': '\x1b[2JClaude Opus 4.6'})
+        assert statusline.Colors.BRIGHT_YELLOW in result
+        assert '\x1b[2J' not in result
+        assert statusline.strip_ansi(result) == '[Opus 4.6]'
+
     def test_all_flags_false(self):
         ctx = self._make_ctx()
         parts = statusline.build_line1_parts(
@@ -2219,7 +2272,7 @@ class TestFormatScheduleLine:
     def test_normal_event(self):
         event = {
             'time': '14:00',
-            'summary': 'Meeting',
+            'summary': 'Meeting\x1b]0;title\x1b\\\x1b[2J\nnext\tline\x07\u2028',
             'minutes_until': 30,
             'is_all_day': False,
         }
@@ -2229,6 +2282,9 @@ class TestFormatScheduleLine:
         assert '14:00' in clean
         assert 'Meeting' in clean
         assert '30m' in clean
+        assert 'Meeting next line' in clean
+        assert not any(c in clean for c in ('\x1b', '\x07', '\n', '\t', '\u2028'))
+        assert 'title' not in clean
 
     def test_narrow_width_truncates(self):
         event = {
@@ -2273,16 +2329,38 @@ class TestAgentFunctions:
         assert 'researcher' in clean
         assert 'Sonnet 4.6' in clean
 
-    def test_get_dead_agents_no_file(self):
-        with patch('builtins.open', side_effect=FileNotFoundError):
-            assert statusline.get_dead_agents() == []
-
-    def test_get_dead_agents_with_file(self, tmp_path):
+    def test_get_dead_agents_with_file(self, tmp_path, monkeypatch):
         dead_file = tmp_path / 'tproj-dead-agents'
-        dead_file.write_text('agent-1\nagent-2\n')
-        with patch('builtins.open', return_value=open(dead_file, 'r')):
-            agents = statusline.get_dead_agents()
-        assert agents == ['agent-1', 'agent-2']
+        monkeypatch.setattr(statusline, 'DEAD_AGENTS_FILE', dead_file)
+        assert statusline.get_dead_agents() == []
+        dead_file.write_text('agent-1\x1b[2J\n\x1b]0;hidden\x07agent-2\n', encoding='utf-8')
+        dead_file.chmod(0o600)
+        assert statusline.get_dead_agents() == ['agent-1', 'agent-2']
+
+    def test_get_dead_agents_rejects_untrusted_files(self, tmp_path, monkeypatch):
+        dead_file = tmp_path / 'tproj-dead-agents'
+        monkeypatch.setattr(statusline, 'DEAD_AGENTS_FILE', dead_file)
+        target = tmp_path / 'private-data'
+        target.write_text('do not read', encoding='utf-8')
+        dead_file.symlink_to(target)
+        assert statusline.get_dead_agents() == []
+        dead_file.unlink()
+        dead_file.mkdir()
+        assert statusline.get_dead_agents() == []
+        dead_file.rmdir()
+        if hasattr(os, 'mkfifo'):
+            os.mkfifo(dead_file)
+            assert statusline.get_dead_agents() == []
+            dead_file.unlink()
+        dead_file.write_bytes(b'x' * (statusline.DEAD_AGENTS_MAX_BYTES + 1))
+        assert statusline.get_dead_agents() == []
+        dead_file.write_text('agent', encoding='utf-8')
+        dead_file.chmod(0o666)
+        assert statusline.get_dead_agents() == []
+        dead_file.chmod(0o600)
+        if hasattr(os, 'geteuid'):
+            monkeypatch.setattr(statusline.os, 'geteuid', lambda: target.stat().st_uid + 1)
+            assert statusline.get_dead_agents() == []
 
 
 # ============================================
