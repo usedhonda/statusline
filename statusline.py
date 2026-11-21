@@ -1995,25 +1995,45 @@ def generate_real_burn_timeline(block_stats, current_block, api_block_start_utc=
 
     return timeline
 
+def _resolve_git_dir(dot_git):
+    """Return the real git dir: `.git` itself, or the `gitdir:` target of a worktree/submodule `.git` file."""
+    if dot_git.is_dir():
+        return dot_git
+    with open(dot_git, 'r') as f:
+        line = f.readline().strip()
+    if not line.startswith('gitdir:'):
+        return None
+    target = Path(line[len('gitdir:'):].strip())
+    if not target.is_absolute():
+        target = dot_git.parent / target
+    return target
+
+
 def get_git_info(directory):
-    """Get git branch and status"""
+    """Get git branch and status.
+
+    Returns (branch, modified, untracked). The counts are None when git status
+    did not finish (timeout/error) so the display can show "?" instead of a
+    misleading 0.
+    """
     try:
-        git_dir = Path(directory) / '.git'
-        if not git_dir.exists():
+        dot_git = Path(directory) / '.git'
+        if not dot_git.exists():
             return None, 0, 0
-        
-        # Get branch
+
+        # Get branch (plain file read: no git process, no locks)
         branch = None
-        head_file = git_dir / 'HEAD'
-        if head_file.exists():
+        git_dir = _resolve_git_dir(dot_git)
+        head_file = git_dir / 'HEAD' if git_dir else None
+        if head_file and head_file.exists():
             with open(head_file, 'r') as f:
                 head = f.read().strip()
                 if head.startswith('ref: refs/heads/'):
                     branch = head.replace('ref: refs/heads/', '')
-        
-        # Get detailed status
+
+        # Get detailed status. Every git call must pass --no-optional-locks:
+        # a status killed by the timeout must never leave .git/index.lock behind.
         try:
-            # Check for uncommitted changes
             result = subprocess.run(
                 ['git', '--no-optional-locks', 'status', '--porcelain'],
                 cwd=directory,
@@ -2021,15 +2041,17 @@ def get_git_info(directory):
                 text=True,
                 timeout=1
             )
-            
+            if result.returncode != 0:
+                return branch, None, None
+
             changes = result.stdout.strip().split('\n') if result.stdout.strip() else []
             modified = len([c for c in changes if c.startswith(' M') or c.startswith('M')])
             added = len([c for c in changes if c.startswith('??')])
-            
+
             return branch, modified, added
-        except:
-            return branch, 0, 0
-            
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return branch, None, None
+
     except Exception:
         return None, 0, 0
 
@@ -2871,7 +2893,9 @@ def build_line1_parts(ctx, max_branch_len=20, max_dir_len=None,
         if max_branch_len and len(branch) > max_branch_len:
             branch = truncate_text(branch, max_branch_len)
         git_display = f"{Colors.BRIGHT_GREEN}🌿 {branch}"
-        if ctx['modified_files'] > 0:
+        if ctx['modified_files'] is None:
+            git_display += f" {Colors.BRIGHT_YELLOW}M?"
+        elif ctx['modified_files'] > 0:
             git_display += f" {Colors.BRIGHT_YELLOW}M{ctx['modified_files']}"
         git_display += Colors.RESET
         parts.append(git_display)
@@ -3158,9 +3182,11 @@ def format_output_compact(ctx):
                 if len(branch) > 10:
                     branch = truncate_text(branch, 10)
                 git_display = f"{Colors.BRIGHT_GREEN}{branch}"
-                if ctx['modified_files'] > 0:
+                if ctx['modified_files'] is None:
+                    git_display += " M?"
+                elif ctx['modified_files'] > 0:
                     git_display += f" M{ctx['modified_files']}"
-                if ctx['untracked_files'] > 0:
+                if ctx['untracked_files'] is not None and ctx['untracked_files'] > 0:
                     git_display += f"+{ctx['untracked_files']}"
                 git_display += Colors.RESET
                 line1_parts.append(git_display)
@@ -3291,7 +3317,9 @@ def format_output_tight(ctx):
                 if len(branch) > 10:
                     branch = truncate_text(branch, 10)
                 git_display = f"{Colors.BRIGHT_GREEN}{branch}"
-                if ctx['modified_files'] > 0 or ctx['untracked_files'] > 0:
+                if ctx['modified_files'] is None:
+                    git_display += " M?"
+                elif ctx['modified_files'] > 0 or ctx['untracked_files'] > 0:
                     git_display += f" M{ctx['modified_files']}+{ctx['untracked_files']}"
                 git_display += Colors.RESET
                 line1_parts.append(git_display)

@@ -1445,8 +1445,36 @@ class TestGetGitInfo:
             branch, modified, untracked = statusline.get_git_info(str(tmp_path))
 
         assert branch == 'feature-x'
+        assert modified is None  # unknown, rendered as "M?" rather than a false 0
+        assert untracked is None
+
+    def test_worktree_git_file_branch(self, tmp_path):
+        main_git = tmp_path / 'main' / '.git'
+        wt_git_dir = main_git / 'worktrees' / 'feat'
+        wt_git_dir.mkdir(parents=True)
+        (wt_git_dir / 'HEAD').write_text('ref: refs/heads/feat-branch\n')
+        wt = tmp_path / 'wt'
+        wt.mkdir()
+        (wt / '.git').write_text(f'gitdir: {wt_git_dir}\n')
+
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(stdout='', returncode=0)
+            branch, modified, untracked = statusline.get_git_info(str(wt))
+
+        assert branch == 'feat-branch'
         assert modified == 0
-        assert untracked == 0
+
+    def test_every_git_call_skips_optional_locks(self):
+        """A killed git process must never leave index.lock behind."""
+        import ast
+        src = Path(statusline.__file__).read_text()
+        calls = [n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.List) and n.elts
+                 and isinstance(n.elts[0], ast.Constant) and n.elts[0].value == 'git']
+        assert calls, "expected at least one git invocation"
+        for node in calls:
+            assert (len(node.elts) > 1 and isinstance(node.elts[1], ast.Constant)
+                    and node.elts[1].value == '--no-optional-locks'), f"line {node.lineno}"
 
     def test_detached_head(self, tmp_path):
         git_dir = tmp_path / '.git'
